@@ -1,0 +1,361 @@
+{
+ "_template_note": "Mission setup skeleton for fof.py. Keys and enum values are the engine's (German) data names, see GLOSSARY.md. Every '<...>' must be replaced with values from YOUR OWN copy of the game. No GMT text is included on purpose.",
+ "mission": "<Campaign, mission number and title, Mission Book pages>",
+ "typ": "offensiv",
+ "_typ_values": [
+  "offensiv",
+  "defensiv"
+ ],
+ "einzelzug": false,
+ "sicht": "tag",
+ "_sicht_values": [
+  "tag",
+  "eingeschraenkt"
+ ],
+ "aktivitaet": "No Contact",
+ "max_zuege": 10,
+ "ziel": "<mission objective in your own words>",
+ "ziel_regeln": {},
+ "kampagne": {
+  "name": "<campaign name>",
+  "mission_nr": 1,
+  "versuch": 1,
+  "versuche_max": 3,
+  "ersatz_green": 0,
+  "veteran_je_casualties": 0,
+  "log": {
+   "datum": "<dates>",
+   "feind": "<enemy formation>",
+   "taktik": "<enemy tactics>",
+   "feind_erfahrung": "<Green|Line|Veteran>",
+   "karte": "<map size>",
+   "reattempt": "<reattempt rule>"
+  },
+  "xp_tabelle": {
+   "primaer": 0,
+   "sekundaer": 0,
+   "ap": 0,
+   "pc_a_karte": 0,
+   "pc_bc_karte": 0,
+   "gefangene_step": 0,
+   "feind_casualty_step": 0,
+   "pb_granate": 0,
+   "hq_ereignis_stern": 0,
+   "evakuiert": 0,
+   "cp_primaer": 0,
+   "cp_route": 0,
+   "cp_erfolg": 0
+  },
+  "xp_hinweis": "<fill in from your own Mission Book>"
+ },
+ "co_hq": "CO HQ",
+ "bn_hq": "off-map",
+ "co_immer_in_kommunikation": false,
+ "co_immer_in_kommunikation_mit": [],
+ "funk_aktiv": true,
+ "co_tac_mittel": "funk",
+ "moerser_wahl": null,
+ "feind_taktik": "<Deliberate|Hasty|...>",
+ "feind_gruppe": "<enemy troop type>",
+ "granate_vof": -4,
+ "feuermissionen": {
+  "<Agency 1> HE": 0,
+  "<Agency 1> Illum": 0
+ },
+ "fm_werte": {
+  "<Agency 1> HE": 0,
+  "<Agency 1> Illum": 0
+ },
+ "fm_gruppe": {
+  "<Agency 1> HE": "<battery name>",
+  "<Agency 1> Illum": "<battery name>"
+ },
+ "cff_karten": 2,
+ "cff_beobachter": {
+  "Arty FO": 0,
+  "CO HQ": 0
+ },
+ "cff_tabelle": {
+  "<Agency 1> HE": {
+   "Arty FO": 0,
+   "CO HQ": 0
+  }
+ },
+ "fm_hinweis": "<fill in from your own Mission Book>",
+ "assets_pool": {
+  "<asset type>": 0
+ },
+ "assets_hinweis": "<fill in from your own Mission Book>",
+ "pyro_belegung": {},
+ "pyro_hinweis": "<fill in from your own Mission Book>",
+ "telefon_leitungen": 0,
+ "telefon_hinweis": "<fill in from your own Mission Book>",
+ "rifle_grenade_reichweite": "C",
+ "rifle_grenade_hinweis": "<fill in from your own Mission Book>",
+ "runner_start": 0,
+ "runner_hinweis": "<fill in from your own Mission Book>",
+ "ziele": {
+  "primaer": null,
+  "cop": null,
+  "ccp": null,
+  "route": {},
+  "phaselines": {}
+ },
+ "ziele_hinweis": "<fill in from your own Mission Book>",
+ "reserve_einheiten": {},
+ "terrain_katalog": {
+  "<terrain type>": {
+   "cc": 0,
+   "cover_max": 0,
+   "cover_draw": 0,
+   "raender": "weiss",
+   "quelle": "<your source>"
+  }
+ },
+ "gebaeude_tabelle": {
+  "_quelle": "<fill in from your own Mission Book>",
+  "<terrain type with buildings>": {
+   "<R# range>": "<cover type>"
+  }
+ },
+ "cover_werte": {
+  "Basic Cover": 1,
+  "Foxholes": 1,
+  "<other cover>": 0
+ },
+ "cover_hinweis": "<fill in from your own Mission Book>",
+ "richtung_tabelle": {
+  "spalte": 8,
+  "<R# range>": "Front",
+  "<R# range 2>": "Left Front",
+  "<R# range 3>": "Right Front"
+ },
+ "countermix": {
+  "<enemy counter name>": 1
+ },
+ "countermix_hinweis": "null = count unknown, the tool assumes 1",
+ "pakete": {
+  "<package no>": {
+   "name": "<package name>",
+   "place_vof": true,
+   "spotted": false,
+   "r_platz": {
+    "1-2": "pb",
+    "3-10": "max",
+    "spalte": 10
+   },
+   "einheiten": [
+    {
+     "einheit": "<enemy counter name>",
+     "typ": "Weapons Team",
+     "vof_rating": "<S|A|A/S|H|G>",
+     "reichweite": "<P|C|L|V>",
+     "steps": 1,
+     "fire_team_seite": true,
+     "ft_vof": "<VOF>",
+     "ft_reichweite": "<range>",
+     "munition": {
+      "typ": "MG",
+      "punkte": 0,
+      "start": 0
+     },
+     "hinweis": "<fill in from your own Mission Book>",
+     "cover": "Foxholes",
+     "cover_wert": 1,
+     "platz": "r",
+     "spotted": false,
+     "erfahrung": "<Green|Line|Veteran>"
+    }
+   ],
+   "hinweis": "<fill in from your own Mission Book>"
+  }
+ },
+ "paket_tabelle": {
+  "PC A": {
+   "<package no>": "<R# range>/10"
+  },
+  "PC B": {},
+  "PC C": {}
+ },
+ "ereignistabellen": {
+  "spalte": 10,
+  "freund": [
+   {
+    "id": "comm_trouble",
+    "r": {
+     "<turns>": "<R# range>"
+    },
+    "stern": true,
+    "text": "<event text from your Mission Book>"
+   }
+  ],
+  "feind": [
+   {
+    "id": "rally",
+    "r": {
+     "<turns>": "<R# range>"
+    },
+    "text": "<event text from your Mission Book>"
+   }
+  ],
+  "_supported_ids": [
+   "ammo_resupply",
+   "artillery_displacing",
+   "checking_up",
+   "comm_trouble",
+   "company_ahead",
+   "counter_attack",
+   "evacuate",
+   "fall_back",
+   "hold_up",
+   "lost_dark",
+   "raining",
+   "rally",
+   "screaming",
+   "screaming_route",
+   "shifting_lines",
+   "situation_report",
+   "trouble_flank",
+   "displace_mortars",
+   "displace_leaders",
+   "displace_hmgs"
+  ]
+ },
+ "sonderregeln": {},
+ "optionen": {
+  "U1_remove_pc_no_action": false,
+  "U9_ziel_lesart": "a",
+  "U9_reattempt": true,
+  "U14_telefon_diagonal": true,
+  "U15_leitung_automatisch": true,
+  "U16_erste_commands_mit_gespart": true,
+  "U17_gegenangriff_staging": false,
+  "U18_fall_back_rand_offmap": true,
+  "U19_erweitern_bis_reichweite": false,
+  "U20_mine_bei_seek_cover": true,
+  "U21_pyro_alle_einheiten": true,
+  "U22_munition_leer_im_clean_up": true,
+  "U24_assault_in_staging": true,
+  "U27_mtr_sec_nicht_fa": true,
+  "U28_gegenangriff_alle_pc_a": true,
+  "U29_ein_target_marker_he_wp": true
+ },
+ "kartenschema": "<how card numbers map to rows and columns>",
+ "hinweis": "<your notes>",
+ "_unverifiziert": [],
+ "einheiten": {
+  "CO HQ": {
+   "seite": "US",
+   "erfahrung": "Veteran",
+   "karte": null,
+   "bereich": "offen",
+   "status": [],
+   "steps": 1,
+   "ziel": null,
+   "typ": "HQ",
+   "ebene": "CO",
+   "platoon": null,
+   "fire_team_seite": true,
+   "ft_vof": "S",
+   "vof_rating": null,
+   "reichweite": "L",
+   "funk": [
+    {
+     "typ": "SCR300",
+     "netz": "BN TAC"
+    },
+    {
+     "typ": "SCR536",
+     "netz": "CO TAC"
+    }
+   ]
+  },
+  "1st PLT HQ": {
+   "seite": "US",
+   "erfahrung": "Veteran",
+   "karte": null,
+   "bereich": "offen",
+   "status": [],
+   "steps": 1,
+   "ziel": null,
+   "typ": "HQ",
+   "ebene": "PLT",
+   "platoon": "1",
+   "fire_team_seite": true,
+   "ft_vof": "S",
+   "vof_rating": null,
+   "reichweite": "L",
+   "funk": [
+    {
+     "typ": "SCR536",
+     "netz": "CO TAC"
+    }
+   ]
+  },
+  "1/1": {
+   "seite": "US",
+   "erfahrung": "Line",
+   "karte": null,
+   "bereich": "offen",
+   "status": [],
+   "steps": 3,
+   "ziel": null,
+   "typ": "Squad",
+   "platoon": "1",
+   "vof_rating": "S",
+   "reichweite": "L",
+   "letzter_step": "Fire Team"
+  },
+  "<more units>": {}
+ },
+ "karten": {
+  "11": {
+   "terrain": null,
+   "cc": null,
+   "cover_max": null,
+   "cover_draw": null,
+   "raender": null,
+   "hinweis": "<note>",
+   "reihe": 1,
+   "spalte": 1,
+   "cover": [
+    {
+     "id": "C1",
+     "typ": "Foxholes",
+     "wert": 1,
+     "feld": true
+    },
+    {
+     "id": "C2",
+     "typ": "Foxholes",
+     "wert": 1,
+     "feld": true
+    }
+   ]
+  },
+  "<more cards: row+column>": {}
+ },
+ "pc_marker_gesamt": {
+  "A": 0,
+  "B": 0,
+  "C": 0
+ },
+ "bataillon_fm": [],
+ "mtr_team_de": {},
+ "patrouille_mission": false,
+ "licht": null,
+ "wetter": 0,
+ "illum_werte": {
+  "<Agency> Illum": {
+   "oben": 0,
+   "unten": 0
+  },
+  "Handheld Illumination": {
+   "oben": 0,
+   "unten": null
+  }
+ },
+ "pc_zufall": {},
+ "mlr_reihe": null,
+ "counter_vof": {}
+}

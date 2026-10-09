@@ -1,0 +1,14 @@
+{
+ "_hinweis": "Action card archive, transcribed by the player from his own deck (no card data ships with this kit). One entry per card number. Fields: commands (helmet number), initiative (small number in the star), attempt (word/symbol top right), symbole (icons), at, combat (NCM -4..+6 -> HIT/PIN/MISS), hit_effect (Vet/Line/Green letters), zufall (random number columns '2'..'12' = R2..R12).",
+ "<card number>": {
+  "commands": 0,
+  "initiative": 0,
+  "attempt": "<Rally|Cover|...>",
+  "symbole": ["<Burst|Crosshairs|HQ (Funk)|...>"],
+  "at": 0,
+  "combat": {"-4": "<HIT|PIN|MISS>", "-3": "", "-2": "", "-1": "", "0": "", "+1": "", "+2": "", "+3": "", "+4": "", "+5": "", "+6": ""},
+  "hit_effect": {"Vet": "<letters>", "Line": "<letters>", "Green": "<letters>"},
+  "zufall": {"2": 0, "3": 0, "4": 0, "5": 0, "6": 0, "7": 0, "8": 0, "9": 0, "10": 0, "11": 0, "12": 0},
+  "herkunft": "<photo/date>"
+ }
+}
