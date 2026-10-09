@@ -1,0 +1,12 @@
+# Rule texts and game data built from your own copy of the game (copyright GMT Games), never commit them
+data/*
+!data/README.txt
+# Game folders and state
+*/spielstand.json
+*/BRIEFING.md
+.aktuelle_partie
+partie*/
+game*/
+# Python
+__pycache__/
+*.pyc
