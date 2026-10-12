@@ -8,9 +8,13 @@ which rule applies and which markers to place.
 Unofficial fan project. Not affiliated with or endorsed by GMT Games. No rule text, card data or mission data is
 included; you need your own copy of the game and its PDFs.
 
+**New here and not a programmer?** Read [GETTING_STARTED.md](GETTING_STARTED.md): download, give the AI the folder,
+paste the first prompt.
+
 ## What is in the kit
 | path | content |
 |---|---|
+| `GETTING_STARTED.md` | step-by-step for players without programming background, with the first prompt to paste |
 | `AI_BRIEFING.md` | the working contract for the AI (roles, "tool first", answer format, shorthand). Give it to the AI first. |
 | `tool/fof.py` | command-line entry point; `fof.py help` lists the commands, `fof.py help <command>` shows one |
 | `tool/fof/` | the engine as a package: `rules` (tables), `state`, `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
