@@ -12,7 +12,9 @@ included; you need your own copy of the game and its PDFs.
 | path | content |
 |---|---|
 | `AI_BRIEFING.md` | the working contract for the AI (roles, "tool first", answer format, shorthand). Give it to the AI first. |
-| `tool/fof.py` | the engine: game state, sequence of play, action checks, VOF/PDF/Crossfire, NCM, enemy activity, PC markers, fire missions, campaign/reattempt |
+| `tool/fof.py` | command-line entry point; `fof.py help` lists the commands, `fof.py help <command>` shows one |
+| `tool/fof/` | the engine as a package: `rules` (tables), `state`, `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
+| `tests/` | unit tests on a synthetic board (`python3 -m pytest tests`), no game data needed |
 | `tool/build_rules_index.py` | builds the rule text index from your own rulebook PDF, used by `fof.py rule <no>` |
 | `templates/mission_template.json` | skeleton of a mission setup (fill it from your Mission Book) |
 | `templates/action_cards_template.json` | skeleton of an action card archive (optional, for ":NN" card lookups) |
@@ -30,13 +32,14 @@ included; you need your own copy of the game and its PDFs.
 5. **Probe, then book.** The AI tests each step in a scratch copy of the game folder first, then books it for real.
 
 ## Requirements
-- Python 3.9 or newer, no extra packages.
+- Python 3.9 or newer, no extra packages (pytest only for the tests, ruff only for formatting: `ruff format`, `ruff check`).
 - `pdftotext` (poppler-utils) only for building the rule index.
 
 ## Setup
 ```
 project/
-  tool/fof.py
+  tool/fof.py            <- entry point
+  tool/fof/*.py          <- engine package
   tool/build_rules_index.py
   data/            <- rule texts built from your PDFs (not included)
   <game folders>   <- created by `fof.py new`
@@ -49,8 +52,9 @@ project/
 4. Before turn 1 the tool lists what is still missing (terrain per card, objectives, setup positions, visibility ...).
    Fill those in with `terrain`, `setup`, `objective`, `visibility`, then `phase next` starts the game.
 
-## Commands (English; the German originals also work)
-Run `python3 tool/fof.py` without arguments for the full list. Most used:
+## Commands
+`python3 tool/fof.py help` prints the command list, `help <command>` the usage of one command. English names
+and the German originals both work. Most used:
 ```
 status | check | rule <no> | search <term> | options
 phase next | event ? yes <R#> | event ? no

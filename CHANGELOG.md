@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-12 (restructuring, same behaviour)
+Verified with two state-based regression games (454 commands): identical exit codes and identical final game
+states before and after every step.
+- One engine package `tool/fof/` (16 modules) instead of a 9000-line file; `tool/fof.py` is the entry point.
+- English identifiers for functions, constants, parameters and locals (4560 renames); JSON keys and stored values
+  stay German (GLOSSARY.md), so existing game states keep working.
+- `ruff format` (line length 120) and `ruff check` clean; `pyproject.toml`.
+- The 550-line order function is one handler per action class (`ORDER_HANDLERS`), enemy actions one handler per
+  result (`ENEMY_ACTION_HANDLERS`), phase changes and enemy placement split into smaller functions.
+- `lateorder` counts the Commands an HQ already spent from the game state instead of parsing protocol text; no more
+  monkeypatching of the save function.
+- One `COMMANDS` table drives dispatch, English aliases and the new `help` command; a missing file is a
+  VIOLATION line instead of a traceback.
+- `messages.py` holds the output vocabulary (ALLOWED, VIOLATION, Board, Note, CHECKSTAMP) and the rule citation
+  format; `Violation(msg, rule=...)`.
+- `tests/`: unit tests on a synthetic board (geometry, LOS, VOF, Commands, CLI), no game data needed.
+
 Internal change numbers (L..) refer to the gap list kept during play. Rule references are Series Rules 3rd Edition
 (page numbers) and the Normandy Campaign Book (CSR/MSR).
 

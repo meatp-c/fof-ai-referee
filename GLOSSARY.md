@@ -1,8 +1,9 @@
-# Glossary: German names inside the engine
+# Glossary: German names inside the game state
 
-The engine was written in German. All output and the command line are English (German command names still work),
-but **internal identifiers, JSON keys and stored values are German**. An AI reading the code or the game state
-JSON needs this table. Do not translate these keys in your setup files, the engine looks them up literally.
+The engine was written in German. Code (function and variable names), output and the command line are English
+(German command names still work), but **JSON keys and stored values are German** so that existing game states
+and setup files keep working. An AI reading the game state JSON or writing a setup file needs this table.
+Do not translate these keys in your setup files, the engine looks them up literally.
 
 ## Game state / setup keys (`spielstand.json`, setup JSON)
 | key | meaning |

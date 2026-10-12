@@ -35,6 +35,8 @@ VOF, PDF, Crossfire and Activity Level are derived by the tool from the units' f
   number applies (activated HQ = helmet number, HQ on Initiative = small number in the star).
 - Rules questions: `fof.py rule <no>` prints the rule text with page (from the player's own PDF, see README),
   `fof.py search <term>` searches all texts. Always check the clarifications.
+- Unsure about a command: `fof.py help` lists them, `fof.py help <command>` prints the usage. The output words
+  (ALLOWED, VIOLATION, Board, Note, CHECKSTAMP) are defined in `tool/fof/messages.py`.
 - When the tool is wrong or missing something: **fix the tool immediately** (backup copy, entry in a changelog and in a
   gap list), then re-run. Do not book things by hand around the tool.
 
