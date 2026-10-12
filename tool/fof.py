@@ -15,6 +15,10 @@ Usage:  python3 tool/fof.py <command> [...]   (run from the project folder; Germ
   card <no> <helmet number> [--raw] Command Draw (4.1.2)
   gi <no> <initiative number> [--skill-from=<HQ>]   General Initiative (3.3.2d), optional skill General Initiative
   order <hq|GI> <unit> <action> [--target=K] [--success=yes|no] [--area=<cover-id|open>] [--skill=<Auto ...|Extra Draw>]
+  lateorder <hq> <unit> <action> [...]   forgotten order of an HQ whose impulse already ended this turn (L78)
+  correct casualty <card> <+n|-n> [--side=Feind|US] --reason=..   fix a wrong booking (L80)
+  correct status <unit> <marker> remove|add --reason=..   set or remove a status marker afterwards (L83)
+  correct grenade <unit> expired <origin card> --reason=.. | correct ammo <unit> <+n|-n> --reason=.. | correct target <unit> <card> --reason=..
                                     [--originator=<hq>] [--team=Fire|Assault] [--squad=<name>] [--unit=<target unit>]
                                     [--agency=81mm|105mm] [--short=yes] [--place=K] [--what=Casualty|<device>]
   done                              end the impulse
@@ -35,6 +39,7 @@ Indirect Lay 4.2.4j), Call for Fire with several firing agencies, Short, Target 
 directional card edges, bunker fire arc and capacity, multiple packages, Casualty Collection Point (4.2.1l).
 Open rules questions are options in the setup JSON ("optionen") and appear in output as [open Ux].
 New in v4 (Normandy campaign, normandy/aenderungen_fof_v4.md):
+  multistory <card>                     record the Multi-Story symbol of a card, add the Upper Story marker (5.3.3)
   terrain <card> <type> [--no=..] [--hill=n] [--edges=top:white,..] [--cc=..]   enter a random card (2.2.1)
   extend <row> <column> <type> [...]   map extension (8.4.5), off-limits to US outside the boundaries
   objective primary|secondary|ap|ccp <card> | objective phaseline <n> <row>   Tactical Controls (2.4.1)
@@ -235,8 +240,96 @@ def speichern(s, eintrag=None, regel=None):
     briefing(s)
 
 
+# ---------------------------------------------------------------- English command-line aliases
+# The engine was written in German. Every command, sub-word, option and value below has an English alias;
+# the German originals keep working. Internal identifiers and JSON keys stay German (see GLOSSARY.md).
+CMD_ALIASES = {
+    "new": "neu", "rule": "regel", "search": "suche", "status": "stand", "check": "pruefung",
+    "phase": "phase", "activate": "aktivieren", "hq": "hq", "card": "karte", "gi": "gi", "order": "befehl",
+    "done": "fertig", "fire": "feuer", "enemycheck": "feindcheck", "enemyaction": "feindaktion", "pc": "pc",
+    "external": "extern", "enemy": "feind", "ncm": "ncm", "note": "notiz", "hit": "treffer", "endturn": "rundenende",
+    "setup": "aufstellen", "radio": "funk", "drop": "ablegen", "options": "optionen", "terrain": "terrain",
+    "extend": "erweitern", "objective": "ziel", "set": "werte", "event": "ereignis", "mine": "mine", "sniper": "sniper",
+    "line": "leitung", "runner": "runner", "ammo": "munition", "capture": "gefangen", "xp": "xp",
+    "reattempt": "reattempt", "reconstitute": "rekon", "campaign": "kampagne", "visibility": "sicht", "illum": "illum",
+    "patrol": "patrouille", "lateorder": "nachtrag", "correct": "korrektur", "multistory": "mehrstoeckig",
+}
+SUBWORD_ALIASES = {   # per (German) command: English positional word -> German word
+    "phase": {"next": "weiter"},
+    "patrouille": {"next": "naechste"},
+    "reattempt": {"done": "fertig"},
+    "xp": {"add": "plus", "spend": "ausgeben"},
+    "pc": {"reveal": "aufdecken", "set": "setzen", "clear": "frei", "contact": "kontakt"},
+    "ziel": {"primary": "primaer", "secondary": "sekundaer", "concentration": "konzentration"},
+    "leitung": {"lay": "legen"},
+    "funk": {"check": "pruefen", "damage": "schaden", "intact": "heil", "destroyed": "zerstoert"},
+    "feuer": {"off": "aus"},
+    "extern": {"remove": "weg"}, "feind": {"remove": "weg"}, "illum": {"remove": "weg"},
+    "munition": {"depot": "lager"},
+    "ereignis": {"yes": "ja", "no": "nein"},
+    "mine": {"yes": "ja", "no": "nein"},
+    "korrektur": {"grenade": "granate", "ammo": "munition", "target": "ziel", "expired": "verfallen", "remove": "weg", "add": "dazu"},
+}
+OPT_ALIASES = {
+    "--target": "--ziel", "--success": "--erfolg", "--unit": "--einheit", "--net": "--netz", "--area": "--bereich",
+    "--value": "--wert", "--mortar": "--moerser", "--place": "--platz", "--free": "--gratis", "--agency": "--agentur",
+    "--edges": "--raender", "--building": "--gebaeude", "--building-value": "--gebaeude_wert", "--experience": "--erfahrung",
+    "--who": "--wer", "--type": "--typ", "--move-target-marker": "--target", "--skill-from": "--skill-von", "--no": "--nr",
+    "--to": "--nach", "--with": "--mit", "--lines": "--leitungen", "--device": "--geraet", "--from": "--aus",
+    "--extra": "--zusatz", "--what": "--was", "--choice": "--wahl", "--source": "--von", "--variant": "--variante",
+    "--raw": "--roh", "--direction": "--richtung", "--range": "--reichweite", "--origin": "--quelle",
+    "--this-turn-only": "--nur_zug", "--line": "--leitung", "--grenade": "--granate", "--at": "--bei",
+    "--battalion": "--bataillon", "--reason": "--grund", "--side": "--seite",
+}
+VALUE_ALIASES = {"yes": "ja", "no": "nein", "open": "offen", "Left": "Links", "Right": "Rechts", "none": "keiner",
+                 "radio": "funk", "phone": "telefon", "section": "sektion"}
+
+
+def argv_deutsch(argv):
+    """Translate an English command line into the engine's German command line (German input passes unchanged)."""
+    if not argv:
+        return argv
+    cmd = CMD_ALIASES.get(argv[0], argv[0])
+    sub = SUBWORD_ALIASES.get(cmd, {})
+    out = [cmd]
+    for a in argv[1:]:
+        if a.startswith("--"):
+            k, eq, v = a.partition("=")
+            k = OPT_ALIASES.get(k, k)
+            if eq and k == "--raender":
+                for en_, de_ in (("top", "oben"), ("bottom", "unten"), ("left", "links"), ("right", "rechts"),
+                                 ("white", "weiss"), ("green", "gruen"), ("dark", "gruen"), ("corner", "diagonal")):
+                    v = v.replace(en_, de_)
+            elif eq:
+                v = ",".join(VALUE_ALIASES.get(x, x) for x in v.split(",")) if k in ("--richtung",) else VALUE_ALIASES.get(v, v)
+            out.append(k + eq + v)
+        else:
+            out.append(sub.get(a, a))
+    return out
+
+
+_OPT_BEKANNT = None
+
+
 def opts_parse(args):
-    return {a.split("=")[0]: a.split("=", 1)[1] for a in args if a.startswith("--") and "=" in a}
+    """L72: never ignore unknown options silently (M3 turn 5: --agency instead of --agentur led to a wrong LOS check)."""
+    global _OPT_BEKANNT
+    if _OPT_BEKANNT is None:
+        import re as _re
+        _src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        _OPT_BEKANNT = (set(_re.findall(r'(--[a-z_0-9]+)', _src)) | {"--" + w for w in _re.findall(r'"([a-z_0-9]+)"', _src)}
+                        | set(OPT_ALIASES.values()))                      # also options assembled as f"--{field}"
+    o = {}
+    for a in args:
+        if not a.startswith("--"):
+            continue
+        k, v = (a.split("=", 1) + [None])[:2] if "=" in a else (a, None)
+        k = OPT_ALIASES.get(k, k)
+        if k not in _OPT_BEKANNT:
+            raise Verstoss(f"Unknown option {k}; nothing booked")
+        if v is not None:
+            o[k] = v
+    return o
 
 
 # ---------------------------------------------------------------- Basic helpers
@@ -452,7 +545,22 @@ def sicht_karte(s, kid):
     return l + w
 
 
-def los(s, a, b, funk=False, staging_frei=False):
+def hoehe(s, e):
+    """L79 [RULE 5.2.2 p.35] Upper Story / Church Tower: +1 elevation level for the unit under it."""
+    cv = cover_marker(s, e) if e else None
+    return 1 if cv and cv["typ"] in ("Upper Story", "Church Tower") else 0
+
+
+def gegner_von(e):
+    return "Feind" if e.get("seite") == "US" else "US"
+
+
+def karte_hoehe(s, k, seite):
+    """L79: highest extra level of one side's units on card k (Upper Story seen/seeing, 5.2.2 'Even if only part of a card is in LOS')."""
+    return max([hoehe(s, s["einheiten"][m]) for m in auf(s, k, seite)] or [0])
+
+
+def los(s, a, b, funk=False, staging_frei=False, ha=0, hb=0):
     """5.2.1/5.2.2/5.4: geometry, range, edge, Incoming/Smoke, elevation, staging. Returns (bool, reason).
     funk=True: LOS for SCR536 [RULE 4.3.5 p.29] 'as if Daylight, and ignoring smoke' (range always up to Very Long)."""
     if a == b:
@@ -468,7 +576,7 @@ def los(s, a, b, funk=False, staging_frei=False):
         return False, "Staging Area: no LOS in or out [2.5]"
     if blockiert(ka, funk, s):
         return False, f"{a} has Incoming/Smoke, no LOS out [5.4]" + (offen(s, "U3_incoming_blockiert_funk") if funk else "")
-    ea, eb = ka.get("elevation", 1), kb.get("elevation", 1)
+    ea, eb = ka.get("elevation", 1) + ha, kb.get("elevation", 1) + hb   # L79 Upper Story +1 [RULE 5.2.2 p.35]
     for z in zw:
         c = karte(s, z)
         if blockiert(c, funk, s):
@@ -560,6 +668,8 @@ def feuerziel_effektiv(s, n):
     if z == e["karte"]:
         return z
     for k in (linie(s, e["karte"], z) or []):
+        if blockiert(karte(s, k), False, s):
+            return k    # L96 [RULE 6.1.2 p.44] Smoke/Incoming/Air Strike along the PDF: move the VOF back to the blocking card (even over own troops, no Overhead)
         besetzt = [m for m in auf(s, k) if s["einheiten"][m]["seite"] == e["seite"] or sichtbar(s["einheiten"][m])]
         if moerser(e) or ((e.get("vof_rating") == "H" or e.get("tripod")) and overhead_moeglich(s, e["karte"], k, z)):
             # [RULE 7.3.1 p.53] mortars fire over cards with friendly troops without hitting them
@@ -662,7 +772,7 @@ def feuerkandidaten(s, n):
             if not in_reichweite(s, e, kid):
                 continue
         else:
-            if not in_reichweite(s, e, kid) or not los(s, e["karte"], kid)[0]:
+            if not in_reichweite(s, e, kid) or not los(s, e["karte"], kid, ha=hoehe(s, e), hb=karte_hoehe(s, kid, gegner_von(e)))[0]:
                 continue
             if e["seite"] == "US" and auf(s, kid, "US"):
                 continue                                                                    # 8.4.3: friendly units do not open fire on jointly occupied cards
@@ -941,7 +1051,7 @@ def spot_modifikatoren(s, sp, zielkarte):
     if ez == "Veteran":
         mods.append(("Spotter Veteran", +1))
     ks, kz = karte(s, sp["karte"]), karte(s, zielkarte)
-    if ks.get("elevation", 1) > kz.get("elevation", 1):
+    if ks.get("elevation", 1) + hoehe(s, sp) > kz.get("elevation", 1) + karte_hoehe(s, zielkarte, "Feind"):   # L85: Upper Story counts (5.2.2)
         mods.append(("Spotter higher", +1))
     feinde = [s["einheiten"][n] for n in auf(s, zielkarte, "Feind")]
     if any(f.get("bereich", "offen") != "offen" for f in feinde):
@@ -1210,6 +1320,9 @@ def briefing(s):
                  + (f"; phone lines in the pool {s['leitungen_pool']}" if s.get("leitungen_pool") is not None else ""))
         if s.get("pyro_belegung"):
             z.append("- Pyro: " + ", ".join(f"{a}={b}" for a, b in s["pyro_belegung"].items()))
+        if in_aufstellung(s):   # L77: note before turn 1 (2.3.4), not blocking
+            for h in aufstellung_hinweise_v4(s):
+                z.append("- Before turn 1 (note): " + h)
         if s.get("ziele", {}).get("phaselines"):
             z.append("- Phase Lines: " + ", ".join(f"PL{a} across row {b}" for a, b in s["ziele"]["phaselines"].items()))
         akt = []
@@ -1341,6 +1454,8 @@ def cmd_phase(s, args):
                 fa = aufstellung_pruefen_v4(s)
                 if fa:
                     raise Verstoss("Still open before turn 1: " + "; ".join(fa))
+                for h in aufstellung_hinweise_v4(s):
+                    prot.append("Note (lapses from now on): " + h)
                 if s.get("patrouille_mission"):
                     patrouille_reserve(s, prot)
             if s.get("ereignistabellen") and s["zug"] >= 2 and s["phase"] in ("3.1", "3.4.1", "3.2.1") and s.get("ereignis_erledigt") != [s["zug"], s["phase"]]:
@@ -1452,10 +1567,7 @@ def cmd_phase(s, args):
                 if x["typ"] == "Pending":
                     x["typ"] = "Incoming"
                     prot.append(f"{kid}: flip Pending Fire Mission to its active side (Incoming {x['wert']}); units there lose LOS out of the card [3.7.1, 5.4]")
-                    for n, e in s["einheiten"].items():
-                        if e["karte"] == kid and feuert(e) and e["ziel"] != kid:
-                            e["ziel"] = None
-                            prot.append(f"{n} ceases fire (LOS blocked) [6.1.2]")
+                    los_verlust_cease(s, prot)                                   # L95: also fire THROUGH the card (5.4)
         feuer_eroeffnen(s, prot)
     if neu == "3.7.2":
         offen = [k for k, c in s["karten"].items() if c.get("pc") and auf(s, k, "US")]
@@ -1502,11 +1614,21 @@ def los_verlust_cease(s, prot):
         zk = e.get("ziel")
         if not zk or zk == e.get("karte") or zk not in s["karten"] or e.get("karte") not in s["karten"]:
             continue
-        ok = los(s, e["karte"], zk)[0] and in_reichweite(s, e, zk)
-        if not ok:
+        l_ok, l_grund = los(s, e["karte"], zk, ha=hoehe(s, e), hb=karte_hoehe(s, zk, gegner_von(e)))
+        if not l_ok and l_grund.startswith("Incoming/Smoke on "):
+            # L96 [RULE 6.1.2 p.44]: a block on an intervening card is no Cease Fire; the VOF sits on the blocking card (feuerziel_effektiv)
+            fk = feuerziel_effektiv(s, n)
+            if e.get("_vof_sperre") != fk:
+                e["_vof_sperre"] = fk
+                prot.append(f"{n}: move the VOF from {zk} back along the PDF to the blocking card {fk} (PDF stays) [6.1.2 p.44, 5.4]")
+            continue
+        if e.pop("_vof_sperre", None):
+            prot.append(f"{n}: block lifted, VOF back on {feuerziel_effektiv(s, n)} [6.1.2]")
+        if not l_ok or not in_reichweite(s, e, zk):
             e["ziel"] = None
             e.pop("konzentriert", None)
-            prot.append(f"{n} ceases fire on {zk}: no LOS/range anymore (night 9.1 without Illumination) [6.1.2]")
+            grund = l_grund if not l_ok else "out of range"                              # L94: name the real reason instead of a blanket night 9.1
+            prot.append(f"{n} ceases fire on {zk}, remove the VOF marker from {zk}: {grund} [6.1.2]")
 
 
 def feind_cease_fire(s, prot):
@@ -1544,12 +1666,40 @@ def feind_zeile(s, n):
             z, sp, er = feind_zeile_offensiv(s, n, gegner_da, cover, feuert(e))
             return z + f" [Enemy Offensive Activity Check Hierarchy, {s['feind_taktik']}]", sp, er
         if v4(s) and e.get("vof_rating") == "G" and not feuert(e) and pid in ("Z4", "keine", "none") and feuerkandidaten_g(s, n):
-            T = {"Delay": 0, "Hasty": 1, "Deliberate": 2}.get(s.get("feind_taktik", "Hasty"), 2)
+            T = taktik_t(s)
             return "Z5 G! unit without PDF with target in LOS (player aid)", ["3", "2", "Auto"][T], [
                 {"1-2": "No Action", "3": "Grenade Attack (or Concentrate Fire)"},
                 {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)"},
                 {"Auto": "Grenade Attack (or Concentrate Fire)"}][T]
+        rgz = leader_rg_ziel(s, n) if v4(s) else None
+        if rgz and pid == "keine":
+            T = taktik_t(s)
+            if vof_gegen(s, kid, "Feind", ohne_minen=True) is None:
+                return (f"Z5 Leader with Rifle Grenade ({e.get('rifle_grenades')} rounds) as G! along the PDF to {rgz} [8.9 p.67]", ["3", "2", "Auto"][T], [
+                    {"1-2": "No Action", "3": "Grenade Attack"},
+                    {"1": "No Action", "2": "Grenade Attack"},
+                    {"Auto": "Grenade Attack"}][T])
+            # L86 (K28): Leader under fire. His 'own PDF' is the PDF of his card (8.9 'along their card's existing PDF').
+            if not cover:
+                return (f"Z6 Leader with Rifle Grenade under fire, no cover (as G!, target {rgz}) [8.9 p.67, K28]", ["5", "5", "3"][T], [
+                    {"1": "No Action", "2": "Move into or Seek Cover", "3-4": "Fall Back", "5": "Grenade Attack"},
+                    {"1": "No Action", "2-3": "Move into or Seek Cover", "4": "Fall Back", "5": "Grenade Attack"},
+                    {"1-2": "Move into or Seek Cover", "3": "Grenade Attack"}][T])
+            if any(k != rgz for k in pdfs_nach(s, kid, "Feind")):
+                return (f"Z7 Leader with Rifle Grenade under fire from a direction other than his card's PDF (as G!, target {rgz}; Shift PDF lapses without a VOF = No Action) [8.9 p.67, K28]", ["5", "5", "4"][T], [
+                    {"1": "No Action", "2": "Grenade Attack", "3": "No Action (Shift PDF not possible)", "4-5": "Fall Back"},
+                    {"1": "No Action", "2": "Grenade Attack", "3-4": "No Action (Shift PDF not possible)", "5": "Fall Back"},
+                    {"1": "No Action", "2": "Grenade Attack", "3-4": "No Action (Shift PDF not possible)"}][T])
+            return (f"Z10 Leader with Rifle Grenade in a firefight (as G! -4, target {rgz}; compare with the best opposing VOF on the chart) [8.9 p.67, K28]", ["3", "2", "3"][T], [
+                {"1-2": "No Action", "3": "Grenade Attack"},
+                {"1": "No Action", "2": "Grenade Attack"},
+                {"1": "No Action", "2-3": "Grenade Attack"}][T])
     return zeile, spalte, erg
+
+
+def taktik_t(s):
+    """Column index of the enemy tactic on the Enemy Activity Check Hierarchy: Delay 0, Hasty 1, Deliberate 2."""
+    return {"Delay": 0, "Hasty": 1, "Deliberate": 2}.get(s.get("feind_taktik", "Hasty"), 2)
 
 
 def feind_zeile_basis(s, n):
@@ -1560,7 +1710,7 @@ def feind_zeile_basis(s, n):
     cover = e.get("bereich", "offen") != "offen"
     # [PLAYER AID Key 'Under Fire'] without unactivated Mines and Pending (BGG E35); mine hit = active VOF
     unter_feuer = vof_gegen(s, kid, "Feind", ohne_minen=True) is not None or bool(e.get("mine_hit"))
-    T = {"Delay": 0, "Hasty": 1, "Deliberate": 2}.get(s.get("feind_taktik", "Hasty"), 2)
+    T = taktik_t(s)
     if pinned(e) or ist_lat(e) or ft_seite(e):
         if pinned(e):
             if gegner_da and not cover:
@@ -1595,7 +1745,7 @@ def feind_zeile_basis(s, n):
     if kompanie(s) or "optionen" in s or s.get("sonderregeln"):
         # [PLAYER AID Enemy Activity Hierarchy] 'no LOS to an opposing unit' is pure LOS (5.2), independent of weapon range
         # and bunker fire arc [RULE 5.3.2 p.37 'Being in a Bunker ... does not affect a unit's LOS']
-        hat_los = hat_los or any(los(s, kid, k)[0] for k in s["karten"] if k != kid and auf(s, k, "US"))
+        hat_los = hat_los or any(los(s, kid, k, ha=karte_hoehe(s, kid, "Feind"), hb=karte_hoehe(s, k, "US"))[0] for k in s["karten"] if k != kid and auf(s, k, "US"))
     if gegner_da and not cover:
         return "Z1 opponent on card, without cover", ["5", "4", "3"][T], [
             {"1": "No Action", "2": "Move into or Seek Cover", "3-4": "Fall Back", "5": "Grenade Attack"},
@@ -1785,6 +1935,7 @@ def cmd_feindaktion(s, args):
             karte(s, ziel)
             if not benachbart(s, e["karte"], ziel):
                 raise Verstoss(f"{ziel} not adjacent to {e['karte']}")
+            granate_verfaellt(s, e, n, prot)                      # L92 [RULE 7.10.4] Grenade marker becomes a Grenade Miss on the origin card
             e["karte"], e["bereich"] = ziel, "offen"
             markieren(e, "Exposed")
             frei = [c for c in karte(s, ziel).get("cover", []) if not any(s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == c["id"] for m in auf(s, ziel))]
@@ -1799,7 +1950,8 @@ def cmd_feindaktion(s, args):
             raise Verstoss("Grenade Attack (only Point Blank or G! rating) or Attempt to Concentrate Fire: 2 cards (enemy experience, +1 with Leader), Grenade symbol or Crosshairs; --success=yes|no --unit=<target unit or cover stack> [7.10, 7.11]")
         granate_pb = "grenade" in a and bool(gueltiges_ziel(s, e["karte"], "Feind"))
         g_ohne_pdf = v4(s) and e.get("vof_rating") == "G" and not feuert(e) and not granate_pb
-        if not feuert(e) and not granate_pb and not g_ohne_pdf:
+        rg = leader_rg_ziel(s, n) if (v4(s) and "grenade" in a and not granate_pb) else None    # L67 [8.9]
+        if not feuert(e) and not granate_pb and not g_ohne_pdf and not rg:
             raise Verstoss(f"{n} is not firing, no Concentrate Fire possible [4.2.4b]")
         if g_ohne_pdf:
             zk_g = o.get("--ziel")
@@ -1807,7 +1959,10 @@ def cmd_feindaktion(s, args):
                 raise Verstoss(f"G! unit without PDF: --target=<card with target in LOS/range> from {', '.join(feuerkandidaten_g(s, n)) or 'none'}")
             e["ziel"], e["nur_pdf"] = zk_g, True
             prot.append(f"{n} places PDF towards {zk_g} [7.3.2 p.53]")
-        zk = e["karte"] if granate_pb else feuerziel_effektiv(s, n)
+        zk = e["karte"] if granate_pb else (rg or feuerziel_effektiv(s, n))
+        if rg:
+            e["rifle_grenades"] -= 1
+            prot.append(f"{n} fires a Rifle Grenade along the PDF to {rg}; {e['rifle_grenades']} round(s) left [8.9 p.67, Normandy p.23]")
         if v4(s) and "grenade" in a and not granate_pb and muni(e) and (e.get("vof_rating") == "G" or e.get("grenade_ranged")):
             muni_verbrauch(s, n, e, 1, "Grenade Attack at range", prot)
         if v4(s) and o.get("--jam") == "ja" and not granate_pb and jam_anfaellig(e):
@@ -1825,9 +1980,15 @@ def cmd_feindaktion(s, args):
                 raise Verstoss(f"specify --unit=<target unit> (cover stack or random unit without cover on {zk})")
             z = einheit(s, ze)
             gw = int(o.get("--wert", s.get("granate_vof", -3)))                   # Normandy p.13: German Grenade Attacks are also -4
-            if "grenade" in a and (zk == e["karte"] or e.get("vof_rating") == "G"):
+            if "grenade" in a and (zk == e["karte"] or e.get("vof_rating") == "G" or rg):
                 z.setdefault("grenade", []).append(gw)
-                prot.append(f"{n}: Grenade VOF {gw} on {ze}; target may freely throw back [7.10]")
+                if zk != e["karte"]:
+                    gegen = "no grenade thrown back (attack not from the same card) [7.10.5 p.55]"
+                elif not e.get("spotted"):
+                    gegen = "no grenade thrown back (attacker Unspotted) [7.10.5 p.55]"
+                else:
+                    gegen = "a Good Order target throws back for free [7.10.5 p.55]"
+                prot.append(f"{n}: Grenade VOF {gw} on {ze}; {gegen}")
             else:
                 for _m in cf_stapel(s, ze):
                     s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
@@ -1849,7 +2010,7 @@ def cmd_feindaktion(s, args):
             raise Verstoss("Shift PDF: --target=<card the fire comes from> (random if several; Bunker: draw again)")
         karte(s, ziel)
         # L59: Chart 'Shift Fire if possible to place VOF on opposing units' - only with LOS, range and a valid target
-        _los = los(s, e["karte"], ziel)
+        _los = los(s, e["karte"], ziel, ha=hoehe(s, e), hb=karte_hoehe(s, ziel, gegner_von(e)))
         if not _los[0] or not in_reichweite(s, e, ziel) or not gueltiges_ziel(s, ziel, e["seite"]):
             grund = _los[1] if not _los[0] else ("out of range" if not in_reichweite(s, e, ziel) else "no valid target")
             prot.append(f"{n}: Shift PDF to {ziel} not possible ({grund}); fire continues [Enemy Activity Chart: 'Shift Fire if possible', 9.2.1]")
@@ -1914,7 +2075,7 @@ def cmd_feindaktion(s, args):
         e2 = s["einheiten"][n]
         if v4(s) and e2["karte"] != von_karte:
             minencheck_anfordern(s, [n], e2["karte"], prot, "enemy enters mine card")
-            if ist_sniper(e2) and not any(los(s, e2["karte"], k)[0] for k in s["karten"] if auf(s, k, "US") and not karte(s, k).get("staging")):
+            if ist_sniper(e2) and not any(los(s, e2["karte"], k, ha=hoehe(s, e2), hb=karte_hoehe(s, k, "US"))[0] for k in s["karten"] if auf(s, k, "US") and not karte(s, k).get("staging")):
                 for m in auf(s, e2["karte"], "Feind"):
                     s["einheiten"][m]["spotted"] = False
                 prot.append(f"{n} out of LOS of all US units: Unspotted again [8.8 p.67]")
@@ -2149,7 +2310,9 @@ def cmd_karte(s, args):
     for x in evp:
         print("Board: " + x)
     bez = f", after event payment {k['verfuegbar']} new" if k["verfuegbar"] != total else ""   # [Normandy M1 p.18] L53
-    print(f"Command marker on box {k['verfuegbar'] + k['gespart']} (drawn {total}{bez}, saved {k['gespart']}); spend at most {MAX_IMPULS[s['sicht']]} in this impulse [4.1.3].")
+    summe = k['verfuegbar'] + k['gespart']
+    feld = f"box {summe}" if summe <= 10 else f"box 10 and remember {summe - 10} more (track ends at 10, K27)"   # L98
+    print(f"Command marker on {feld} (drawn {total}{bez}, saved {k['gespart']}); spend at most {MAX_IMPULS[s['sicht']]} in this impulse [4.1.3].")
     print(stempel(s))
 
 
@@ -2338,7 +2501,11 @@ def bewegen(s, n, ziel_k, bereich, exposed, prot):
     if auf(s, ziel_k, gegner(e["seite"])):
         prot.append(f"Point Blank on {ziel_k}: each side's VOF only hits the opposing side [6.2.1b]")
     if v4(s):
-        minencheck_anfordern(s, [n], ziel_k, prot, "unit enters mined card")
+        pc_ = s.pop("_pionier_check", None)
+        if pc_ and pc_[0] == n and pc_[1] == ziel_k:
+            minencheck_anfordern(s, [n], ziel_k, prot, "Engineers clear a path" + (" (infiltration succeeded)" if pc_[2] == 1 else " (infiltration failed: not Exposed, no path)"), karten=pc_[2], pfad=pc_[2] == 1)
+        else:
+            minencheck_anfordern(s, [n], ziel_k, prot, "unit enters a mined card")
 
 
 def cff_vorpruefung(s, z, name, orig_name, o):
@@ -2363,7 +2530,7 @@ def cff_vorpruefung(s, z, name, orig_name, o):
     elif not wp and not [m for m in auf(s, zt, "Feind") if s["einheiten"][m].get("spotted")]:
         raise Verstoss(f"No Spotted enemy on {zt} [7.16.1]" + (" (WP missions may hit empty/Unspotted cards, 7.16.2C)" if isinstance(fm, dict) else ""))
     if not illum:
-        ok, grund = los(s, z["karte"], zt)
+        ok, grund = los(s, z["karte"], zt, ha=hoehe(s, z), hb=karte_hoehe(s, zt, "Feind"))
         if not ok:
             raise Verstoss(f"Observer needs LOS to the target: {grund} [7.16.1]")
     agentur = None
@@ -2447,7 +2614,7 @@ def indirect_lay(s, hq_name, orig_name, orig, mname, m, o, prot, gi):
     if gi and not opt(s, "U12_indirekt_unter_gi"):
         raise Verstoss("Indirect Lay under General Initiative not allowed under option U12 (reading a); order it in the impulse of an eligible HQ [RULE 7.3.2 p.53]" + offen(s, "U12_indirekt_unter_gi"))
     if not ist_hq(orig):
-        raise Verstoss(f"Originator must be an HQ or Staff [RULE 4.2.4j p.25]")
+        raise Verstoss("Originator must be an HQ or Staff [RULE 4.2.4j p.25]")
     kommandokette(s, orig_name, mname)          # [RULE 7.3.2 p.53] 'someone who is eligible to issue orders to the mortar'
     if steps(m) < 2:
         raise Verstoss(f"{mname} has {steps(m)} step; Indirect Lay only with at least two steps [RULE 4.2.4j p.25, 7.3.2 p.53]")
@@ -2472,7 +2639,7 @@ def indirect_lay(s, hq_name, orig_name, orig, mname, m, o, prot, gi):
     karte(s, zt)
     if not [x for x in auf(s, zt, "Feind") if s["einheiten"][x].get("spotted")]:
         raise Verstoss(f"No Spotted enemy on {zt} [RULE 4.2.4j p.25]")
-    ok, grund = los(s, orig["karte"], zt)
+    ok, grund = los(s, orig["karte"], zt, ha=hoehe(s, orig), hb=karte_hoehe(s, zt, "Feind"))
     if not ok:
         raise Verstoss(f"Observer {orig_name} has no LOS to {zt}: {grund} [RULE 7.3.2 p.53]")
     lo, hi = reichweite_grenzen(s, m)
@@ -2589,12 +2756,16 @@ def granate_pruefen(s, z, ziel_name, o):
         if rg:
             hi = REICHWEITE.get(s.get("rifle_grenade_reichweite", "C"), 1)
             cv = cover_marker(s, z)
-            if cv and cv["typ"] in STRUKTUR + ("Building", "Strong Building", "Light Building", "Cave"):
-                raise Verstoss("Rifle Grenades not from Building/Bunker/Cave/Pillbox [RULE 7.6 p.54]")
-            if abstand(s, z["karte"], zt) > hi or not los(s, z["karte"], zt)[0]:
+            if cv and cv["typ"] in STRUKTUR + ("Building", "Strong Building", "Light Building", "Cave", "Upper Story", "Church Tower"):
+                raise Verstoss("Rifle Grenades cannot be fired from Building/Bunker/Cave/Pillbox cover, nor from Upper Story/Church Tower (E55) [RULE 7.6 p.54, 5.2.2B p.36]")
+            if abstand(s, z["karte"], zt) > hi or not los(s, z["karte"], zt, ha=hoehe(s, z), hb=karte_hoehe(s, zt, "Feind"))[0]:
                 raise Verstoss(f"Rifle Grenade: target in LOS up to {s.get('rifle_grenade_reichweite', 'C')} (range per Asset counter UNVERIFIED) [RULE 7.10.1 p.55]")
-        elif not in_reichweite(s, z, zt) or not los(s, z["karte"], zt)[0]:
+        elif not in_reichweite(s, z, zt) or not los(s, z["karte"], zt, ha=hoehe(s, z), hb=karte_hoehe(s, zt, "Feind"))[0]:
             raise Verstoss("Ranged Grenade Attack: target must be in LOS and range [RULE 7.10.1 p.55]")
+        if not rg and muni(z) and muni(z)["typ"] == "RKT":
+            cv = cover_marker(s, z)                                                  # L97 [RULE 7.4 p.54]
+            if cv and cv["typ"] in STRUKTUR + ("Building", "Strong Building", "Light Building", "Cave", "Upper Story", "Church Tower"):
+                raise Verstoss("Rocket launchers (Bazooka/Panzerschreck/RCL) cannot fire from Building/Bunker/Cave/Pillbox cover, nor from Upper Story/Church Tower (E55); Point Blank with hand grenades stays allowed [RULE 7.4 p.54, 7.10.1 p.54]")
         if muni(z) and muni(z)["punkte"] <= 0 and not rg:
             raise Verstoss(f"{ziel_name} has no ammo left for ranged Grenade Attacks [RULE 7.18.2 p.61]")
         if moerser(z):
@@ -2631,6 +2802,130 @@ def skill_halter(s, z_name, skill):
             if e.get("seite") == "US" and e["typ"] == "HQ" and e.get("ebene") == "PLT" and str(e.get("platoon")) == str(p) and skill in (e.get("skills") or []):
                 return n
     raise Verstoss(f"Skill {skill} is not available to {z_name}: PLT HQ skills only for units of this platoon, CO HQ/Staff skills only for the unit itself [RULE 12.7 p.82]")
+
+def cmd_nachtrag(s, args):
+    """L78 (V22): forgotten order of an HQ/Staff whose impulse already ended this turn.
+    Runs like 'order' (all checks), cost from its saved Commands, the 6-per-impulse limit of that impulse (4.1.3)."""
+    import re
+    if len(args) < 3:
+        raise Verstoss("lateorder <HQ> <unit> <action> [--target=..] [--area=..] ...")
+    hq = args[0]
+    if s["phase"] not in IMPULSE:
+        raise Verstoss(f"Late order only in the Friendly Command Phase 3.3, currently {s['phase']} [RULE 3.3 p.15]")
+    k = s["kommandos"].get(hq)
+    if hq == "GI" or not k or not k.get("fertig"):
+        raise Verstoss(f"Late order only for an HQ/Staff whose impulse ended this turn ({hq})")
+    if hq == s.get("aktiver_hq"):
+        raise Verstoss(f"{hq} is active: use the normal 'order'")
+    ausg = 0
+    for p_ in s["protokoll"]:
+        if p_.get("zug") != s["zug"]:
+            continue
+        tx = p_.get("text", "")
+        tx = tx.split(": ", 1)[1] if tx.startswith("Late order for the impulse of ") else tx
+        if tx.startswith(f"{hq} orders "):
+            m = re.search(r"cost (\d+)", tx)
+            ausg += int(m.group(1)) if m else 0
+        elif tx.startswith(f"{hq} activates "):
+            ausg += AKTIONEN["4.2.1a"][1]
+    alt = (s.get("aktiver_hq"), s.get("impuls_aktionen"), dict(s.get("impuls_ausgegeben", {})))
+    s["aktiver_hq"], s["impuls_aktionen"] = hq, {}
+    s.setdefault("impuls_ausgegeben", {})[hq] = ausg
+    g = globals()
+    orig = g["speichern"]
+
+    def _sp(s2, eintrag=None, regel=None):
+        s2["aktiver_hq"], s2["impuls_aktionen"], s2["impuls_ausgegeben"] = alt[0], alt[1], alt[2]
+        s2["kommandos"][hq]["fertig"] = True
+        return orig(s2, ("Late order for the impulse of " + hq + ": " + eintrag) if eintrag else eintrag, regel)
+    g["speichern"] = _sp
+    try:
+        cmd_befehl(s, args)
+    finally:
+        g["speichern"] = orig
+    print(f"Late order {hq}: {ausg} already spent in that impulse; Commands now {s['kommandos'][hq]['gespart']} (Saved Commands zone)")
+
+
+def cmd_korrektur(s, args):
+    """L80 (V22): the board is the master - fix a proven wrong booking instead of editing the JSON by hand.
+    correct casualty <card> <+n|-n> [--side=Feind|US] --reason=<text>"""
+    if len(args) < 3 or args[0] not in ("casualty", "status", "granate", "munition", "ziel"):   # subwords: grenade, ammo, target
+        raise Verstoss("correct casualty <card> <+n|-n> [--side=Feind|US] --reason=.. | correct status <unit> <marker> remove|add --reason=.. | correct grenade <unit> expired <origin card> --reason=.. | correct ammo <unit> <+n|-n> --reason=.. | correct target <unit> <card> --reason=..")
+    o = opts_parse(args[3:] if args[0] in ("casualty", "munition", "ziel") else args[4:])
+    if not o.get("--grund"):
+        raise Verstoss("give --reason=<text> (source of the correction, e.g. counter photo, player decision)")
+    if args[0] == "ziel":
+        # L96: restore a fire target afterwards (wrongly booked Cease Fire)
+        n, kid = args[1], args[2]
+        e = einheit(s, n)
+        karte(s, kid)
+        e["ziel"] = kid
+        txt = f"Correction {n}: fires on {kid} again, PDF from {e['karte']} to {kid} ({o['--grund']})"
+        speichern(s, txt, "6.1.2 p.44")
+        print(f"Board: place PDF {n} from {e['karte']} to {kid}, VOF on {feuerziel_effektiv(s, n)}")
+        print(stempel(s))
+        return
+    if args[0] == "munition":
+        # L95: set an ammo marker afterwards (e.g. ammo spent on fire that did not happen because LOS was lost, 7.18.4)
+        n = args[1]
+        e = einheit(s, n)
+        m = e.get("munition")
+        if not m:
+            raise Verstoss(f"{n} carries no ammo")
+        d = int(args[2])
+        alt = m["punkte"]
+        m["punkte"] = max(0, min(m.get("start", alt + d), alt + d))
+        txt = f"Correction {n}: {m.get('typ', '')} ammo {alt} to {m['punkte']} ({o['--grund']})"
+        speichern(s, txt, "7.18.4 p.61")
+        print(f"Board: turn ammo marker {n} from {alt} to {m['punkte']}")
+        print(stempel(s))
+        return
+    if args[0] == "granate":
+        # L92: expire a Grenade marker afterwards as a Grenade Miss on the origin card (7.10.4)
+        n, kid = args[1], args[3]
+        e = einheit(s, n)
+        if not e.get("grenade"):
+            raise Verstoss(f"{n} carries no Grenade marker")
+        karte(s, kid)["grenade_miss"] = True
+        e["grenade"] = []
+        if s["phase"] == "3.7.4" and n in s.get("kampf_offen", []) and vof_gegen(s, e["karte"], e["seite"], ohne_minen=True) is None \
+                and not karte(s, e["karte"]).get("grenade_miss") and not e.get("mine_hit"):
+            s["kampf_offen"].remove(n)
+            s.get("kampf_ncm", {}).pop(n, None)     # frozen state without this unit (no VOF against it any more)
+        txt = f"Correction {n}: Grenade marker expired, Grenade Miss (-1) on {kid} ({o['--grund']})"
+        speichern(s, txt, "7.10.4 p.55")
+        print(f"Board: take the Grenade marker from {n}, Grenade Miss marker (-1) on {kid}")
+        print(stempel(s))
+        return
+    if args[0] == "status":
+        # L83: set/remove a unit's status marker afterwards (e.g. a move re-rated as a successful infiltration)
+        n, marker, wie = args[1], args[2], args[3]
+        e = einheit(s, n)
+        if wie == "weg":
+            if marker not in e["status"]:
+                raise Verstoss(f"{n} has no {marker} marker")
+            e["status"].remove(marker)
+        elif wie == "dazu":
+            markieren(e, marker)
+        else:
+            raise Verstoss("remove | add")
+        txt = f"Correction {n}: {marker} {'removed' if wie == 'weg' else 'added'} ({o['--grund']})"
+        speichern(s, txt, "AI_BRIEFING: the board is the master")
+        print(f"Board: {marker} marker on {n}: " + ("remove" if wie == "weg" else "place"))
+        print(stempel(s))
+        return
+    kid, n = args[1], int(args[2])
+    c = karte(s, kid)
+    key = "casualties_feind" if o.get("--seite", "Feind") == "Feind" else "casualties"
+    alt = c.get(key, 0)
+    if alt + n < 0:
+        raise Verstoss(f"Only {alt} casualties ({key}) lie on {kid}")
+    c[key] = alt + n
+    txt = f"Correction {kid}: {key} {alt} to {c[key]} ({o['--grund']})"
+    speichern(s, txt, "AI_BRIEFING: the board is the master")
+    print(f"Board: casualty markers on {kid}: {alt} to {c[key]}")
+    print(stempel(s))
+
 
 def cmd_befehl(s, args):
     hq_name, ziel_name, akt = args[0], args[1], args[2]
@@ -2715,7 +3010,7 @@ def cmd_befehl(s, args):
                           + (", draw cards only for Critical Hit/Jam" if akt in ("4.2.4b", "4.2.4d") else ", no cards needed")
                           + " [RULE 12.7 p.82]")
         s["einheiten"][halter]["skills"].remove(skill)
-        skill_text = (skill_text or f"Skill Extra Draw of {halter}: one extra card [Player Aid 2]") + f"; return skill marker"
+        skill_text = (skill_text or f"Skill Extra Draw from {halter}: one more card [Player Aid 2]") + "; hand in the Skill marker"
     if exhort_nach and erfolg != "ja":
         raise Verstoss("After a successful Exhort enter the effect with --success=yes --free=yes")
     if o.get("--short") == "ja":
@@ -2743,7 +3038,7 @@ def cmd_befehl(s, args):
                 raise Verstoss(f"There is no Unspotted enemy on {zielk} [8.5]")
             if zk.get("staging"):
                 raise Verstoss("No spotting from the Staging Area [8.5 Note]")
-            ok, grund = los(s, z["karte"], zielk)
+            ok, grund = los(s, z["karte"], zielk, ha=hoehe(s, z), hb=karte_hoehe(s, zielk, "Feind"))
             if not ok:
                 raise Verstoss(f"No LOS from {z['karte']} to {zielk}: {grund}")
             mods = spot_modifikatoren(s, z, zielk)
@@ -2769,7 +3064,13 @@ def cmd_befehl(s, args):
             raise Verstoss("--target=<card> missing")
         karte(s, ziel_k)
         pruefe_bewegung(s, z, ziel_name, ziel_k, akt)
-        bewegen(s, ziel_name, ziel_k, o.get("--bereich"), exposed=(akt == "4.2.2a" or erfolg == "nein"), prot=prot)
+        pionier = akt == "4.2.2c" and pionier_raeumt(s, z) and bool(minen_auf(s, ziel_k))
+        if pionier:
+            s["_pionier_check"] = (ziel_name, ziel_k, 1 if erfolg == "ja" else 3)
+            exposed = False      # CSR 10: failed Engineer infiltration without Exposed, but 3 cards
+        else:
+            exposed = akt == "4.2.2a" or erfolg == "nein"
+        bewegen(s, ziel_name, ziel_k, o.get("--bereich"), exposed=exposed, prot=prot)
         bewegte = [ziel_name]
     elif akt in ("4.2.2b", "4.2.2d"):
         ziel_k = o.get("--ziel")
@@ -2819,8 +3120,15 @@ def cmd_befehl(s, args):
                 cid = neuer_cover(s, z["karte"], gt, gw)
                 if gt != "Basic Cover":
                     [c_ for c_ in zk["cover"] if c_["id"] == cid][0]["feld"] = False
-                if oben:
-                    prot.append("additional Upper Story/Church Tower marker (does not count toward Cover Potential, Church Tower only 1 step) [5.3.3 p.38]")
+                if gt != "Basic Cover" and (zk.get("mehrstoeckig") or zk.get("terrain") == "Church"):
+                    # L73 [RULE 5.3.3 p.38, 5.2.2B p.36] Multi-Story/Church symbol on the card: add Upper Story or Church Tower,
+                    # same value, does not count towards the Cover Potential (the star of the CSR 8 table applies to snipers/spotters only)
+                    us = "Church Tower" if zk.get("terrain") == "Church" else "Upper Story"
+                    uid = neuer_cover(s, z["karte"], us, gw)
+                    [c_ for c_ in zk["cover"] if c_["id"] == uid][0]["feld"] = True
+                    prot.append(f"additionally {us} marker {uid} (+{gw}) on {z['karte']}; does not count towards the Cover Potential" + (", 1 step only" if us == "Church Tower" else "") + " [5.3.3 p.38, 5.2.2B p.36]")
+                elif oben:
+                    prot.append("card without Multi-Story symbol: no Upper Story marker (star only for snipers/spotters) [CSR 8 p.15, 5.3.3 p.38]")
             else:
                 cid = neuer_cover(s, z["karte"], "Basic Cover", int(o.get("--wert", 1)))
             z["bereich"] = cid
@@ -2844,7 +3152,8 @@ def cmd_befehl(s, args):
         bereich_setzen(s, z, ziel_name, b)
         neu_cv = cover_von(s, z)
         fest = bool(alt_cv and neu_cv and alt_cv["typ"] in FESTE_DECKUNG and neu_cv["typ"] in FESTE_DECKUNG)
-        if (akt == "4.2.2f" or erfolg == "nein") and not fest:
+        pionier = akt == "4.2.2g" and pionier_raeumt(s, z) and bool(minen_auf(s, z["karte"]))
+        if (akt == "4.2.2f" or erfolg == "nein") and not fest and not pionier:
             markieren(z, "Exposed")
         if fest:
             prot.append("between Trench/Bunker/Pillbox markers of the same card without Exposed [RULE 5.1.1 p.31]")
@@ -2852,7 +3161,10 @@ def cmd_befehl(s, args):
         if moerser(z) and feuert(z) is False and z.get("ziel"):
             prot.append(f"{ziel_name} (mortar) is Exposed and does not fire, VOF is removed until Exposed is removed [RULE 7.3.1 p.53]")
         if v4(s):
-            minencheck_anfordern(s, [ziel_name], z["karte"], prot, "movement within the mined card")
+            if pionier:
+                minencheck_anfordern(s, [ziel_name], z["karte"], prot, "Engineers clear a path" + (" (infiltration succeeded)" if erfolg == "ja" else " (infiltration failed: not Exposed, no path)"), karten=1 if erfolg == "ja" else 3, pfad=erfolg == "ja")
+            else:
+                minencheck_anfordern(s, [ziel_name], z["karte"], prot, "move within the mined card")
     elif akt == "4.2.2h":
         was = o.get("--was")
         if was and ":" in was and was.split(":")[0] in MUNITION_KAP:
@@ -2865,7 +3177,16 @@ def cmd_befehl(s, args):
             z["leitungen"] = z.get("leitungen", 0) + nz
             prot.append(f"{ziel_name} picks up {nz} Phone Line(s) [4.3.4, 5.1.6]")
         elif was:
-            aufnehmen(s, z, ziel_name, was, prot)
+            # L71 [RULE 5.1.6 p.32] 'One Command to have a unit pick up any ammo, assets and casualties in their card area':
+            # several items in one order, comma separated; 'Casualty:<n>' for several casualties
+            for teil in [x.strip() for x in was.split(",") if x.strip()]:
+                if teil.lower().startswith("casualty:"):
+                    for _ in range(int(teil.split(":")[1])):
+                        aufnehmen(s, z, ziel_name, "Casualty", prot)
+                else:
+                    aufnehmen(s, z, ziel_name, teil, prot)
+            if z.get("traegt_casualties", 0) > steps(z):
+                raise Verstoss(f"{ziel_name} can carry at most {steps(z)} casualties (1 per step) [RULE 5.1.6A p.32]")
         markieren(z, "Exposed")
         prot.append(f"{ziel_name}: pick up/load, Exposed [5.1.6]")
     # ---------------- Rally
@@ -3100,7 +3421,7 @@ def cmd_befehl(s, args):
         karte(s, zt)
         if [m for m in auf(s, zt, "Feind") if not s["einheiten"][m].get("spotted")] and not auf(s, zt, "US"):
             raise Verstoss("Cards with Unspotted enemies may not be fired at [6.3.3]")
-        ok, grund = los(s, orig["karte"], zt)
+        ok, grund = los(s, orig["karte"], zt, ha=hoehe(s, orig), hb=karte_hoehe(s, zt, "Feind"))
         if not ok:
             raise Verstoss(f"Originator has no LOS to {zt}: {grund}")
         kk, alt = z["karte"], feuerziel_effektiv(s, ziel_name)
@@ -3261,7 +3582,7 @@ def gueltige_plaetze(s, pk, kid):
         if v3 and ohne_pb and k == kid:
             continue            # a bunker cannot fire Point Blank, but must be able to open fire on the trigger card
         if k != kid:
-            if abstand(s, k, kid) > hi or not los(s, k, kid)[0]:
+            if abstand(s, k, kid) > hi or not los(s, k, kid, hb=karte_hoehe(s, kid, "US"))[0]:
                 continue
             if any(auf(s, zw, "US") for zw in (linie(s, k, kid) or [])):
                 continue
@@ -3406,13 +3727,10 @@ def cmd_pc(s, args):
     else:
         c.setdefault("extern", []).append({"typ": "Incoming", "wert": pk.get("wert", -3), "quelle": pk["name"], "seite": "Feind"})
         prot.append(f"{pk['name']}: Incoming marker (VOF {pk.get('wert', -3)}) active on {kid}, takes effect in this Combat Effects Segment; blocks LOS out of {kid} [8.10, 5.4]")
-        for n, e in s["einheiten"].items():
-            if e["karte"] == kid and feuert(e) and e["ziel"] != kid:
-                e["ziel"] = None
-                prot.append(f"{n} loses LOS out of the card, remove the PDF [6.1.2]")
+        los_verlust_cease(s, prot)                                   # L95: also fire THROUGH the card (5.4)
     pk["im_spiel"] = True
     c["pc"] = None
-    prot.append(f"Remove the PC marker from {kid} [8.2.4]")
+    prot.append(f"Remove PC marker from {kid} [8.2.4]")
     ak = aktivitaet_berechnen(s)
     if ak:
         prot.append(ak)
@@ -3433,12 +3751,12 @@ def cmd_aufstellen(s, args):
     prot = []
     if "--platoon" in o:
         p = o["--platoon"]
-        if ist_hq(e) or e["typ"] == "Squad":
+        if (ist_hq(e) or e["typ"] == "Squad") and not e.get("attachment"):   # L75: Engineers are a squad attachment (2.3.2)
             raise Verstoss(f"{n} belongs permanently to its platoon; attachments and company units can be assigned [RULE 2.3.2 p.10]")
         hqs = {x.get("platoon"): m for m, x in s["einheiten"].items() if x.get("ebene") == "PLT"}
         if p == "keiner":
             e["platoon"], e["attached_an"] = None, []
-            prot.append(f"{n} assigned to no platoon; orders only from the CO HQ (and via General Initiative) [RULE 2.3.3 p.10]")
+            prot.append(f"{n} assigned to no platoon; orders from the CO HQ and CO Staff (XO, 1st Sgt) [RULE 2.3.3 p.10, 4.0 p.18]")
         else:
             if p not in hqs:
                 raise Verstoss(f"Platoon {p} unknown; available: {', '.join(sorted(k for k in hqs if k))}")
@@ -3474,14 +3792,32 @@ def cmd_aufstellen(s, args):
                     raise Verstoss(f"{n} is not on patrol: set it up in the fortifications, --area=" + "|".join(c["id"] for c in kc["cover"])
                                    + " [Normandy M3 p.26 MSR 1: 'Place any others in the fortifications on Row 1']")
             elif kc["reihe"] != 1:
-                raise Verstoss(f"The patrol sets up on row 1 [2.6.1, MSR 4]")
+                raise Verstoss("The patrol sets up on Row 1 [2.6.1, MSR 4]")
+        elif s.get("aufstellung_feld") and not s.get("reattempt_setup"):
+            # L75 [Normandy M4 p.28]: "Place 2 Foxholes per card in Row 1 ... any one card in Row 2; some units from one
+            # platoon of your choice may be placed on this card. All other units start on Row 1."
+            af = s["aufstellung_feld"]
+            kc = karte(s, k)
+            if k == af.get("zusatzkarte"):
+                if not e.get("platoon"):
+                    raise Verstoss(f"Only units of one platoon on {k}; {n} belongs to no platoon (first setup <unit> --platoon=..) [{af.get('regel', 'Normandy M4 p.28')}]")
+                plts = {x.get("platoon") for m, x in s["einheiten"].items() if x["seite"] == "US" and x.get("karte") == k and m != n}
+                if plts - {e.get("platoon")}:
+                    raise Verstoss(f"Units of platoon {', '.join(sorted(str(p) for p in plts))} already stand on {k}; one platoon only [{af.get('regel', 'Normandy M4 p.28')}]")
+            elif kc.get("reihe") not in af.get("reihen", [1]):
+                raise Verstoss(f"Setup only on row {', '.join(str(r) for r in af.get('reihen', [1]))}" + (f" or on {af['zusatzkarte']} (units of one platoon)" if af.get("zusatzkarte") else "") + f" [{af.get('regel', 'Normandy M4 p.28')}]")
+            _st = sum(steps(x) for m, x in s["einheiten"].items() if x["seite"] == "US" and x.get("karte") == k and m != n) + steps(e)
+            if _st > 16:
+                raise Verstoss(f"Stacking: {k} would hold {_st} US steps, at most 16 per card [RULE 5.1.5 p.32]")   # L76
+            if kc.get("cover") and not o.get("--bereich"):
+                raise Verstoss(f"{k} has cover ({', '.join(c['id'] + ' ' + c['typ'] for c in kc['cover'])}): give --area=open|" + "|".join(c["id"] for c in kc["cover"]))
         elif not karte(s, k).get("staging") and not (s.get("reattempt_setup") and gesichert(s, k)):
             raise Verstoss(f"{k} is not a staging card; offensive mission: setup in the Staging Area [RULE 2.3.5 p.10]"
                            + ("; in a reattempt also secured cards (3.9 step 5)" if s.get("reattempt_setup") else ""))
         e["karte"], e["bereich"] = k, "offen"
-        if o.get("--bereich") and (s.get("reattempt_setup") or s.get("patrouille_mission")):
+        if o.get("--bereich") and (s.get("reattempt_setup") or s.get("patrouille_mission") or s.get("aufstellung_feld")):
             bereich_setzen(s, e, n, o["--bereich"])
-        prot.append(f"{n} {'into the Staging Area' if karte(s, k).get('staging') else 'on card' if s.get('patrouille_mission') else 'onto the secured card'} {k}" + (f" under {e['bereich']}" if e["bereich"] != "offen" else ""))
+        prot.append(f"{n} {'into the Staging Area' if karte(s, k).get('staging') else 'on card' if (s.get('patrouille_mission') or s.get('aufstellung_feld')) else 'on the secured card'} {k}" + (f" under {e['bereich']}" if e["bereich"] != "offen" else ""))
     if not prot:
         raise Verstoss("setup <unit> <staging card> and/or --platoon=<no>|none" + (" | --net= --mortar= --asset= --lines= --pyro= --device=" if v4(s) else ""))
     speichern(s, "Setup: " + "; ".join(prot), "2.3.3 p.10, 2.3.5 p.10")
@@ -3496,6 +3832,23 @@ def cmd_funk(s, args):
             return
         for t in funk_uebersicht(s):
             print("- " + t)
+        return
+    if args[0] == "pruefen" and len(args) == 2:
+        # L98: every unit <HQ> can reach
+        a = args[1]
+        einheit(s, a)
+        ok, nein = [], []
+        for n, e in s["einheiten"].items():
+            if n == a or e["seite"] != "US":
+                continue
+            try:
+                kommunikation(s, a, n)
+                ok.append(n)
+            except Verstoss:
+                nein.append(n)
+        s.pop("_hinweise", None)
+        print(f"{a} reaches: " + (", ".join(ok) if ok else "nobody") + " [RULE 4.3 p.27]")
+        print(f"{a} does not reach: " + (", ".join(nein) if nein else "-"))
         return
     if args[0] == "pruefen":
         a, b = args[1], args[2]
@@ -3531,6 +3884,8 @@ def cmd_funk(s, args):
 
 def cmd_ablegen(s, args):
     """[RULE 5.1.6B p.33] Drop without spending a command, at any time."""
+    if len(args) < 2:
+        raise Verstoss("drop <unit> <Casualty|asset name|radio|Leitung[:n]|AMMO:n>")
     n, was = args[0], args[1]
     e = einheit(s, n)
     c = karte(s, e["karte"])
@@ -3543,6 +3898,11 @@ def cmd_ablegen(s, args):
     elif ":" in was and was.split(":")[0] in MUNITION_KAP:
         prot = []
         muni_ablegen(s, e, n, was, prot)
+    elif was in (e.get("assets") or []):
+        # L99 [RULE 5.1.6B p.33]: put an asset counter (smoke, rifle grenade, pyro ...) on the card (assets_boden, Pick Up 4.2.2h)
+        e["assets"].remove(was)
+        c.setdefault("assets_boden", []).append(was)
+        prot = [f"{n} drops asset {was} on {e['karte']} (Pick Up 4.2.2h) [5.1.6B p.33]"]
     elif was.startswith("Leitung"):
         nz = int(was.split(":")[1]) if ":" in was else 1
         if e.get("leitungen", 0) < nz:
@@ -3573,6 +3933,23 @@ def cmd_optionen(s, args):
     print("Change only by the player's decision (E entry in data/klarstellungen.md) and by adjusting 'optionen' in the setup or game state.")
 
 
+def cmd_mehrstoeckig(s, args):
+    """L73 [RULE 5.3.3 p.38, 5.2.2B p.36] card carries the Multi-Story symbol: set the flag; if a building cover without
+    Upper Story already lies there, add the Upper Story marker with the same value."""
+    kid = args[0]
+    c = karte(s, kid)
+    c["mehrstoeckig"] = True
+    prot = [f"card {kid}: Multi-Story symbol recorded [5.3.3 p.38]"]
+    hat_us = any(x["typ"] == "Upper Story" for x in c.get("cover", []))
+    geb = [x for x in c.get("cover", []) if x["typ"] in ("Light Building", "Strong Building")]
+    if geb and not hat_us:
+        uid = neuer_cover(s, kid, "Upper Story", geb[0]["wert"])
+        [x for x in c["cover"] if x["id"] == uid][0]["feld"] = True
+        prot.append(f"Upper Story marker {uid} (+{geb[0]['wert']}) on {kid} with the {geb[0]['typ']} {geb[0]['id']}; does not count towards the Cover Potential [5.3.3 p.38]")
+    speichern(s, "; ".join(prot), "5.3.3 p.38")
+    ausgabe(prot, s)
+
+
 def cmd_notiz(s, args):
     """Free text into the log (corrections, card numbers supplied later)."""
     text = " ".join(args)
@@ -3594,10 +3971,7 @@ def cmd_extern(s, args):
         c.setdefault("extern", []).append({"typ": typ, "wert": wert, "quelle": args[3] if len(args) > 3 else typ})
         prot.append(f"{typ} {wert} on {kid}")
         if typ in ("Incoming", "AirStrike", "Smoke"):
-            for n, e in s["einheiten"].items():
-                if e["karte"] == kid and feuert(e) and e["ziel"] != kid:
-                    e["ziel"] = None
-                    prot.append(f"{n} loses LOS out of the card, remove the PDF [6.1.2]")
+            los_verlust_cease(s, prot)                                   # L95: also fire THROUGH the card (5.4)
     ak = aktivitaet_berechnen(s)
     if ak:
         prot.append(ak)
@@ -3800,7 +4174,6 @@ def ncm_zeilen(s, name):
 
 def _ncm_direkt(s, e, c, basis):
     """L61: comparison value for direct fire alongside Incoming (6.4 'value after modifiers')."""
-    typ = basis[2]
     z = [(basis[0], basis[1])]
     if c.get("grenade_miss"):
         z.append(("Grenade Miss", -1))
@@ -3901,7 +4274,13 @@ def entfernen_rfp(s, name, prot, grund, als_casualty=False, nachfolger=None):
     if ist_hq(e) and e["seite"] == "US":
         s.setdefault("rfp_daten", {})[name] = {k: e.get(k) for k in ("ebene", "platoon", "ft_vof")}   # for 6.5.2
     assets_abgeben(s, e, name, prot, als_casualty, nachfolger)
-    munition_verloren(e, name, prot)
+    if not (nachfolger and (s["einheiten"].get(nachfolger) or {}).get("munition")):   # L93: the successor (A fire team) inherits the ammo
+        munition_verloren(e, name, prot)
+    elif e.get("munition"):
+        prot.append(f"ammo marker ({e['munition'].get('punkte')} {e['munition'].get('typ', '')}) stays with {nachfolger} on {e.get('karte')} [Normandy p.48, 7.18.1B]")
+    _mk = (["Concentrated Fire marker"] if e.get("cf") else []) + (["Grenade VOF marker"] if e.get("grenade") else [])
+    if _mk:                                                          # L70: markers on the removed counter, otherwise only named in Clean Up
+        prot.append(f"remove {' and '.join(_mk)} of {name} on {e.get('karte')} (counter off the board) [3.8 p.17]")
     del s["einheiten"][name]
     s.setdefault("removed_from_play", []).append(name)
     if name in s["kommandos"]:
@@ -4558,11 +4937,27 @@ def aufstellen_v4(s, n, e, o, prot):
         if s.get("patrouille_mission"):
             # [RULE 4.4.1 p.30] Patrol Mission Pyrotechnic Signal Options
             if code not in PYRO_CODES_PAT and not re.fullmatch(r"M2RP[1-4]", code):
-                raise Verstoss(f"Code from the patrol list: CF, M2RP<1-4>, M2PO, M2S [4.4.1 p.30]")
+                raise Verstoss("code from the patrol list: CF, M2RP<1-4>, M2PO, M2S [4.4.1 p.30]")
         elif code not in PYRO_CODES_OFF and not re.fullmatch(r"XPL\d+", code):
             raise Verstoss(f"Code from the offensive list: {', '.join(PYRO_CODES_OFF)}, XPL<n> [4.4.1 p.30]")
         s.setdefault("pyro_belegung", {})[typ] = code
         prot.append(f"Mission Log: {typ} = {code} [4.4.1 p.30]")
+
+
+def aufstellung_hinweise_v4(s):
+    """L77 [RULE 2.3.4 p.10]: assets not handed out, signal assets without an order, CCP missing (not blocking)."""
+    h = []
+    rest = {k: v for k, v in (s.get("assets_pool") or {}).items() if v}
+    if rest:
+        h.append("assets still in the pool: " + ", ".join(f"{k} {v}" for k, v in rest.items()) + " (setup <unit> --asset=<type>)")
+    sig = {"RSP", "RSC", "GSP", "GSC", "Red Smoke", "Green Smoke", "Yellow Smoke", "Purple Smoke"}
+    vert = {a for e in s["einheiten"].values() for a in e.get("assets", []) if a in sig}
+    ohne = sorted(vert - set((s.get("pyro_belegung") or {})))
+    if ohne:
+        h.append("signals without an order: " + ", ".join(ohne) + " (setup <unit> --pyro=<type>:<code>, 4.4.1)")
+    if "ccp" in s.get("ziele", {}) and not (s.get("ccp") or s["ziele"].get("ccp")):   # objective ccp writes s["ccp"]
+        h.append("CCP: objective ccp <card> (5.1.7)")
+    return h
 
 
 def aufstellung_pruefen_v4(s):
@@ -4603,10 +4998,6 @@ def aufstellung_pruefen_v4(s):
 
 
 # ---------------------------------------------------------------- Telephone (4.3.4)
-def leitung_auf(s, kid):
-    return [l for l in karte(s, kid).get("leitungen", []) if True]
-
-
 def telefon_knoten(s):
     """Cards that are part of the phone line network: intact line, phone in use (implicit line, BGG E28), Staging (integrated)."""
     kn = set()
@@ -4920,6 +5311,8 @@ def muni_3_7_4(s, prot):
                 continue
             if muni(e)["typ"] == "RKT":
                 continue                                                          # rockets only for Grenade Attacks (7.18.1D), S fire without ammo
+            if e.get("typ") == "AT Gun" and e.get("vof_rating") == "S":
+                continue                                                          # L87 [Normandy CSR 7 p.15] PAK40/75mm IG: Small Arms VOF 'for which ammo is not tracked'
             muni_verbrauch(s, n, e, 1, "VOF this turn", prot)
 
 
@@ -4928,17 +5321,27 @@ def minen_auf(s, kid):
     return [x for x in karte(s, kid).get("extern", []) if x["typ"] == "Mines"]
 
 
-def minencheck_anfordern(s, namen, kid, prot, grund):
+def pionier_raeumt(s, e):
+    """L82 [Normandy CSR 10 p.16]: Good Order Engineers with 2 or 3 steps clear paths (1 card after a successful infiltration)."""
+    return bool(e.get("engineer")) and good_order(e) and steps(e) >= 2
+
+
+def minencheck_anfordern(s, namen, kid, prot, grund, karten=3, pfad=False):
     if not minen_auf(s, kid):
         return
     namen = [n for n in namen if n in s["einheiten"] and s["einheiten"][n]["typ"] not in ("Casualty",)]
     if not namen:
         return
     s.setdefault("minen_checks", [])
+    info = s.setdefault("minen_check_info", {})
     for n in namen:
         if n not in s["minen_checks"]:
             s["minen_checks"].append(n)
-    prot.append(f"Mine check on {kid} ({grund}) for {', '.join(namen)}: 3 Action cards per unit, hit on a Burst symbol (also multiple Burst and Short); then fof.py mine <unit> yes|no [7.9.1 p.54]")
+        info[n] = {"karten": karten, "pfad": pfad}
+    if pfad:
+        prot.append(f"mine check on {kid} ({grund}) for {', '.join(namen)}: {karten} action card(s), hit on a Burst icon; without a hit the path is marked and the Mines marker comes off; then fof.py mine <unit> yes|no [CSR 10 p.16, 7.9.1 p.54]")
+    else:
+        prot.append(f"mine check on {kid} ({grund}) for {', '.join(namen)}: {karten} action card(s) per unit, hit on a Burst icon (also multi-burst and Short); then fof.py mine <unit> yes|no [7.9.1 p.54]")
 
 
 def cmd_mine(s, args):
@@ -4947,14 +5350,21 @@ def cmd_mine(s, args):
         raise Verstoss(f"No mine check pending for {n}")
     e = einheit(s, n)
     s["minen_checks"].remove(n)
+    info = s.get("minen_check_info", {}).pop(n, {})
     prot = []
     if erg == "ja":
         e["mine_hit"] = True
         for x in minen_auf(s, e["karte"]):
             x["aktiv"] = True
-        prot.append(f"{n} hit by a mine: Mine marker to its explosion side, {n} beneath it; Mines! VOF -4 in 3.7.4; may not move within the card or to an adjacent card this turn [7.9.1 p.54]")
+        prot.append(f"{n} hit by a mine: flip the Mines marker to its explosion side, {n} under it; Mines! VOF -4 in 3.7.4; may not move within the card or to an adjacent card this turn [7.9.1 p.54]"
+                    + ("; path marking failed, the mines stay [CSR 10 p.16]" if info.get("pfad") else ""))
     elif erg == "nein":
-        prot.append(f"{n}: no mine hit")
+        if info.get("pfad"):
+            k = karte(s, e["karte"])
+            k["extern"] = [x for x in k.get("extern", []) if x["typ"] != "Mines"]
+            prot.append(f"{n}: no mine hit, path marked: remove the Mines marker from {e['karte']} [CSR 10 p.16]")
+        else:
+            prot.append(f"{n}: no mine hit")
     else:
         raise Verstoss("yes | no")
     ak = aktivitaet_berechnen(s)
@@ -5220,6 +5630,33 @@ def ereignis_feind(s, ev, o, prot):
         ga = s.get("sonderregeln", {}).get("gegenangriff", {})
         karten_us = sorted({e["karte"] for e in s["einheiten"].values() if e["seite"] == "US" and e.get("karte") in s["karten"]
                             and (opt(s, "U17_gegenangriff_staging") or not karte(s, e["karte"]).get("staging"))})
+        if ga.get("modus") == "m4":
+            # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
+            unaufg = [kk for kk, cc in s["karten"].items() if cc.get("pc") == "?" or (cc.get("pc") and not cc.get("pc_aufgedeckt"))]
+            karten_us = [kk for kk in karten_us if karte(s, kk)["reihe"] == 4 or any(abstand(s, kk, u) == 1 for u in unaufg)]
+            ersetzt = []
+            for kk in karten_us:
+                cc = s["karten"][kk]
+                if cc.get("pc") == "?":
+                    cc["pc2"] = "A"                     # face down: compare only when revealed (8.2.3)
+                elif cc.get("pc") == "A":
+                    pass                                # already A: a second A marker would be the lower one of the same level, nothing changes (8.2.3)
+                elif cc.get("pc"):
+                    ersetzt.append(f"{kk} ({cc['pc']} removed)")   # L88 [RULE 8.2.3 p.62] both face up: the lower letter is removed at once
+                    cc["pc"] = "A"
+                else:
+                    cc["pc"] = "A"
+            if ersetzt:
+                prot.append("two face-up PC markers: the lower one is removed on " + ", ".join(ersetzt) + " [RULE 8.2.3 p.62]")
+            bis = s["zug"] + ga.get("zuege", 3) - 1
+            if not s.get("gegenangriff"):
+                s["gegenangriff"] = {"taktik_vorher": s.get("feind_taktik"), "bis_zug": bis}
+            else:
+                s["gegenangriff"]["bis_zug"] = bis
+            s["feind_taktik"] = ga.get("taktik", "Offensive Assault")
+            prot.append(f"PC marker A on {', '.join(karten_us) or 'no card'} (US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]")
+            prot.append(f"enemy tactic Offensive Assault up to and including turn {bis}; 'Counter Attack Ends' marker on turn {bis + 1}; PC A with the Counter Attack list [MSR 4]")
+            return
         for k in karten_us:
             c = s["karten"][k]
             if c.get("pc"):
@@ -5329,37 +5766,6 @@ def cmd_pc_v4(s, args):
 RICHTUNG = {"Front": (1, 0), "Left Front": (1, -1), "Right Front": (1, 1), "Links": (1, -1), "Rechts": (1, 1)}
 
 
-def platz_in_richtung(s, u, kid, richt, modus, reichweite_max):
-    """[RULE 8.4.1-8.4.3 p.63, 8.4.5 p.65] Card along the direction: 'close' adjacent card, 'max' greatest distance with LOS/range,
-    'max_los' greatest distance with LOS up to Very Long. Returns (card, None) or (None, missing extension) or (None, reason)."""
-    dr, dc = RICHTUNG[richt]
-    kt = karte(s, kid)
-    dists = [1] if modus == "close" else list(range(1, reichweite_max + 1))
-    beste, fehlt = None, None
-    for d in dists:
-        r, c = kt["reihe"] + dr * d, kt["spalte"] + dc * d
-        k = karte_bei(s, r, c)
-        if k is None:
-            # extension only makes sense if the LOS up to the last existing card is not already blocked
-            if fehlt is None and (d == 1 or los(s, karte_bei(s, kt["reihe"] + dr * (d - 1), kt["spalte"] + dc * (d - 1)), kid)[0]):
-                fehlt = (r, c)
-            break
-        if not los(s, k, kid)[0]:
-            if modus == "close":
-                return None, f"no LOS {k} to {kid}"
-            if d > 1 and not los(s, karte_bei(s, kt["reihe"] + dr * (d - 1), kt["spalte"] + dc * (d - 1)), kid)[0]:
-                break                                                  # LOS stays blocked beyond (same intervening cards)
-            continue
-        if karte(s, k).get("staging"):
-            continue
-        beste = k
-    if fehlt and (modus == "close" or opt(s, "U19_erweitern_bis_reichweite") or beste is None):
-        return None, ("erweitern", fehlt)
-    if beste is None:
-        return None, "no card with LOS in this direction"
-    return beste, None
-
-
 def platz_pruefen_v4(s, u, k, kid, pk):
     """Placement restrictions 8.4.3 for a package unit on card k (trigger kid)."""
     if auf(s, k, "Feind") and not u.get("_gleiche_karte_ok"):
@@ -5408,6 +5814,8 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
     c = karte(s, kid)
     prot = []
     trigger = [n for n in auf(s, kid, "US")]
+    if pk.get("minen_redraw") and minen_auf(s, kid):
+        raise Verstoss(f"Mines! package on {kid}, mines already lie there: redraw the package [Normandy M4 MSR 1 p.30]")
     # ---- determine the package's units
     if pk.get("wahl"):
         w = o.get("--wahl")
@@ -5448,6 +5856,9 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
             raise Verstoss(f"Package {paket}: draw a card, 1 = {list(pk['varianten'])[0]}, 2 = {list(pk['varianten'])[1]} (BGG B4); --variant=<{'|'.join(pk['varianten'])}>")
         var = pk["varianten"][vn]
         prot.append(f"Variant {vn} (Incoming {var['wert']:+d}) [Normandy M1 p.19]")
+        # L91 (E60): count spotter counters per firing agency (Arty Spotter / Mortar Spotter)
+        if "Arty Spotter" in s.get("countermix", {}):     # only if the game keeps separate spotter counters (M4+)
+            einh = [dict(u, einheit=("Arty Spotter" if vn == "Artillery" else "Mortar Spotter")) if u.get("spotter") or u.get("einheit") == "Spotter" else u for u in einh]
         if var.get("ohne_einheiten"):
             einh = []
             prot.append("without Spotter (Normandy M2 p.23: 'Artillery -4 with no Spotter')")
@@ -5533,8 +5944,8 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
                 if not (u.get("spotter") or u.get("typ") == "Spotter") and not (u.get("cover") in STRUKTUR or moerser(u)):
                     plaetze.append(k)
                     continue
-                raise Verstoss(f"{ziel_name if False else u['einheit']}: Point Blank placement on {kid} not possible (Spotter/structure/mortar) [8.4.3]")
-            if richtung(s, kid, k) != RICHTUNG[richt] or abstand(s, kid, k) > hi or (m == "close" and abstand(s, kid, k) != 1) or not los(s, k, kid)[0]:
+                raise Verstoss(f"{u['einheit']}: Point Blank placement on {kid} not possible (spotter/structure/mortar) [8.4.3]")
+            if richtung(s, kid, k) != RICHTUNG[richt] or abstand(s, kid, k) > hi or (m == "close" and abstand(s, kid, k) != 1) or not los(s, k, kid, hb=karte_hoehe(s, kid, "US"))[0]:
                 raise Verstoss(f"{k} is not in direction {richt} within LOS/range of {kid} [8.4.2/8.4.3 p.63]")
         else:
             kands, fehlt = [], None
@@ -5550,7 +5961,7 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
                         fehlt = (kt["reihe"] + dr * d, kt["spalte"] + dc * d)
                     break
                 letzte = kk
-                los_ok = los(s, kk, kid)[0]
+                los_ok = los(s, kk, kid, hb=karte_hoehe(s, kid, "US"))[0]
                 if not los_ok and d > 1:
                     break
                 if los_ok and not platz_pruefen_v4(s, u, kk, kid, pk) and not karte(s, kk).get("staging"):
@@ -5585,10 +5996,7 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
             prot.append(f"Mines! marker (Draw 3 side, VOF {wert}) on {kid}; every unit on {kid} checks immediately [8.7.1 p.67]")
         else:
             prot.append(f"Incoming! marker (active, VOF {wert}) on {kid}; first fire mission automatic, blocks LOS out of {kid} [8.10 p.68, 5.4]")
-            for n, e in s["einheiten"].items():
-                if e["karte"] == kid and feuert(e) and e["ziel"] != kid:
-                    e["ziel"] = None
-                    prot.append(f"{n} loses LOS out of the card, remove PDF [6.1.2]")
+            los_verlust_cease(s, prot)                                   # L95: also fire THROUGH the card (5.4)
     # ---- place units
     neue, cid_vorig = [], {}
     geb_liste = liste_opt(o, "--gebaeude")
@@ -5609,13 +6017,21 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
                 else:
                     gid = neuer_cover(s, platz, gt, gw)
                     prot.append(f"Building {gt} (+{gw}) worse than {u['cover']}: marker {gid} stays on {platz} (BGG E21)")
-            cid = neuer_cover(s, platz, ctyp, cwert)
+            # L90 (E58): the same building/cover marker already lies free on the card: move in instead of a duplicate marker (5.3.3 Cover Potential)
+            frei = [x for x in karte(s, platz)["cover"] if x["typ"] == ctyp and x["wert"] == cwert and ctyp not in STRUKTUR
+                    and not [m for m in auf(s, platz) if s["einheiten"][m].get("bereich") == x["id"] and s["einheiten"][m]["seite"] == "US"]]
+            if frei:
+                cid = frei[0]["id"]
+                prot.append(f"{t} into the existing {ctyp} {cid} (+{cwert}) on {platz} (no second marker) [E58]")
+            else:
+                cid = neuer_cover(s, platz, ctyp, cwert)
             cv = [x for x in karte(s, platz)["cover"] if x["id"] == cid][0]
             if u.get("cover_kapazitaet"):
                 cv["kapazitaet"] = u["cover_kapazitaet"]
             if ctyp in STRUKTUR and platz != kid:
                 cv["richtung"] = list(richtung(s, platz, kid))
-            prot.append(f"{ctyp} marker {cid} (+{cwert}) on {platz}")
+            if not frei:
+                prot.append(f"{ctyp} marker {cid} (+{cwert}) on {platz}")
         cid_vorig[idx] = cid
         spotted = bool(u.get("spotted", pk.get("spotted")))
         e = {"typ": u.get("typ", "Weapons Team"), "typname": t, "seite": "Feind", "erfahrung": u.get("erfahrung", "Line"), "karte": platz,
@@ -5638,7 +6054,7 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
                 frei = [x for x in karte(s, platz).get("cover", []) if not any(s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == x["id"] for m in auf(s, platz))]
                 if frei:
                     e["bereich"] = max(frei, key=lambda x: x["wert"])["id"]
-                prot.append(f"Patrol successful: not Exposed" + (f", under {e['bereich']}" if e["bereich"] != "offen" else "") + " [CSR 6 p.14]")
+                prot.append("patrol successful: not Exposed" + (f", under {e['bereich']}" if e["bereich"] != "offen" else "") + " [CSR 6 p.14]")
             else:
                 markieren(e, "Exposed")
                 prot.append("Patrol failed: without cover and Exposed [CSR 6 p.14]")
@@ -5700,6 +6116,9 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
         prot.append("Enemy Unspotted: no return fire, spot first [8.5, 6.1.1]")
     if any(mk["typ"] == "Mines" for mk in pk.get("marker", [])):
         minencheck_anfordern(s, auf(s, kid), kid, prot, "Mines package")
+        _eng = [n for n in auf(s, kid) if s["einheiten"][n].get("engineer") and good_order(s["einheiten"][n]) and steps(s["einheiten"][n]) >= 2]
+        if _eng:
+            prot.append(f"{', '.join(_eng)}: Engineers draw only 1 action card instead of 3 for this mine check [Normandy CSR 10 'Mine Detection'] (L74)")
     c["pc"] = None                                                                   # v4: availability only via the countermix (8.3)
     prot.append(f"Remove PC marker from {kid} [8.2.4]")
     ak = aktivitaet_berechnen(s)
@@ -5714,7 +6133,6 @@ def pc_kontakt_v4(s, kid, paket, pk, o):
 def feind_zeile_v4(s, n):
     """Returns a hierarchy row for cases v3 does not know, otherwise None."""
     e = s["einheiten"][n]
-    kid = e["karte"]
     if e.get("ooa_fallback") and ft_seite(e) and e.get("spotted"):
         return "O-A Out-of-Ammo team on Fire Team side, Spotted: Fall Back instead of hierarchy [8.11 p.68]", "Auto", {"Auto": "Fall Back"}
     if pinned(e) or ist_lat(e) or ft_seite(e):
@@ -5742,7 +6160,7 @@ def feind_zeile_v4(s, n):
 def spotter_ziel(s, n):
     """[RULE 8.10 p.68] Priority: Target Marker card, vehicle, most steps, nearest card, random."""
     e = s["einheiten"][n]
-    kand = [k for k in s["karten"] if auf(s, k, "US") and not karte(s, k).get("staging") and (k == e["karte"] or los(s, e["karte"], k)[0])]
+    kand = [k for k in s["karten"] if auf(s, k, "US") and not karte(s, k).get("staging") and (k == e["karte"] or los(s, e["karte"], k, ha=hoehe(s, e), hb=karte_hoehe(s, k, "US"))[0])]
     if not kand:
         return None
     tk = s.get("feind_target", {}).get(e.get("typname"))
@@ -5772,9 +6190,15 @@ def feind_zeile_offensiv(s, n, gegner_da, cover, feuert_):
                 {"1": "No Action", "2": "Fall Back", "3-5": "Grenade Attack"})
     if e.get("out_of_ammo") and e.get("vof_rating") in ("A", "G", "H"):
         return ("O3 A/G!/H with Out of Ammo", "2" if ov else "3", {"1": "No Action", "2": "Advance Straight Ahead"} if ov else {"1-2": "No Action", "3": "Fall Back"})
+    rgz = leader_rg_ziel(s, n) if v4(s) else None
+    if rgz:
+        # L89 [RULE 8.9 p.67] Leader with Rifle Grenade as a G! unit with a target along the card's PDF (offensive table O4)
+        return (f"O4 Leader with Rifle Grenade ({e.get('rifle_grenades')} rounds) as G! along the PDF to {rgz} [8.9 p.67]", "Auto" if ov else "4",
+                {"Auto": "Grenade Attack"} if ov else {"1": "No Action", "2-3": "Grenade Attack", "4": "Advance Straight Ahead"})
     if e.get("vof_rating") in ("A", "G", "H") and (feuert_ or (e.get("vof_rating") == "G" and feuerkandidaten_g(s, n))):
-        return ("O4 A/G!/H with a valid target along PDF", "4" if ov else "Auto",
-                {"1": "No Action", "2-3": "Grenade Attack (or Concentrate Fire)", "4": "Advance Straight Ahead"} if ov else {"Auto": "Grenade Attack (or Concentrate Fire)"})
+        # L89: player aid O4: Assault 1/4 No Action, 2-3/4 Grenade Attack, 4/4 Advance; Overrun Auto Grenade Attack (previously swapped)
+        return ("O4 A/G!/H with a valid target along the PDF", "Auto" if ov else "4",
+                {"Auto": "Grenade Attack (or Concentrate Fire)"} if ov else {"1": "No Action", "2-3": "Grenade Attack (or Concentrate Fire)", "4": "Advance Straight Ahead"})
     return ("O5 all other cases", "3" if ov else "4",
             {"1": "Infiltrate towards closest opposing unit", "2-3": "Advance Straight Ahead"} if ov else
             {"1": "No Action", "2-3": "Infiltrate towards closest opposing unit", "4": "Advance Straight Ahead"})
@@ -5783,7 +6207,24 @@ def feind_zeile_offensiv(s, n, gegner_da, cover, feuert_):
 def feuerkandidaten_g(s, n):
     """G! unit without PDF: target in LOS and range (player aid: 'Also applies to a G! rated unit on a card with no PDF, but with a target in LOS')."""
     e = s["einheiten"][n]
-    return [k for k in s["karten"] if k != e["karte"] and gueltiges_ziel(s, k, e["seite"]) and in_reichweite(s, e, k) and los(s, e["karte"], k)[0]]
+    return [k for k in s["karten"] if k != e["karte"] and gueltiges_ziel(s, k, e["seite"]) and in_reichweite(s, e, k) and los(s, e["karte"], k, ha=hoehe(s, e), hb=karte_hoehe(s, k, gegner_von(e)))[0]]
+
+
+def leader_rg_ziel(s, n):
+    """L67 [RULE 8.9 p.67] Leader with Rifle Grenade: 'can fire them along their card's existing PDF ... treat them as G!-rated units on the
+    Enemy Activity Chart'. Returns the target card along an existing PDF of his card (rifle grenade range), else None."""
+    e = s["einheiten"][n]
+    if not e.get("leader") or e.get("rifle_grenades", 0) <= 0 or not good_order(e) or ft_seite(e):
+        return None
+    kid = e["karte"]
+    rw = s.get("rifle_grenade_reichweite", "C")
+    for m, x in s["einheiten"].items():
+        if m == n or x.get("seite") != e["seite"] or x.get("karte") != kid or not feuert(x) or x.get("ziel") in (None, kid):
+            continue
+        z = x["ziel"]
+        if gueltiges_ziel(s, z, e["seite"]) and in_reichweite(s, dict(e, reichweite=rw), z):
+            return z
+    return None
 
 
 def leader_da(s, e):
@@ -6022,7 +6463,7 @@ def cmd_patrouille(s, args):
     if not args:
         z = s.get("ziele", {})
         print(f"Patrol {len(p.get('erledigt', [])) + (0 if s.get('missionsende') else 1)}: Platoon {p.get('platoon') or '-'}; members: {', '.join(p.get('mitglieder', [])) or '-'}")
-        print(f"Route: " + ", ".join(f"{i} {z.get('route', {}).get(str(i)) or '-'}" for i in (1, 2, 3, 4)) + f"; reached {p.get('route_index', 0)}/4; Primary {z.get('primaer') or '-'} {'passed' if p.get('primaer_besucht') else 'open'}; success {'yes' if p.get('erfolg') else 'no'}")
+        print("Route: " + ", ".join(f"{i} {z.get('route', {}).get(str(i)) or '-'}" for i in (1, 2, 3, 4)) + f"; reached {p.get('route_index', 0)}/4; Primary {z.get('primaer') or '-'} {'passed' if p.get('primaer_besucht') else 'open'}; success {'yes' if p.get('erfolg') else 'no'}")
         print(f"Done: {', '.join(p.get('erledigt', [])) or 'none'}")
         return
     o = opts_parse(args[2:])
@@ -6407,7 +6848,7 @@ def pyro_ausfuehren(s, z, name, o, prot):
             prot.append(f"{n} cannot follow the signal: {v}")
             continue
         if akt == "4.2.2c" and erg.get(n) not in ("ja", "nein"):
-            raise Verstoss(f"Infiltration by signal: each unit draws 2 cards (own experience): --success=" + ",".join(f"{m}:yes|no" for m in ziel_von) + " [4.4.1 p.30]")
+            raise Verstoss("infiltration by signal: every unit draws 2 cards (own experience): --success=" + ",".join(f"{m}:yes|no" for m in ziel_von) + " [4.4.1 p.30]")
         bewegen(s, n, zk2, None, exposed=(akt == "4.2.2a" or erg.get(n) == "nein"), prot=prot)
     if not ziel_von:
         prot.append("no unit meets the requirement of the signal")
@@ -6509,8 +6950,6 @@ def befehl_runner_box(s, hq_name, ziel_name, akt, o):
 
 # ---------------------------------------------------------------- Rule lookup
 def cmd_regel(args):
-    if not (DATA / "regelindex.json").exists():
-        sys.exit("No rule index yet: run tool/build_rules_index.py --rules <your rulebook PDF> first (no rule text ships with this kit).")
     idx = json.loads((DATA / "regelindex.json").read_text(encoding="utf-8"))
     komp = (DATA / "regelbuch_kompakt.txt").read_text(encoding="utf-8").split("\n")
     nr = args[0]
@@ -6521,8 +6960,7 @@ def cmd_regel(args):
     ende = folgende[0][0] if folgende else start + 40
     print(f"[RULE {nr} p.{idx[nr]['seite']}] {idx[nr]['titel']}")
     print("\n".join(komp[start - 1:min(ende - 1, start + 80)]))
-    clf = DATA / "clarifications_2025_05_kompakt.txt"
-    cl = clf.read_text(encoding="utf-8") if clf.exists() else ""
+    cl = (DATA / "clarifications_2025_05_kompakt.txt").read_text(encoding="utf-8")
     haupt = ".".join(nr.split(".")[:2])
     if re.search(r"\b" + re.escape(nr) + r"\b", cl) or re.search(r"\b" + re.escape(haupt) + r"\b", cl):
         print(f"\nNOTE: Clarifications May 2025 mention {haupt}/{nr}; see data/clarifications_2025_05_kompakt.txt")
@@ -6534,73 +6972,6 @@ def cmd_suche(args):
         for i, l in enumerate(f.read_text(encoding="utf-8").split("\n"), 1):
             if rx.search(l):
                 print(f"{f.name}:{i}: {l.strip()[:140]}")
-
-
-# ---------------------------------------------------------------- English command-line aliases
-# The engine was written in German. Every command, sub-word, option and value below has an English alias;
-# the German originals keep working. Internal identifiers and JSON keys stay German (see GLOSSARY.md).
-CMD_ALIASES = {
-    "new": "neu", "rule": "regel", "search": "suche", "status": "stand", "check": "pruefung",
-    "phase": "phase", "activate": "aktivieren", "hq": "hq", "card": "karte", "gi": "gi", "order": "befehl",
-    "done": "fertig", "fire": "feuer", "enemycheck": "feindcheck", "enemyaction": "feindaktion", "pc": "pc",
-    "external": "extern", "enemy": "feind", "ncm": "ncm", "note": "notiz", "hit": "treffer", "endturn": "rundenende",
-    "setup": "aufstellen", "radio": "funk", "drop": "ablegen", "options": "optionen", "terrain": "terrain",
-    "extend": "erweitern", "objective": "ziel", "set": "werte", "event": "ereignis", "mine": "mine", "sniper": "sniper",
-    "line": "leitung", "runner": "runner", "ammo": "munition", "capture": "gefangen", "xp": "xp",
-    "reattempt": "reattempt", "reconstitute": "rekon", "campaign": "kampagne", "visibility": "sicht", "illum": "illum",
-    "patrol": "patrouille",
-}
-SUBWORD_ALIASES = {   # per (German) command: English positional word -> German word
-    "phase": {"next": "weiter"},
-    "patrouille": {"next": "naechste"},
-    "reattempt": {"done": "fertig"},
-    "xp": {"add": "plus", "spend": "ausgeben"},
-    "pc": {"reveal": "aufdecken", "set": "setzen", "clear": "frei", "contact": "kontakt"},
-    "ziel": {"primary": "primaer", "secondary": "sekundaer", "concentration": "konzentration"},
-    "leitung": {"lay": "legen"},
-    "funk": {"check": "pruefen", "damage": "schaden", "intact": "heil", "destroyed": "zerstoert"},
-    "feuer": {"off": "aus"},
-    "extern": {"remove": "weg"}, "feind": {"remove": "weg"}, "illum": {"remove": "weg"},
-    "munition": {"depot": "lager"},
-    "ereignis": {"yes": "ja", "no": "nein"},
-    "mine": {"yes": "ja", "no": "nein"},
-}
-OPT_ALIASES = {
-    "--target": "--ziel", "--success": "--erfolg", "--unit": "--einheit", "--net": "--netz", "--area": "--bereich",
-    "--value": "--wert", "--mortar": "--moerser", "--place": "--platz", "--free": "--gratis", "--agency": "--agentur",
-    "--edges": "--raender", "--building": "--gebaeude", "--building-value": "--gebaeude_wert", "--experience": "--erfahrung",
-    "--who": "--wer", "--type": "--typ", "--move-target-marker": "--target", "--skill-from": "--skill-von", "--no": "--nr",
-    "--to": "--nach", "--with": "--mit", "--lines": "--leitungen", "--device": "--geraet", "--from": "--aus",
-    "--extra": "--zusatz", "--what": "--was", "--choice": "--wahl", "--source": "--von", "--variant": "--variante",
-    "--raw": "--roh", "--direction": "--richtung", "--range": "--reichweite", "--origin": "--quelle",
-    "--this-turn-only": "--nur_zug", "--line": "--leitung", "--grenade": "--granate", "--at": "--bei",
-    "--battalion": "--bataillon",
-}
-VALUE_ALIASES = {"yes": "ja", "no": "nein", "open": "offen", "Left": "Links", "Right": "Rechts", "none": "keiner",
-                 "radio": "funk", "phone": "telefon", "section": "sektion"}
-
-
-def argv_deutsch(argv):
-    """Translate an English command line into the engine's German command line (German input passes unchanged)."""
-    if not argv:
-        return argv
-    cmd = CMD_ALIASES.get(argv[0], argv[0])
-    sub = SUBWORD_ALIASES.get(cmd, {})
-    out = [cmd]
-    for a in argv[1:]:
-        if a.startswith("--"):
-            k, eq, v = a.partition("=")
-            k = OPT_ALIASES.get(k, k)
-            if eq and k == "--raender":
-                for en_, de_ in (("top", "oben"), ("bottom", "unten"), ("left", "links"), ("right", "rechts"),
-                                 ("white", "weiss"), ("green", "gruen"), ("dark", "gruen"), ("corner", "diagonal")):
-                    v = v.replace(en_, de_)
-            elif eq:
-                v = ",".join(VALUE_ALIASES.get(x, x) for x in v.split(",")) if k in ("--richtung",) else VALUE_ALIASES.get(v, v)
-            out.append(k + eq + v)
-        else:
-            out.append(sub.get(a, a))
-    return out
 
 
 def main():
@@ -6617,8 +6988,8 @@ def main():
             return cmd_suche(args)
         s = laden()
         tabelle = {"phase": cmd_phase, "aktivieren": cmd_aktivieren, "hq": cmd_hq, "karte": cmd_karte, "gi": cmd_gi,
-                   "befehl": cmd_befehl, "fertig": cmd_fertig, "feuer": cmd_feuer, "feindcheck": cmd_feindcheck,
-                   "feindaktion": cmd_feindaktion, "pc": cmd_pc, "extern": cmd_extern, "feind": cmd_feind, "ncm": cmd_ncm, "notiz": cmd_notiz,
+                   "befehl": cmd_befehl, "nachtrag": cmd_nachtrag, "korrektur": cmd_korrektur, "fertig": cmd_fertig, "feuer": cmd_feuer, "feindcheck": cmd_feindcheck,
+                   "feindaktion": cmd_feindaktion, "pc": cmd_pc, "extern": cmd_extern, "feind": cmd_feind, "ncm": cmd_ncm, "notiz": cmd_notiz, "mehrstoeckig": cmd_mehrstoeckig,
                    "treffer": cmd_treffer, "rundenende": cmd_rundenende, "aufstellen": cmd_aufstellen, "funk": cmd_funk,
                    "ablegen": cmd_ablegen, "optionen": cmd_optionen,
                    # v4
