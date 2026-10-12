@@ -60,13 +60,19 @@ ncm <unit> | hit <unit> HIT|PIN|MISS [letters] | mine <unit> yes|no | capture <e
 setup <unit> <card> [--area=C1] [--platoon=<n>] [--asset=<type>] | terrain <card> <type> | extend <row> <col> <type>
 objective primary|route|cop|concentration ... | visibility <light> | illum <card> <top> [<bottom>]
 patrol start|next <platoon> [--with=a,b] | reattempt done | reconstitute <unit> --from=<LATs> | xp [add|spend <n> <reason>]
+lateorder <hq> <unit> <action id> [...]   forgotten order of an HQ whose impulse already ended this turn
+correct casualty|status|grenade|ammo|target ... --reason=..   fix a proven wrong booking (the board is the master)
+radio check <HQ>                  every unit the HQ can reach right now | radio check <a> <b>   one pair
+multistory <card>                 record the Multi-Story symbol (Upper Story marker, 5.3.3)
 ```
 Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c Infiltrate, 4.2.2e Seek Cover,
 4.2.3a Rally, 4.2.4a Spot, 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).
 
 ## Scope and limits
-- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 3
-  (offensive missions, night patrols, reattempts, campaign experience). Several hundred turns of real play.
+- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 4
+  (offensive missions, night patrols, reattempts, counter attacks, campaign experience). Several hundred turns of real play.
+- One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
+  `CHANGELOG.md` lists the changes.
 - Not implemented: vehicles and AT combat (chapter 10), helicopters/air assault, urban combat (13.0).
   Other campaigns need their own setup data and may need code for their special rules.
 - Where the rules are unclear the tool uses a documented reading. `fof.py options` lists these, and output marks
