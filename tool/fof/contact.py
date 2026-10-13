@@ -945,7 +945,7 @@ def pc_contact_v4(s, kid, package, pk, o):
         # L91 (E60): count spotter counters per firing agency (Arty Spotter / Mortar Spotter)
         if "Arty Spotter" in s.get("countermix", {}):  # only if the game keeps separate spotter counters (M4+)
             units = [
-                dict(u, unit=("Arty Spotter" if vn == "Artillery" else "Mortar Spotter"))
+                dict(u, einheit=("Arty Spotter" if vn == "Artillery" else "Mortar Spotter"))
                 if u.get("spotter") or u.get("einheit") == "Spotter"
                 else u
                 for u in units

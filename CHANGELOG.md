@@ -1,6 +1,41 @@
 # Changelog
 
+## 2026-10-13 (third release)
+Engine updates found during Normandy Mission 4 play (counter attack, grenade fights, retreats and captures), plus
+the fall-back and grenade rulings collected from the BGG rules forum after the mission:
+- New command `retreat <unit> [<card>]` (German `rueckzug`) for 3.5.2: checks whether a retreat is mandatory
+  (unpinned, not Exposed, under a VOF; Litter Teams only with a casualty), picks the card one row towards the
+  friendly edge without a VOF, then the highest C&C (ties by R#), the Litter Team takes the casualty along, the
+  unit becomes Exposed. `phase next` out of 3.5.2 is refused while a mandatory retreat is still open. L110, L123
+- Capture (3.5.1, 8.15): Paralyzed/Litter Teams that are alone on their card are taken as one group with a single
+  guard step; enemy casualties on that card are captured right after. L117
+- Enemy fall back (8.6.3): priority 1 (off-map) is enforced when the unit stands on or behind the top mission row
+  and one of the three places towards the enemy edge has no card, or when it stands beyond a side boundary;
+  `--target=off-map` is rejected in every other position. L125
+- Grenade attacks hit the whole stack under a cover marker (7.10.1), for enemy attacks too; Critical Hit (7.10.3)
+  with `--critical=yes`; no Grenade Miss marker while part of the hit stack remains (7.10.4); the free grenade
+  response (7.10.5) is offered only against a point-blank attack from the same card, never from a bunker or
+  pillbox, never while Pinned, and is listed per unit of the hit stack. L112, L115, L116, L124
+- Opening fire: a unit on a card that already has a friendly PDF joins that fire (6.1.1); no target behind a
+  nearer card with visible enemies (6.1.2); a PDF that already lies on the same card to the same target is
+  reported instead of a second marker. L121, L122
+- Cease Fire and Shift Fire reach every firing unit of the card, not only those with the same target (4.3.1
+  note). L114
+- Every save now reports changed VOF markers (strongest VOF per card), Crossfire markers, and new or ended mutual
+  PDFs (6.3.1) as Board lines before the CHECKSTAMP; during 3.7.4 these reports are held back and compared once
+  against the state at the start of the segment. L111, L113, L119
+- Every movement lists the markers that travel with the unit (Pinned, ammo, Out of Ammo, assets, radios). L109
+- Infiltrate (4.2.2c) checks 5.1.4 (a VOF on the start or target card) before asking for the card draw;
+  Engineers infiltrating within a mine card need no `--area` (Normandy CSR 10). L107, L120
+- An enemy moving onto a card where spotted and unspotted enemies would mix makes the whole card spotted
+  (8.5). L108
+- Small fixes: English area names in the move-within-a-card message, `hit` without arguments prints its usage. L105, L118
+
 ## 2026-10-12 (restructuring, same behaviour)
+- New command `undo <entry> --reason=..` (German `zurueck`): every save keeps a snapshot of the state in
+  `<game>/verlauf/<entry>.json` (last 40 entries); undo restores one and lists the discarded entries.
+- Fix after the rename: 35 keyword arguments that write game-state keys (`update(karte=...)`, `dict(punkte=...)`)
+  had been renamed to English; restored, guarded by `tests/test_state_keys.py`.
 Verified with two state-based regression games (454 commands): identical exit codes and identical final game
 states before and after every step.
 - One engine package `tool/fof/` (16 modules) instead of a 9000-line file; `tool/fof.py` is the entry point.

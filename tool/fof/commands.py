@@ -389,24 +389,61 @@ def check_move(s, e, n, target_card, akt):
                             )
 
 
-def grenade_back_note(s, thrower, target, success):
-    """7.10.5 Free Grenade Attack Response: a Good Order unit on the same card always responds (thrower must be Spotted);
-    an unpinned LAT with VOF only responds to a successful attack by a Spotted thrower."""
-    same_card = thrower["karte"] == target["karte"]
-    lat = target["typ"] in ("Paralyzed Team", "Litter Team", "Fire Team", "Assault Team")
-    thrower_spotted = thrower["seite"] == "US" or thrower.get("spotted")
-    if not lat and same_card and thrower_spotted:
-        return f"{target.get('typname', 'Ziel')}: free response throw at {thrower['karte']} (Good Order, same card) [7.10.5]"
-    if lat and not state.pinned(target) and target.get("vof_rating") and success and thrower_spotted:
-        return "Target (LAT with VOF, unpinned): free response throw [7.10.5]"
-    return "No response throw: only Good Order units on the same card or unpinned LATs with VOF [7.10.5]"
+def grenade_stack(s, name):
+    """[RULE 7.10.1 p.54] Target of a Grenade Attack: one unit out of cover or the whole stack under its Cover marker."""
+    f = state.unit(s, name)
+    if f.get("bereich", "offen") == "offen":
+        return [name]
+    return [m for m in state.units_on(s, f["karte"], f["seite"]) if s["einheiten"][m].get("bereich") == f["bereich"]]
+
+
+def grenade_back_note(s, thrower, target, success, name=None):
+    """7.10.5 Free Grenade Attack Response. K31 (BGG Shonai_Dweller 3563964, 3517434, 3780916): only against a Point Blank
+    attack from the same card; never from inside a Bunker/Pillbox, never while Pinned; a LAT only with a VOF and only after
+    a successful attack; the attacker must be Spotted."""
+    who = name or target.get("typname", "Target")
+    if thrower["karte"] != target["karte"]:
+        return f"{who}: no response throw, the attack did not come from the same card (Point Blank only) [7.10.5, K31]"
+    if not (thrower["seite"] == "US" or thrower.get("spotted")):
+        return f"{who}: no response throw, the attacker is Unspotted [7.10.5]"
+    if state.pinned(target):
+        return f"{who}: no response throw, Pinned [7.10.5, K31]"
+    cv = geometry.cover_marker(s, target)
+    if cv and (cv["typ"] in rules.STRUCTURES or "Bunker" in cv["typ"]):
+        return f"{who}: no response throw from the {cv['typ']} (no Point Blank attack from inside) [5.3.2, 7.10.5, K31]"
+    if target["typ"] not in ("Paralyzed Team", "Litter Team", "Fire Team", "Assault Team"):
+        return f"{who}: free response throw at the attacker (Good Order, same card) [7.10.5]"
+    if target.get("vof_rating") and success:
+        return f"{who} (unpinned LAT with VOF): free response throw at the attacker [7.10.5]"
+    return f"{who}: no response throw (a LAT only with a VOF and only after a successful attack) [7.10.5]"
+
+
+def grenade_back_notes(s, thrower, names, success, prot):
+    """7.10.5 for every unit of the attacked stack (rule note: every eligible unit of a stack responds); one line at range."""
+    if names and s["einheiten"][names[0]]["karte"] != thrower["karte"]:
+        prot.append("No response throw: the attack did not come from the same card (Point Blank only) [7.10.5, K31]")
+        return
+    for m in names:
+        prot.append(grenade_back_note(s, thrower, s["einheiten"][m], success, m))
 
 
 def grenade_expires(s, e, name, prot):
     """7.10.4: if the target of a successful Grenade Attack moves before 3.7.4 (card change or within the card), it becomes a Grenade Miss on the original card."""
     if e.get("grenade"):
-        state.card(s, e["karte"])["grenade_miss"] = True
+        rest = [
+            m
+            for m in state.units_on(s, e["karte"], e["seite"])
+            if m != name and s["einheiten"][m].get("grenade") and s["einheiten"][m].get("bereich") == e.get("bereich")
+        ]
         e["grenade"] = []
+        e.pop("grenade_critical", None)
+        if rest:
+            # K32 (Manuel): the target was the stack; while part of it stays, the Grenade marker stays with it, no Grenade Miss
+            prot.append(
+                f"{name} leaves the grenaded stack; the Grenade marker stays with {', '.join(rest)} [7.10.4, K32]"
+            )
+            return
+        state.card(s, e["karte"])["grenade_miss"] = True
         prot.append(
             f"Grenade marker on {name} becomes Grenade Miss (-1) on {e['karte']}: target moved before 3.7.4 [7.10.4]"
         )
@@ -724,7 +761,7 @@ def hq_back(s, hq_name2, z, prot):
     s["removed_from_play"].remove(hq_name2)
     s["einheiten"][hq_name2] = e
     s["kommandos"].setdefault(hq_name2, {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False})
-    s["kommandos"][hq_name2].update(saved=0, available=0)
+    s["kommandos"][hq_name2].update(gespart=0, verfuegbar=0)
     prot.append(
         f"{hq_name2} reconstituted on {z['karte']}, Green (saves at most {rules.SAVE_LIMIT['Green'][0]}) [RULE 6.5.2 p.49]"
     )
@@ -1149,6 +1186,8 @@ def _order_seek_cover(s, ctx):
 def _order_move_within_card(s, ctx):
     """Order handler for: akt in ('4.2.2f', '4.2.2g')"""
     b = ctx.o.get("--bereich")
+    if not b and ctx.akt == "4.2.2g" and contact.engineers_clear(s, ctx.z) and contact.mines_on(s, ctx.z["karte"]):
+        b = ctx.z.get("bereich", "offen")  # [Normandy CSR 10] engineers clearing mines need no destination (L107)
     if not b:
         raise rules.Violation("Specify --area=<cover-id|open>")
     if ctx.akt == "4.2.2g" and fire.vof_against(s, ctx.z["karte"], ctx.z["seite"]) is None:
@@ -1168,7 +1207,7 @@ def _order_move_within_card(s, ctx):
     if fixed:
         ctx.prot.append("between Trench/Bunker/Pillbox markers of the same card without Exposed [RULE 5.1.1 p.31]")
     ctx.prot.append(
-        f"{ctx.target_name} to {b} on {ctx.z['karte']}"
+        f"{ctx.target_name} to {'open' if b == 'offen' else b} on {ctx.z['karte']}"
         + (", Exposed" if "Exposed" in ctx.z["status"] else ", not Exposed")
     )
     if state.is_mortar(ctx.z) and fire.is_firing(ctx.z) is False and ctx.z.get("ziel"):
@@ -1449,14 +1488,32 @@ def _order_grenade_attack(s, ctx):
         if not ze:
             raise rules.Violation("--unit=<target enemy or cover stack>")
         f = state.unit(s, ze)
-        f.setdefault("grenade", []).append(int(ctx.o.get("--wert", -4)))
-        ctx.prot.append(f"Grenade VOF {ctx.o.get('--wert', -4)} on {ze} (cumulative) [7.10.6]")
-        ctx.prot.append(grenade_back_note(s, ctx.z, f, True))
+        value = int(ctx.o.get("--wert", -4))
+        under = f.get("bereich", "offen") != "offen"
+        # [RULE 7.10.1 p.54] "Direct a Grenade Attack at one specific unit out of cover or a stack of units under a Cover marker" (L112)
+        stack = grenade_stack(s, ze)
+        critical = ctx.o.get("--kritisch") == "ja"
+        for m in stack:
+            g = s["einheiten"][m]
+            g.setdefault("grenade", []).append(value)
+            if critical and under:
+                g["grenade_critical"] = True
+            elif critical:
+                g["grenade"].append(value)
+        where = f" (stack under {f['bereich']})" if under else ""
+        ctx.prot.append(f"Grenade VOF {value} on {', '.join(stack)}{where} (cumulative) [7.10.1, 7.10.6]")
+        if critical:
+            ctx.prot.append(
+                f"Critical Hit: use the combined Grenade/Critical Hit marker instead of the plain Grenade VOF marker (E61); the stack loses the benefit of cover {f['bereich']} in Combat Effects [7.10.3 p.55]"
+                if under
+                else f"Critical Hit: a second Grenade VOF marker on {ze} (both count) [7.10.3 p.55]"
+            )
+        grenade_back_notes(s, ctx.z, stack, True, ctx.prot)
     else:
         state.card(s, zt)["grenade_miss"] = True
         ctx.prot.append(f"Grenade Miss Modifier (-1) on {zt} [7.10.4]")
-        for m in state.units_on(s, zt, "Feind"):
-            ctx.prot.append(grenade_back_note(s, ctx.z, s["einheiten"][m], False))
+        ze = ctx.o.get("--einheit")
+        grenade_back_notes(s, ctx.z, grenade_stack(s, ze) if ze else state.units_on(s, zt, "Feind"), False, ctx.prot)
         s["letzter_versuch"] = [ctx.target_name, ctx.akt, s["phase"]]
 
 
@@ -1588,13 +1645,16 @@ def _order_cease_fire(s, ctx):
     """Order handler for: akt == '4.2.4k'"""
     if not fire.is_firing(ctx.z):
         raise rules.Violation(f"{ctx.target_name} is not firing [RULE 4.2.4k p.26]")
-    kk, zt = ctx.z["karte"], fire.effective_fire_target(s, ctx.target_name)
+    kk = ctx.z["karte"]
+    # [RULE 4.3.1 p.27 note] "the order will be passed on to all occupants of a card (including Pinned units)" (L114, K21)
+    stopped = []
     for n, e in s["einheiten"].items():
-        if e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e) and fire.effective_fire_target(s, n) == zt:
+        if e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e):
+            stopped.append(f"{n} (at {fire.effective_fire_target(s, n)})")
             e["ziel"] = None
             e.pop("konzentriert", None)
     ctx.prot.append(
-        f"Cease Fire: all units on {kk} firing at {zt} cease fire; they reopen fire immediately when a Spotted enemy is in LOS and range [6.3.3]"
+        f"Cease Fire: all firing units on {kk} cease fire: {', '.join(stopped)}; they reopen fire immediately when a Spotted enemy is in LOS and range [4.3.1 p.27, 6.3.3]"
     )
     fire.open_fire(s, ctx.prot)
 
@@ -1614,14 +1674,13 @@ def _order_shift_fire(s, ctx):
     )
     if not ok:
         raise rules.Violation(f"Originator has no LOS to {zt}: {reason}")
-    kk, old = ctx.z["karte"], fire.effective_fire_target(s, ctx.target_name)
+    kk = ctx.z["karte"]
     for n, e in s["einheiten"].items():
         if (
             e["seite"] == "US"
             and e["karte"] == kk
             and fire.is_firing(e)
-            and fire.effective_fire_target(s, n) == old
-            and geometry.in_range(s, e, zt)
+            and geometry.in_range(s, e, zt)  # L114: passed on to all occupants of the card [4.3.1 p.27]
         ):
             e["ziel"] = zt
             e.pop("konzentriert", None)
@@ -1890,6 +1949,10 @@ def cmd_order(s, args, late_order=None):
         if skill == "Extra Draw":
             extra += 1
             mods = list(mods) + [("Skill Extra Draw", 1)]
+        if akt == "4.2.2c" and o.get("--ziel") and success not in ("ja", "nein"):
+            check_move(
+                s, z, target_name, o["--ziel"], akt
+            )  # L120: legality (5.1.4 VOF on origin or destination) before the draw
         if akt not in ("4.2.2d",) and success not in ("ja", "nein"):
             n_cards, who, base = comms.card_count(s, akt, orig, z, extra, base_cff)
             word = {
@@ -1898,7 +1961,7 @@ def cmd_order(s, args, late_order=None):
                 "4.2.2e": "word Cover",
                 "4.2.4a": "Crosshairs",
                 "4.2.4b": "Crosshairs",
-                "4.2.4d": "Grenade symbol",
+                "4.2.4d": "Grenade symbol (2 or more: Critical Hit, --critical=yes)",
                 "4.2.4i": "Burst symbol (also 3 Bursts; 'Short!' takes precedence)",
             }.get(akt, "word Rally")
             msg = f"{name}: draw {n_cards} Action cards (base {base}" + (

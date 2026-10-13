@@ -31,6 +31,110 @@ def load_state():
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+HISTORY_DIR = "verlauf"  # snapshots of the state after each protocol entry (for undo)
+HISTORY_KEEP = 40
+
+
+def save_snapshot(nr, text):
+    """Keep the state after protocol entry nr as verlauf/<nr>.json; prune snapshots older than HISTORY_KEEP entries."""
+    d = game_dir() / HISTORY_DIR
+    try:
+        d.mkdir(exist_ok=True)
+        (d / f"{nr}.json").write_text(text, encoding="utf-8")
+        for f in d.glob("*.json"):
+            if f.stem.isdigit() and int(f.stem) < nr - HISTORY_KEEP:
+                f.unlink()
+    except OSError:
+        pass  # history is a convenience; a read-only or no-delete folder must not block the game
+
+
+def cmd_undo(s, args):
+    """Back to the state after protocol entry N; the discarded entries are listed so the board can be reset."""
+    from . import options
+
+    if not args or not args[0].isdigit():
+        raise rules.Violation("undo <entry no> --reason=..")
+    nr = int(args[0])
+    o = options.parse_opts(args[1:])
+    last = len(s["protokoll"])
+    if not 0 < nr < last:
+        raise rules.Violation(f"Entry {nr} is not before the last entry {last}")
+    snap = game_dir() / HISTORY_DIR / f"{nr}.json"
+    if not snap.exists():
+        raise rules.Violation(
+            f"No snapshot for entry {nr} (kept: the last {HISTORY_KEEP} entries since the history started)"
+        )
+    old = json.loads(snap.read_text(encoding="utf-8"))
+    dropped = s["protokoll"][nr:]
+    reason = o.get("--grund", "")
+    text = (
+        f"Undo to entry {nr}"
+        + (f" ({reason})" if reason else "")
+        + "; discarded: "
+        + "; ".join(f"{p['nr']} {p['text'][:80]}" for p in dropped)
+    )
+    save_state(old, text, None)
+    print(f"Back to the state after entry {nr}. Discarded entries (reset these on the board):")
+    for p in dropped:
+        print(f"- {p['nr']} T{p['zug']} {p['phase']}: {p['text']}")
+    print(briefing.check_stamp(old))
+
+
+MARKER_NOTES = []  # VOF/Crossfire marker changes of the last save, printed before the CHECKSTAMP (L111)
+
+
+def marker_summary(s):
+    """Per card: the VOF marker on the board (strongest VOF, 6.2.2/FM1 p.44) and whether a Crossfire marker lies there."""
+    from . import fire
+
+    out = {}
+    for k in s["karten"]:
+        entries = fire.vof_entries(s, k)
+        best = min(entries, key=lambda x: x[1]) if entries else None
+        cf = fire.crossfire(s, k, "Feind") or fire.crossfire(s, k, "US")
+        if best or cf:
+            out[k] = ((best[0], best[1]) if best else None, cf)
+    return out
+
+
+def mutual_pdfs(s):
+    """Pairs of cards whose units fire at each other along a PDF (V16)."""
+    pdf = set()
+    for e in s["einheiten"].values():
+        z = e.get("ziel")
+        if z and z != e.get("karte") and not e.get("indirekt"):
+            pdf.add((e["karte"], z))
+    return {tuple(sorted(p)) for p in pdf if (p[1], p[0]) in pdf}
+
+
+def marker_changes(old, new):
+    """Board lines for every card whose VOF marker or Crossfire marker changed between two states (L111)."""
+
+    def name(v):
+        return f"{rules.VOF_NAME.get(v[0], v[0])} {v[1]:+d}" if v else "none"
+
+    a, b = marker_summary(old), marker_summary(new)
+    lines = []
+    ma, mb = mutual_pdfs(old), mutual_pdfs(new)
+    for x, y in sorted(mb - ma):
+        lines.append(f"PDF {x} and {y} fire at each other: turn the PDF marker to the double-arrow side [6.3.1, V16]")
+    for x, y in sorted(ma - mb):
+        lines.append(f"PDF between {x} and {y} no longer mutual: turn the PDF marker back to the single arrow [6.3.1]")
+    for k in sorted(set(a) | set(b)):
+        va, ca = a.get(k, (None, False))
+        vb, cb = b.get(k, (None, False))
+        if va != vb:
+            if vb is None:
+                lines.append(f"{k}: remove the VOF marker ({name(va)})")
+            elif va is None:
+                lines.append(f"{k}: VOF marker {name(vb)}")
+            else:
+                lines.append(f"{k}: VOF marker {name(va)} becomes {name(vb)} (strongest VOF counts) [6.2.2, FM1 p.44]")
+        if ca != cb:
+            lines.append(f"{k}: {'place' if cb else 'remove'} the Crossfire marker [6.2.4]")
+    return lines
+
+
 def save_state(s, entry=None, rule=None):
     errors = briefing.consistency_check(s)
     if errors:
@@ -49,7 +153,28 @@ def save_state(s, entry=None, rule=None):
     h = s.pop("_hinweise", None)
     for k in ("_befehl_opts", "_phase_alt"):
         s.pop(k, None)
-    (game_dir() / "spielstand.json").write_text(json.dumps(s, indent=1, ensure_ascii=False), encoding="utf-8")
+    text = json.dumps(s, indent=1, ensure_ascii=False)
+    path = game_dir() / "spielstand.json"
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+            if s["phase"] == "3.7.4":
+                # [RULE 3.7.4] VOF, PDF and level stay frozen until 3.8: announce the changes only when leaving (L119)
+                if old["phase"] != "3.7.4":
+                    s["_ce_start"] = len(old["protokoll"])
+            else:
+                base = old
+                if old["phase"] == "3.7.4" and s.get("_ce_start"):
+                    snap = game_dir() / HISTORY_DIR / f"{s['_ce_start']}.json"
+                    if snap.exists():
+                        base = json.loads(snap.read_text(encoding="utf-8"))
+                s.pop("_ce_start", None)
+                MARKER_NOTES.extend(marker_changes(base, s))
+            text = json.dumps(s, indent=1, ensure_ascii=False)
+        except (ValueError, KeyError):
+            pass  # announcement only; never blocks saving
+    path.write_text(text, encoding="utf-8")
+    save_snapshot(len(s["protokoll"]), text)
     if h:
         s["_hinweise"] = h  # v3: hints (e.g. radio path) are kept for output, not saved
     briefing.briefing(s)

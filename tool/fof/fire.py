@@ -183,6 +183,11 @@ def fire_candidates(s, n):
                 )
             ):
                 continue  # [RULE 6.1.1 p.40 ex. 2, K16] VOF would land on the friendly intervening card; only H (Overhead) and mortars fire over it
+            if not state.is_mortar(e) and any(
+                [m for m in state.units_on(s, between, geometry.opponent_of(e)) if state.is_visible(s["einheiten"][m])]
+                for between in (geometry.line_between(s, e["karte"], kid) or [])
+            ):
+                continue  # L122 [RULE 6.1.2 p.39] the VOF would be exerted into the closer occupied card, which is the real target
             if (
                 e.get("bunker_richtung")
                 and kid != e["bunker_richtung"]
@@ -205,7 +210,14 @@ def pdf_note(s, from_, to_, n):
             if m != n and x.get("karte") == from_ and x.get("ziel") and x["ziel"] not in (from_, to_) and is_firing(x)
         }
     )
-    return f" (further PDF from {from_}: to {', '.join(others)})" if others else f" (no other PDF from {from_})"
+    same = [
+        m
+        for m, x in s["einheiten"].items()
+        if m != n and x.get("karte") == from_ and x.get("ziel") == to_ and is_firing(x)
+    ]
+    head = f" (PDF marker {from_} to {to_} already lies there from {', '.join(same)}, no new marker" if same else " ("
+    tail = f"further PDF from {from_}: to {', '.join(others)})" if others else f"no other PDF from {from_})"
+    return head + ("; " if same else "") + tail  # L121
 
 
 def open_fire(s, prot, only=None):
@@ -226,6 +238,20 @@ def open_fire(s, prot, only=None):
         if not candidate:
             e.pop("ziel_offen", None)
             continue
+        # L122 [RULE 6.1.1 p.39] "If a unit enters a card where there is firing already going on ... the entering unit joins in the existing fire"
+        existing = sorted(
+            {
+                x["ziel"]
+                for m, x in s["einheiten"].items()
+                if m != n
+                and x["seite"] == e["seite"]
+                and x.get("karte") == e["karte"]
+                and is_firing(x)
+                and x["ziel"] in candidate
+            }
+        )
+        if existing:
+            candidate = existing
         if e["seite"] == "US":
             d = min(geometry.distance(s, e["karte"], k) for k in candidate)
             candidate = [k for k in candidate if geometry.distance(s, e["karte"], k) == d]
@@ -267,13 +293,40 @@ def open_fire(s, prot, only=None):
             )
 
 
+def carried_markers(e):
+    """Markers that travel with a moving counter: Pinned, ammo, Out of Ammo, assets, radios (L109)."""
+    out = [m for m in e.get("status", []) if m != "Exposed"]
+    m = e.get("munition")
+    if m:
+        out.append(f"{m.get('typ', '')} ammo marker {m.get('punkte')}")
+    if e.get("out_of_ammo"):
+        out.append("Out of Ammo")
+    out += list(e.get("assets") or [])
+    out += [f"radio {r.get('typ')}" for r in e.get("funk") or []]
+    if e.get("traegt_casualties"):
+        out.append(f"{e['traegt_casualties']} Casualty")
+    return out
+
+
 def fire_after_move(s, n, prot):
     """6.1.2: movement to another card = Cease Fire, then 6.1.1 again; firing opponents on the new card shift to Point Blank."""
     e = s["einheiten"][n]
+    carried = carried_markers(e)
+    if carried:
+        prot.append(f"{n}: these markers move along: {', '.join(carried)}")  # L109 (Manuel)
     if e.get("ziel") is not None:
         prot.append(f"{n} ceases fire due to the movement (adjust PDF/VOF) [6.1.2]")
         e["ziel"] = None
         e.pop("konzentriert", None)
+    # [RULE 8.5 p.65] "A card can never contain both Spotted and Unspotted enemy units" (L108)
+    if e["seite"] == "Feind":
+        group = state.units_on(s, e["karte"], "Feind")
+        if any(s["einheiten"][m].get("spotted") for m in group) and not all(
+            s["einheiten"][m].get("spotted") for m in group
+        ):
+            for m in group:
+                s["einheiten"][m]["spotted"] = True
+            prot.append(f"Enemies on {e['karte']} now all Spotted: remove Unspotted markers [8.5 p.65]")
     open_fire(s, prot, only=[n])
     for m, f in s["einheiten"].items():
         if (

@@ -619,10 +619,10 @@ def setup_v4(s, n, e, o, prot):
             for tn, td in s.get("reserve_einheiten", {}).items():
                 te = copy.deepcopy(td)
                 te.update(
-                    card=section["karte"],
+                    karte=section["karte"],
                     platoon=section.get("platoon"),
                     attached_an=list(section.get("attached_an", [])),
-                    area="offen",
+                    bereich="offen",
                     status=[],
                 )
                 te["funk"] = []
@@ -642,7 +642,7 @@ def setup_v4(s, n, e, o, prot):
                     del s["einheiten"][tn]
                 section = copy.deepcopy(s["aufbau_einheiten"]["Mtr Sec"])
                 section.update(
-                    card=ref.get("karte"), platoon=ref.get("platoon"), attached_an=list(ref.get("attached_an", []))
+                    karte=ref.get("karte"), platoon=ref.get("platoon"), attached_an=list(ref.get("attached_an", []))
                 )
                 section["funk"] = s.pop("mtr_sec_funk_frei", section.get("funk", []))
                 s["einheiten"]["Mtr Sec"] = section

@@ -6,7 +6,7 @@ import os
 import pathlib
 import sys
 
-from . import briefing, campaign, combat, comms, contact, enemy, events, fire, geometry, rules, setup, state
+from . import briefing, campaign, combat, commands, comms, contact, enemy, events, fire, geometry, rules, setup, state
 
 
 def cmd_new(args):
@@ -112,7 +112,7 @@ def enter_segment(s, new, prot):
     if new == "3.3.1a" and events.bn_leader(s):
         # [RULE 4.1.1 p.18/19] BN HQ 'on the map': highest-ranking Higher HQ leader receives 6 (night 4) Commands, cannot be saved
         bn = sorted(events.bn_leader(s), key=lambda x: 0 if x.startswith("Rgt") else 1)[0]
-        s["kommandos"][bn].update(available=rules.MAX_PER_IMPULSE[s["sicht"]], activated=True, done=False)
+        s["kommandos"][bn].update(verfuegbar=rules.MAX_PER_IMPULSE[s["sicht"]], aktiviert=True, fertig=False)
         s["aktiver_hq"] = bn
         prot.append(
             f'BN HQ is on the board: {bn} receives {rules.MAX_PER_IMPULSE[s["sicht"]]} Commands (cannot be saved); activate {s["co_hq"]} only with communication (activate "{s["co_hq"]}"), then done [4.1.1 p.18/19]'
@@ -346,6 +346,12 @@ def check_next_phase(s, args, ids, prot):
 
 def cmd_phase(s, args):
     ids = [p for p, _ in state.sop(s)]
+    if args and s["phase"] == "3.5.2":
+        open_ = [n for n, e in s["einheiten"].items() if must_retreat(s, n, e)]
+        if open_:
+            raise rules.Violation(
+                f"3.5.2 not finished: retreat first {', '.join(open_)} (fof.py retreat <unit> [<card>]) [RULE 3.5.2 p.16] (L123)"
+            )
     if not args:
         i = ids.index(s["phase"])
         print(f"Turn {s['zug']}  Phase {s['phase']} {state.phase_name(s)}")
@@ -395,8 +401,11 @@ def check_capture(s, prot):
             c["casualties_feind"] = 0
         for n in state.units_on(s, kid):
             e = s["einheiten"][n]
+            # K33 (Manuel): "alone" also when the other same-side units on the card are only Paralyzed/Litter Teams
             if e["typ"] in ("Paralyzed Team", "Litter Team") and not [
-                m for m in state.units_on(s, kid, e["seite"]) if m != n
+                m
+                for m in state.units_on(s, kid, e["seite"])
+                if m != n and s["einheiten"][m]["typ"] not in ("Paralyzed Team", "Litter Team")
             ]:
                 opp = [
                     m
@@ -418,12 +427,83 @@ def check_capture(s, prot):
                         )
 
 
+def must_retreat(s, n, e):
+    """[RULE 3.5.2 p.16] Unpinned, non-Exposed Paralyzed Team under VOF, or such a Litter Team with a Casualty (carried or on the card)."""
+    if state.pinned(e) or "Exposed" in e["status"] or not fire.vof_against(s, e["karte"], e["seite"]):
+        return False
+    if e["typ"] == "Paralyzed Team":
+        return True
+    if e["typ"] == "Litter Team":
+        c = state.card(s, e["karte"])
+        return bool(e.get("traegt_casualties") or c.get("casualties" if e["seite"] == "US" else "casualties_feind"))
+    return False
+
+
+def retreat_cards(s, e):
+    """[RULE 3.5.2 p.16] One card towards the own edge: first cards without VOF, then the best C&C value. Returns the ties."""
+    cur = state.card(s, e["karte"])
+    step = -1 if e["seite"] == "US" else 1
+    cands = [
+        k
+        for k, c in s["karten"].items()
+        if c["reihe"] == cur["reihe"] + step
+        and geometry.adjacent(s, e["karte"], k)
+        and not (e["seite"] == "US" and c.get("ausserhalb"))
+    ]
+    if not cands:
+        return []
+    free = [k for k in cands if not fire.vof_against(s, k, e["seite"])] or cands
+    best = max(state.card(s, k).get("cc", 0) for k in free)
+    return sorted(k for k in free if state.card(s, k).get("cc", 0) == best)
+
+
+def cmd_retreat(s, args):
+    """3.5.2: carry out the retreat of a Paralyzed or Litter Team (L110)."""
+    if s["phase"] != "3.5.2":
+        raise rules.Violation(f"Retreat only in 3.5.2, currently {s['phase']} [RULE 3.5.2 p.16]")
+    n = args[0]
+    e = state.unit(s, n)
+    if not must_retreat(s, n, e):
+        raise rules.Violation(
+            f"{n} does not retreat (only unpinned, non-Exposed Paralyzed/Litter Teams under VOF) [RULE 3.5.2 p.16]"
+        )
+    best = retreat_cards(s, e)
+    if not best:
+        raise rules.Violation(
+            f"{n}: no card towards the own edge; fof.py correct to handle it by hand [RULE 3.5.2 p.16]"
+        )
+    target = args[1] if len(args) > 1 else None
+    if target is None:
+        if len(best) > 1:
+            raise rules.Violation(
+                f'{n}: tie between {", ".join(best)} (no VOF, same C&C): random choice by R#, then fof.py retreat "{n}" <card> [RULE 3.5.2 p.16]'
+            )
+        target = best[0]
+    if target not in best:
+        raise rules.Violation(
+            f"{n} must retreat to {' or '.join(best)} (priority: no VOF, then best C&C) [RULE 3.5.2 p.16]"
+        )
+    prot = []
+    origin = e["karte"]
+    if e["typ"] == "Litter Team" and not e.get("traegt_casualties"):
+        c = state.card(s, origin)
+        key = "casualties" if e["seite"] == "US" else "casualties_feind"
+        c[key] -= 1
+        e["traegt_casualties"] = 1
+        prot.append(f"{n} picks up a Casualty on {origin} (Casualty marker goes with it) [3.5.2 p.16]")
+    e["karte"], e["bereich"] = target, "offen"
+    commands.mark(e, "Exposed")
+    prot.append(f"{n} retreats from {origin} to {target} (open), Exposed [3.5.2 p.16]")
+    fire.fire_after_move(s, n, prot)
+    state.save_state(s, f"Retreat {n}: " + "; ".join(prot), "3.5.2 p.16")
+    briefing.print_board(prot, s)
+
+
 def check_retreat(s, prot):
     """3.5.2: Paralyzed Teams (unpinned, not Exposed) and Litter Teams with a Casualty under VOF retreat one card."""
     gone = []
     for n, e in s["einheiten"].items():
-        v = fire.vof_against(s, e["karte"], e["seite"])
-        if e["typ"] == "Paralyzed Team" and not state.pinned(e) and "Exposed" not in e["status"] and v:
+        if e["typ"] == "Paralyzed Team" and must_retreat(s, n, e):
             if e["seite"] == "Feind" and state.card(s, e["karte"])["reihe"] >= state.top_row(s):
                 # [RULE 3.5.2 p.16] "Enemy units who retreat from a card at their side's edge of the map will retreat off the map. Remove them from play. Do not extend the map."
                 gone.append(n)
@@ -432,15 +512,12 @@ def check_retreat(s, prot):
                 )
                 continue
             prot.append(
-                f"{n} ({e['seite']}) must retreat one card (priority: no VOF, then best cover, random on a tie), Exposed [3.5.2]"
+                f'{n} ({e["seite"]}) must retreat one card (priority: no VOF, then best cover, random on a tie), Exposed [3.5.2]: fof.py retreat "{n}" [<card>]'
             )
-        if (
-            e["typ"] == "Litter Team"
-            and not state.pinned(e)
-            and v
-            and state.card(s, e["karte"]).get("casualties" if e["seite"] == "US" else "casualties_feind")
-        ):
-            prot.append(f"{n} ({e['seite']}) retreats one card with a Casualty, Exposed [3.5.2]")
+        if must_retreat(s, n, e) and e["typ"] == "Litter Team":
+            prot.append(
+                f'{n} ({e["seite"]}) retreats one card with a Casualty, Exposed [3.5.2]: fof.py retreat "{n}" [<card>]'
+            )
     for n in gone:
         s.setdefault("removed_from_play", []).append(n) if isinstance(s.get("removed_from_play"), list) else None
         s["einheiten"].pop(n, None)
@@ -504,6 +581,8 @@ def cmd_end_turn(s, args):
         if e.get("grenade"):
             e["grenade"] = []
             prot.append(f"{n}: remove Grenade VOF")
+        if e.pop("grenade_critical", None):
+            prot.append(f"{n}: remove Critical Hit Grenade marker [7.10.3]")
         e.pop("konzentriert", None)
     for kid, c in s["karten"].items():
         if c.get("illum"):

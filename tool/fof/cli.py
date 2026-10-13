@@ -122,7 +122,7 @@ COMMANDS = [
         "order",
         "befehl",
         "commands.cmd_order",
-        "order <hq|GI|BN> <unit> <action id> [--target=K] [--success=yes|no] [--area=<cover id|open>] [--unit=..] [--agency=..] [--skill=..] [--originator=<hq>] [--short=yes] [--place=K] [--what=..]",
+        "order <hq|GI|BN> <unit> <action id> [--target=K] [--success=yes|no] [--area=<cover id|open>] [--unit=..] [--agency=..] [--skill=..] [--originator=<hq>] [--short=yes] [--critical=yes] [--place=K] [--what=..]",
         "one action of the action menu (4.2); the tool states how many cards to draw",
     ),
     (
@@ -133,6 +133,14 @@ COMMANDS = [
         "forgotten order of an HQ whose impulse already ended this turn",
     ),
     ("done", "fertig", "commands.cmd_done", "done", "end the impulse, save Commands"),
+    ("retreat", "rueckzug", "phase.cmd_retreat", "retreat <unit> [<card>]", "3.5.2 retreat of a Paralyzed/Litter Team"),
+    (
+        "undo",
+        "zurueck",
+        "state.cmd_undo",
+        "undo <entry no> --reason=..",
+        "back to the state after protocol entry <no> (snapshots of the last 40 entries); lists the discarded entries",
+    ),
     (
         "fire",
         "feuer",

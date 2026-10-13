@@ -12,6 +12,7 @@ OPT_ALIASES = {
     "--net": "--netz",
     "--area": "--bereich",
     "--value": "--wert",
+    "--critical": "--kritisch",
     "--mortar": "--moerser",
     "--place": "--platz",
     "--free": "--gratis",

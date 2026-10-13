@@ -72,6 +72,8 @@ lateorder <hq> <unit> <action id> [...]   forgotten order of an HQ whose impulse
 correct casualty|status|grenade|ammo|target ... --reason=..   fix a proven wrong booking (the board is the master)
 radio check <HQ>                  every unit the HQ can reach right now | radio check <a> <b>   one pair
 multistory <card>                 record the Multi-Story symbol (Upper Story marker, 5.3.3)
+retreat <unit> [<card>]           3.5.2 retreat of a Paralyzed/Litter Team (mandatory retreats are enforced)
+undo <entry no> --reason=..       restore the state after that entry, lists the discarded entries for the board
 ```
 Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c Infiltrate, 4.2.2e Seek Cover,
 4.2.3a Rally, 4.2.4a Spot, 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).

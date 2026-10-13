@@ -491,12 +491,21 @@ def _is_seek_cover(s, ctx):
 def _enemy_fall_back(s, ctx):
     """cmd_feindaktion: 'fall back' in a"""
     target = ctx.o.get("--ziel")
+    off = fall_back_offmap(s, ctx.e)
     if target == "off-map":
-        remove_enemy(s, ctx.n, ctx.prot, reason="Fall Back off-map")
+        if not off:
+            raise rules.Violation(
+                f"{ctx.n} is neither at the enemy edge with an empty position behind it nor beyond the left/right boundary: no off-map Fall Back [8.6.3]"
+            )
+        remove_enemy(s, ctx.n, ctx.prot, reason=f"Fall Back off-map ({off}) [8.6.3 priority 1, K26]")
     else:
+        if off:
+            raise rules.Violation(
+                f"Fall Back: off-map has priority 1 ({off}), before extension cards: --target=off-map [8.6.3, K26]"
+            )
         if not target:
             raise rules.Violation(
-                "Fall Back: --target=<card> (priority: off-map at own edge; card outside every US LOS; highest cover value; random on a tie) or --target=off-map [8.6.3]"
+                "Fall Back: --target=<card> (priority: card outside every US LOS; highest cover value incl. available cover markers; random on a tie) [8.6.3]"
             )
         state.card(s, target)
         if not geometry.adjacent(s, ctx.e["karte"], target):
@@ -520,6 +529,26 @@ def _enemy_fall_back(s, ctx):
         else:
             ctx.prot.append(f"{ctx.n} falls back to {target} (open), Exposed [8.6.3]")
         fire.fire_after_move(s, ctx.n, ctx.prot)
+
+
+def fall_back_offmap(s, e):
+    """[RULE 8.6.3] Priority 1 'Off-map if unit is at their edge of the map or beyond the Left or Right boundaries'.
+    K26 (BGG Shonai_Dweller 3458315, 3498658): off-map comes before extension cards; it is possible as soon as one of the
+    three positions towards the enemy edge has no card (also diagonally, also beyond a side boundary).
+    Returns the reason or None."""
+    c = state.card(s, e["karte"])
+    top = state.top_row(s)
+    cols = [v["spalte"] for v in s["karten"].values() if not v.get("ausserhalb")]
+    if c["reihe"] <= top and (c["spalte"] < min(cols) or c["spalte"] > max(cols)):
+        return "beyond the left/right mission boundary"
+    if c["reihe"] < top:
+        return None
+    empty = [
+        state.card_id(c["reihe"] + 1, sp)
+        for sp in (c["spalte"] - 1, c["spalte"], c["spalte"] + 1)
+        if geometry.card_at(s, c["reihe"] + 1, sp) is None
+    ]
+    return f"at the enemy edge, no card at {', '.join(empty)}" if empty else None
 
 
 def _is_fall_back(s, ctx):
@@ -575,14 +604,13 @@ def _enemy_grenade_concentrate(s, ctx):
         z = state.unit(s, ze)
         gw = int(ctx.o.get("--wert", s.get("granate_vof", -3)))  # Normandy p.13: German Grenade Attacks are also -4
         if "grenade" in ctx.a and (zk == ctx.e["karte"] or ctx.e.get("vof_rating") == "G" or rg):
-            z.setdefault("grenade", []).append(gw)
-            if zk != ctx.e["karte"]:
-                against = "no grenade thrown back (attack not from the same card) [7.10.5 p.55]"
-            elif not ctx.e.get("spotted"):
-                against = "no grenade thrown back (attacker Unspotted) [7.10.5 p.55]"
-            else:
-                against = "a Good Order target throws back for free [7.10.5 p.55]"
-            ctx.prot.append(f"{ctx.n}: Grenade VOF {gw} on {ze}; {against}")
+            # [RULE 7.10.1 p.54] one unit out of cover or the whole stack under its Cover marker (L124)
+            stack = commands.grenade_stack(s, ze)
+            for m in stack:
+                s["einheiten"][m].setdefault("grenade", []).append(gw)
+            where = f" (stack under {z['bereich']})" if z.get("bereich", "offen") != "offen" else ""
+            ctx.prot.append(f"{ctx.n}: Grenade VOF {gw} on {', '.join(stack)}{where} [7.10.1]")
+            commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot)
         else:
             for _m in cf_stack(s, ze):
                 s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
@@ -595,7 +623,11 @@ def _enemy_grenade_concentrate(s, ctx):
     else:
         if "grenade" in ctx.a and zk == ctx.e["karte"]:
             state.card(s, zk)["grenade_miss"] = True
-            ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk}; target may freely throw back [7.10]")
+            ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk} [7.10.4]")
+            ze = ctx.o.get("--einheit")
+            commands.grenade_back_notes(
+                s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot
+            )
         else:
             ctx.prot.append(f"{ctx.n}: attempt failed")
 
@@ -1036,7 +1068,7 @@ def leader_rg_target(s, n):
         ):
             continue
         z = x["ziel"]
-        if state.valid_target(s, z, e["seite"]) and geometry.in_range(s, dict(e, range_=rw), z):
+        if state.valid_target(s, z, e["seite"]) and geometry.in_range(s, dict(e, reichweite=rw), z):
             return z
     return None
 

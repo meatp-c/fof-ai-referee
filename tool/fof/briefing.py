@@ -53,6 +53,12 @@ def consistency_check(s):
 
 
 def check_stamp(s):
+    notes = [f"{messages.BOARD}: " + x for x in dict.fromkeys(state.MARKER_NOTES)]
+    state.MARKER_NOTES.clear()
+    return "\n".join(notes + [_check_stamp(s)])
+
+
+def _check_stamp(s):
     f = consistency_check(s)
     if f:
         return f"{messages.CHECKSTAMP}: ERROR " + "; ".join(f)
@@ -344,7 +350,7 @@ def briefing(s):
             f"- {p['nr']} T{p['zug']} {p['phase']}: {p['text']}" + (f" [RULE {p['regel']}]" if p.get("regel") else "")
         )
     z.append("")
-    z.append(check_stamp(s))
+    z.append(_check_stamp(s))
     txt = "\n".join(z) + "\n"
     (state.game_dir() / "BRIEFING.md").write_text(txt, encoding="utf-8")
     return txt

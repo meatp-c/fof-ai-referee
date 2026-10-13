@@ -287,7 +287,7 @@ def cmd_patrol(s, args):
             x.pop("stationaer", None)
         else:
             x["stationaer"] = True
-    p.update(platoon=plt, members=members, route_index=0, primary_visited=False, success=False)
+    p.update(platoon=plt, mitglieder=members, route_index=0, primaer_besucht=False, erfolg=False)
     s["einzelzug"] = True
     prot.append(f"Patrol Platoon {plt}: {', '.join(members)}; setup on row 1 (setup <unit> <11-15>)")
     without = [
@@ -465,6 +465,7 @@ def cmd_reattempt(s, args):
             "konzentriert",
             "cf",
             "grenade",
+            "grenade_critical",
             "mine_hit",
             "nur_pdf",
             "indirekt",
@@ -491,7 +492,7 @@ def cmd_reattempt(s, args):
         "Pinned, PDF and VOF removed, ammo and assets replenished, dropped assets off the board (steps 10-12); cover markers and mines remain (step 7)"
     )
     for kk in s["kommandos"].values():
-        kk.update(available=0, saved=0, activated=False, done=False)
+        kk.update(verfuegbar=0, gespart=0, aktiviert=False, fertig=False)
     s["feuermissionen"] = copy.deepcopy(s.get("fm_start", s.get("feuermissionen")))
     s["target_marker"] = {}
     s["assets_pool"] = copy.deepcopy(s.get("assets_start", s.get("assets_pool", {})))
@@ -564,7 +565,7 @@ def cmd_reconstitute(s, args):
         if len(lats) > maxst:
             raise rules.Violation(f"{n} has at most {maxst} steps")
         e = copy.deepcopy(orig)
-        e.update(card=s["einheiten"][lats[0]]["karte"], area="offen", status=[], steps=len(lats), target=None)
+        e.update(karte=s["einheiten"][lats[0]]["karte"], bereich="offen", status=[], steps=len(lats), ziel=None)
         if state.is_hq(e):
             e["erfahrung"] = "Green"
         if n in s.get("removed_from_play", []):

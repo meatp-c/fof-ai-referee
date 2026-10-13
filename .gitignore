@@ -10,3 +10,4 @@ game*/
 # Python
 __pycache__/
 *.pyc
+*/verlauf/

@@ -89,7 +89,9 @@ def ncm_rows(s, name):
     else:
         rows.append(cc_row(s, e))
     cv = fire.cover_of(s, e)
-    if cv:
+    if cv and e.get("grenade_critical"):
+        rows.append((f"Cover {cv['id']} {cv['typ']} lost (Critical Hit Grenade) [7.10.3]", 0))
+    elif cv:
         rows.append((f"Cover {cv['id']} {cv['typ']}", cv["wert"]))
     if state.pinned(e):
         rows.append(("Pinned", +1))
@@ -130,7 +132,9 @@ def _ncm_direct(s, e, c, base):
         z.append(("Concentrated Fire", -1))
     z.append(cc_row(s, e))
     cv = fire.cover_of(s, e)
-    if cv:
+    if cv and e.get("grenade_critical"):
+        z.append((f"Cover {cv['id']} {cv['typ']} lost (Critical Hit Grenade) [7.10.3]", 0))
+    elif cv:
         z.append((f"Cover {cv['id']} {cv['typ']}", cv["wert"]))
     if state.pinned(e):
         z.append(("Pinned", +1))
@@ -360,11 +364,11 @@ def reduce_unit(s, name, code, prot):
                     f"{name}: F hit on the second step of an A-rated Fallschirmjaeger squad: draw an Action card, R# column 2: --fj=1 (two A Fire Teams) or --fj=2 (S and A) [CSR 3 p.14, Normandy p.48]"
                 )
             if fj == "1":
-                s["einheiten"][new].update(vof_rating="A", range_="C")
+                s["einheiten"][new].update(vof_rating="A", reichweite="C")
                 if e.get("munition"):
                     m = e["munition"]
                     half = m.get("punkte", 0) // 2
-                    s["einheiten"][new]["munition"] = dict(m, points=half)
+                    s["einheiten"][new]["munition"] = dict(m, punkte=half)
                     m["punkte"] = m.get("punkte", 0) - half
                     prot.append(
                         f"{new}: A • C with {half} MG ammo, remaining {m['punkte']} with the last team (rounded up for the second team, 7.18.1B)"
@@ -391,14 +395,14 @@ def mortar_team(s, section, tn):
     """1-step Mortar Team from the Section: values from the setup data (CSR 2), ammo as the Section (7.18.1B)."""
     te = copy.deepcopy(s.get("aufbau_einheiten", {}).get(tn) or s.get("reserve_einheiten", {}).get("1/Mtr", {}))
     te.update(
-        card=section["karte"],
-        area=section.get("bereich", "offen"),
+        karte=section["karte"],
+        bereich=section.get("bereich", "offen"),
         platoon=section.get("platoon"),
         attached_an=list(section.get("attached_an", [])),
-        target=None,
+        ziel=None,
         steps=1,
-        side="US",
-        experience=section.get("erfahrung", "Line"),
+        seite="US",
+        erfahrung=section.get("erfahrung", "Line"),
     )
     te.setdefault("typ", "Weapons Team")
     te["funk"] = []
@@ -411,16 +415,16 @@ def mortar_team_de(s, section, tn):
     """[CSR 4 p.14, Normandy p.48] German 81mm Mortar Team from the Section, full ammo of the Section."""
     te = copy.deepcopy(s.get("mtr_team_de", {}).get(tn, {}))
     te.update(
-        card=section["karte"],
-        area=section.get("bereich", "offen"),
-        target=None,
+        karte=section["karte"],
+        bereich=section.get("bereich", "offen"),
+        ziel=None,
         steps=1,
-        side="Feind",
-        experience=section.get("erfahrung", "Line"),
+        seite="Feind",
+        erfahrung=section.get("erfahrung", "Line"),
         spotted=section.get("spotted", True),
-        type_name=tn,
-        package=section.get("paket"),
-        pc_origin=section.get("pc_herkunft"),
+        typname=tn,
+        paket=section.get("paket"),
+        pc_herkunft=section.get("pc_herkunft"),
     )
     te.setdefault("typ", "Weapons Team")
     te.setdefault("status", [])
@@ -433,6 +437,8 @@ def cmd_hit(s, args):
     fjo = [a for a in args if a.startswith("--fj=")]
     args = [a for a in args if not a.startswith("--fj=")]
     s["_fj_r"] = fjo[0].split("=", 1)[1] if fjo else None
+    if len(args) < 2:
+        raise rules.Violation("hit <unit> <HIT|PIN|MISS> [letters] (L118)")
     name, result = args[0], args[1].upper()
     effect = args[2].upper() if len(args) > 2 else ""
     e = state.unit(s, name)
@@ -714,8 +720,12 @@ def cmd_capture(s, args):
     ge, we = state.unit(s, g), state.unit(s, w)
     if ge["typ"] not in ("Paralyzed Team", "Litter Team"):
         raise rules.Violation(f"{g} is not a Paralyzed/Litter Team [3.5.1]")
-    if [m for m in state.units_on(s, ge["karte"], ge["seite"]) if m != g]:
-        raise rules.Violation(f"{g} is not alone on {ge['karte']} [3.5.1]")
+    # K33: all same-side units on the card are Paralyzed/Litter Teams; one guard step takes them all [8.15 p.69] (L117)
+    group = state.units_on(s, ge["karte"], ge["seite"])
+    if [m for m in group if s["einheiten"][m]["typ"] not in ("Paralyzed Team", "Litter Team")]:
+        raise rules.Violation(
+            f"{g} is not alone on {ge['karte']} (other same-side units besides P/L teams) [3.5.1, K33]"
+        )
     LATS = ("Fire Team", "Assault Team", "Paralyzed Team", "Litter Team")
     captor = [
         m
@@ -734,8 +744,9 @@ def cmd_capture(s, args):
     if ge["seite"] == "Feind" and not state.is_v4(s):
         pass
     prot = []
-    st = state.steps(ge)
-    del s["einheiten"][g]
+    st = sum(state.steps(s["einheiten"][m]) for m in group)
+    for m in group:
+        del s["einheiten"][m]
     if state.steps(we) > 1:
         we["steps"] -= 1
         prot.append(f"{w} details one step as guard (now {we['steps']} steps), guard Removed from Play [8.15]")
@@ -748,10 +759,25 @@ def cmd_capture(s, args):
         remove_from_play(s, w, prot, "detached as guard [8.15]")
     if ge["seite"] == "Feind":
         s["gefangene"] = s.get("gefangene", 0) + st
-        campaign.book_xp(s, st * (campaign.xp_table(s, "gefangene_step") or 2), f"{st} prisoners ({g})", prot)
+        campaign.book_xp(
+            s, st * (campaign.xp_table(s, "gefangene_step") or 2), f"{st} prisoners ({', '.join(group)})", prot
+        )
     else:
         s["us_gefangen"] = s.get("us_gefangen", 0) + st
-    prot.insert(0, f"{g} ({ge['seite']}) captured, Removed from Play")
+    prot.insert(0, f"{', '.join(group)} ({ge['seite']}) captured, Removed from Play; one guard step for all [8.15]")
+    c = state.card(s, ge["karte"])
+    if ge["seite"] == "Feind" and c.get("casualties_feind") and not state.units_on(s, ge["karte"], "Feind"):
+        # [RULE 3.5.1 p.16] enemy casualties on a friendly-occupied card are captured automatically (L117)
+        n_cas = c["casualties_feind"]
+        s["gefangene"] = s.get("gefangene", 0) + n_cas
+        c["casualties_feind"] = 0
+        prot.append(f"{ge['karte']}: {n_cas} enemy Casualties captured, remove marker [3.5.1, 8.15.1]")
+        campaign.book_xp(
+            s,
+            n_cas * (campaign.xp_table(s, "feind_casualty_step") or 1),
+            f"{n_cas} enemy Casualties captured ({ge['karte']})",
+            prot,
+        )
     m = fire.update_activity(s)
     if m:
         prot.append(m)
