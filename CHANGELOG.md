@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-10-18 (fourth release)
+Engine updates from a rules audit against the rulebook examples and from Normandy Mission 5 play (night combat
+patrols, three platoons one after the other):
+- Fire: Grazing Fire for tripod MGs along the whole PDF up to maximum range, same elevation or a steady slope only
+  (7.2.2); Overhead Fire also for tripod MGs with an A VOF (7.2.3 examples); out of range keeps the PDF and puts the
+  VOF on the last card in range (6.3.2 example); Smoke or Incoming! on the firing card turns the fire into a
+  Point Blank VOF on that card (6.1.2 example 1); when the last Point Blank target moves to an adjacent card the
+  fire follows it (6.3.4). L128, L147, L148, L149
+- NCM: every fire effect on a unit (direct VOF, Incoming-type VOF, Mines!, Sniper, Grenade, Grenade Miss) is
+  worked out with its own modifiers and the strongest total counts (6.4, Clarification 3). L129
+- New actions 4.2.4c Platoon Concentrate Fire and 4.2.4h Platoon Grenade Attack: each eligible unit of the
+  platoon on the HQ card makes its own attempt (`--success=<unit>:yes|no,..`). L136
+- Concentrate Fire: one extra card for a tripod MG (7.11.2); the target must be a spotted enemy the shooter can
+  see itself (7.11.1, 5.2.2 Fig 3), for enemy CF too; Critical Hit with `--critical=yes` (7.11.4). L137, L140, L150, L154
+- New command `grenade response <unit> --success=yes|no [--critical=yes] [--jam=yes]` for the free response of
+  7.10.5, offered with the card count after a Point Blank grenade attack, for both sides, no Command. L144
+- Every card draw request with a success symbol adds a WATCH line: Jam symbol for jam-prone units (7.12),
+  Critical Hit on 2 or more symbols (7.10.3, 7.11.4), Short on Call for Fire (7.16.4). L153
+- Combat Effects: new command `ncm next` shows the next group of 3.7.4 as a numbered list (card, NCM and column,
+  number of cards to draw, units in order, NCM rows one per line); printed again after every `hit`. L155, L156
+- Enemy AI: Fall Back priorities 2 (out of LOS) and 3 (best cover) are computed and enforced (8.6.3); enemy moves
+  check diagonals through a PDF (5.1.2); Deep Bunker handling (Normandy CSR 5); enemy Seek Cover respects the
+  card's Cover Potential (5.3); leader extra card for every enemy attempt (8.9); target on the same card is the
+  largest stack (8.6.1B); ammo surplus on every enemy movement (8.11); enemy Infiltrate names the closest
+  opponent cards and is a normal move with Exposed when neither card has a VOF (5.1.4); enemy Advance and
+  Infiltrate take the best free or own Cover marker on the new card (8.6.1E). L130, L131, L133, L141, L142, L143,
+  L145, L168, L169
+- LATs: a HIT that turns one LAT type into another takes that type's VOF and range (Assault Team A, Point Blank;
+  Fire Team S, Close); enemy Rally of an unpinned Assault Team is reported as already the highest LAT. L163, L165
+- Contact: equal PC letters name the cards and the R# column for the random order (8.2.4); missing package cover
+  values are a VIOLATION instead of a silent +1; package placement is blocked by units between the placement card
+  and the trigger unless Grazing or Overhead Fire applies (8.4.3 examples). L134, L135, L151
+- Campaign: US guard steps from a capture return between missions with their experience level (8.15); new
+  commands `xp promote <unit> --from=Green|Line --steps=n` and `xp skill <HQ> <skill>` (12.3, 12.3.1, 12.7, skill
+  marker countermix); in combat patrols only units of finished patrols can be promoted, counted per step;
+  `reconstitute` derives the level from table 12.6 and counts every LAT as a Green step (3.9, 12.2). L126, L146,
+  L152, L158, L166, L167
+- Small rules checks: coloured smoke cannot signal at night (4.4.1); Infiltrate within a card refused for tripods,
+  H VOF, mortars and Exposed units (5.1.4); dark Hill borders replace light ones (5.2.2A); Move or Infiltrate onto
+  a card with a free Cover marker reminds you of 5.1.2; Initiative impulses of PLT HQs and staff are listed "in
+  any order you choose" (3.3.2b/c); Out of Ammo without LOS no longer reports a VOF shift. L138, L139, L157, L161,
+  L162, L164
+- Small fixes: `patrol start` reads the row 1 cards from the map; `objective` without arguments prints its usage.
+  L159, L160
+- Tests: 40 worked examples from the Series Rules as unit tests (`tests/test_examples_a/b/c.py`, one skipped:
+  enemy reconstitution 6.5.2 is not built), coverage tests for Mission 5 rules; 84 tests pass. Regression games
+  (Normandy M1 357 commands, M4 98 commands) unchanged except two intended corrections (Fall Back priority 3,
+  Smoke on the firing card).
+
 ## 2026-10-13 (third release)
 Engine updates found during Normandy Mission 4 play (counter attack, grenade fights, retreats and captures), plus
 the fall-back and grenade rulings collected from the BGG rules forum after the mission:

@@ -64,7 +64,7 @@ status | check | rule <no> | search <term> | options
 phase next | event ? yes <R#> | event ? no
 hq <HQ> | card ? <number> | activate <HQ> | order <HQ|GI> <unit> <action id> [--target=<card>] [--success=yes|no] [--area=C1|open] | done
 gi ? <number> | enemycheck | enemyaction <enemy> "<result>" | pc reveal <card> <A|B|C> | pc <card> | pc contact <card> <package> --direction=Front|Left|Right
-ncm <unit> | hit <unit> HIT|PIN|MISS [letters] | mine <unit> yes|no | capture <enemy> <guard> | endturn
+ncm <unit> | ncm next | hit <unit> HIT|PIN|MISS [letters] | mine <unit> yes|no | capture <enemy> <guard> | endturn
 setup <unit> <card> [--area=C1] [--platoon=<n>] [--asset=<type>] | terrain <card> <type> | extend <row> <col> <type>
 objective primary|route|cop|concentration ... | visibility <light> | illum <card> <top> [<bottom>]
 patrol start|next <platoon> [--with=a,b] | reattempt done | reconstitute <unit> --from=<LATs> | xp [add|spend <n> <reason>]
@@ -73,14 +73,16 @@ correct casualty|status|grenade|ammo|target ... --reason=..   fix a proven wrong
 radio check <HQ>                  every unit the HQ can reach right now | radio check <a> <b>   one pair
 multistory <card>                 record the Multi-Story symbol (Upper Story marker, 5.3.3)
 retreat <unit> [<card>]           3.5.2 retreat of a Paralyzed/Litter Team (mandatory retreats are enforced)
+grenade response <unit> --success=yes|no   7.10.5 free grenade response after a Point Blank attack (no Command)
+xp promote <unit> --from=Green|Line --steps=n | xp skill <HQ> <skill>   promotions and skill purchases between missions (12.3, 12.7)
 undo <entry no> --reason=..       restore the state after that entry, lists the discarded entries for the board
 ```
 Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c Infiltrate, 4.2.2e Seek Cover,
-4.2.3a Rally, 4.2.4a Spot, 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).
+4.2.3a Rally, 4.2.4a Spot, 4.2.4c/4.2.4h Platoon Concentrate Fire/Grenade Attack (--success=<unit>:yes|no,..), 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).
 
 ## Scope and limits
-- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 4
-  (offensive missions, night patrols, reattempts, counter attacks, campaign experience). Several hundred turns of real play.
+- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 4 and most of mission 5
+  (offensive missions, night patrols, combat patrols, reattempts, counter attacks, campaign experience). Several hundred turns of real play.
 - One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
   `CHANGELOG.md` lists the changes.
 - Not implemented: vehicles and AT combat (chapter 10), helicopters/air assault, urban combat (13.0).

@@ -42,7 +42,14 @@ def effective_fire_target(s, n):
     z = e["ziel"]
     if z == e["karte"]:
         return z
+    hi = state.range_limits(s, e)[1]
+    last_in_range = None
     for k in geometry.line_between(s, e["karte"], z) or []:
+        if geometry.distance(s, e["karte"], k) > hi:
+            # L147 [RULE 6.3.2 p.43 example, 7.18.2] out of range (e.g. Out of Ammo: range Close): "The PDF stays the same but
+            # its VOF is moved to the adjacent card"; the VOF lies on the last card in range along the PDF
+            return last_in_range or e["karte"]
+        last_in_range = k
         if geometry.blocks_los(state.card(s, k), False, s):
             return k  # L96 [RULE 6.1.2 p.44] Smoke/Incoming/Air Strike along the PDF: move the VOF back to the blocking card (even over own troops, no Overhead)
         occupants = [
@@ -50,22 +57,84 @@ def effective_fire_target(s, n):
             for m in state.units_on(s, k)
             if s["einheiten"][m]["seite"] == e["seite"] or state.is_visible(s["einheiten"][m])
         ]
-        if state.is_mortar(e) or (
-            (e.get("vof_rating") == "H" or e.get("tripod")) and overhead_possible(s, e["karte"], k, z)
-        ):
+        if state.is_mortar(e):
             # [RULE 7.3.1 p.53] mortars fire over cards with friendly troops without hitting them
-            # [RULE 7.2.1 p.51] Overhead Fire (tripod MG, H VOF): "Do not place a VOF marker on the card being fired over."
             occupants = [m for m in occupants if s["einheiten"][m]["seite"] != e["seite"]]
+        elif (e.get("vof_rating") == "H" or e.get("tripod")) and overhead_possible(s, e["karte"], k, z):
+            # [RULE 7.2.1 p.51, 7.2.3] Overhead Fire (tripod MG, H VOF): "Do not place a VOF marker on the card being fired over";
+            # 8.4.3 example 1: also over opposing units (RCL shifts fire over the CCF squad to the HMG on the hill). L147
+            occupants = []
         if occupants:
             return k
+    if geometry.distance(s, e["karte"], z) > hi:
+        return last_in_range or e["karte"]
     return z
+
+
+def grazing(s, e):
+    """[RULE 7.2.2 p.51] Grazing Fire: tripod-mounted MG firing at range (not Point Blank) on its Good Order side,
+    not Pinned (BGG 3498699: the Pinned VOF has no Grazing Fire) and not Out of Ammo (7.18.2: VOF S). L128"""
+    return bool(
+        e.get("tripod")
+        and not state.fire_team_side(e)
+        and not state.pinned(e)
+        and not e.get("out_of_ammo")
+        and e.get("ziel") is not None
+        and e["ziel"] != e.get("karte")
+        and can_fire(e)
+    )
+
+
+def grazing_cards(s, n):
+    """[RULE 7.2.2 p.51] 'it exerts its VOF into every card along its PDF up to its maximum range as long as all the cards
+    are at the same elevation, or all uphill/all downhill ... and LOS exists.' Cards beyond the target included; a LOS block
+    (Smoke/Incoming, 6.1.2 p.44, example 4 p.41) is the last card; friendly cards on the line are hit too (note 7.2.2).
+    No Grazing Fire at all when the elevation pattern breaks before the target (BGG 3535366, 3558804). L128"""
+    e = s["einheiten"][n]
+    if not grazing(s, e) or e["karte"] not in s["karten"] or e["ziel"] not in s["karten"]:
+        return []
+    ka, kz = state.card(s, e["karte"]), state.card(s, e["ziel"])
+    dr, dc = kz["reihe"] - ka["reihe"], kz["spalte"] - ka["spalte"]
+    if not (dr == 0 or dc == 0 or abs(dr) == abs(dc)):
+        return []
+    sr, sc = (dr > 0) - (dr < 0), (dc > 0) - (dc < 0)
+    ray, prev, trend, i = [], ka.get("elevation", 1), None, 1
+    while True:  # cards on the line with a valid elevation pattern, up to max range
+        k = geometry.card_at(s, ka["reihe"] + sr * i, ka["spalte"] + sc * i)
+        if k is None or not geometry.in_range(s, e, k) or state.card(s, k).get("staging"):
+            break
+        ez = state.card(s, k).get("elevation", 1)
+        step = (ez > prev) - (ez < prev)
+        if trend is None:
+            trend = step
+        elif step != trend:
+            break  # level and slope must not mix, slope must not reverse
+        ray.append(k)
+        prev, i = ez, i + 1
+    if e["ziel"] not in ray:
+        return []  # e.g. 2-1-1: the MG just fires at the nearest card
+    out = []
+    for k in ray:  # LOS: a blocking card (Smoke/Incoming) is the last one, the cards behind it get no VOF
+        ok, _why = geometry.los(
+            s,
+            e["karte"],
+            k,
+            ha=geometry.height_bonus(s, e),
+            hb=geometry.card_height_bonus(s, k, geometry.opponent_of(e)),
+        )
+        if not ok:
+            break
+        out.append(k)
+    return out
 
 
 def vof_entries(s, kid):
     """Fire effects on card kid: (typ, wert, quelle, trifft_seite or None=both, von_karte)."""
     out = []
     for n, e in s["einheiten"].items():
-        if not is_firing(e) or effective_fire_target(s, n) != kid or e.get("nur_pdf"):
+        if not is_firing(e) or e.get("nur_pdf"):
+            continue
+        if effective_fire_target(s, n) != kid and kid not in grazing_cards(s, n):
             continue
         pb = e["karte"] == kid
         type_ = "Pinned" if state.pinned(e) else current_vof_rating(e, pb)
@@ -96,7 +165,7 @@ def pdfs_to(s, kid, target_side):
         for n, e in s["einheiten"].items()
         if is_firing(e)
         and e["karte"] != kid
-        and effective_fire_target(s, n) == kid
+        and (effective_fire_target(s, n) == kid or kid in grazing_cards(s, n))
         and e["seite"] == state.opponent_of_side(target_side)
     }
 
@@ -174,15 +243,17 @@ def fire_candidates(s, n):
                 continue
             if e["seite"] == "US" and state.units_on(s, kid, "US"):
                 continue  # 8.4.3: friendly units do not open fire on jointly occupied cards
-            if (
-                not state.is_mortar(e)
-                and e.get("vof_rating") != "H"
-                and any(
-                    state.units_on(s, between, e["seite"])
-                    for between in (geometry.line_between(s, e["karte"], kid) or [])
+            own_between = [
+                between
+                for between in (geometry.line_between(s, e["karte"], kid) or [])
+                if state.units_on(s, between, e["seite"])
+            ]
+            if own_between and not state.is_mortar(e):
+                overhead = (e.get("vof_rating") == "H" or e.get("tripod")) and all(
+                    overhead_possible(s, e["karte"], b, kid) for b in own_between
                 )
-            ):
-                continue  # [RULE 6.1.1 p.40 ex. 2, K16] VOF would land on the friendly intervening card; only H (Overhead) and mortars fire over it
+                if not overhead:
+                    continue  # [RULE 6.1.1 p.40 ex. 2, K16] VOF would land on the friendly intervening card; only Overhead Fire (7.2.3: tripod MG or H VOF with the elevation condition) and mortars fire over it (L147)
             if not state.is_mortar(e) and any(
                 [m for m in state.units_on(s, between, geometry.opponent_of(e)) if state.is_visible(s["einheiten"][m])]
                 for between in (geometry.line_between(s, e["karte"], kid) or [])
@@ -218,6 +289,13 @@ def pdf_note(s, from_, to_, n):
     head = f" (PDF marker {from_} to {to_} already lies there from {', '.join(same)}, no new marker" if same else " ("
     tail = f"further PDF from {from_}: to {', '.join(others)})" if others else f"no other PDF from {from_})"
     return head + ("; " if same else "") + tail  # L121
+
+
+def grazing_note(s, n):
+    """Cards besides the target that receive the VOF through Grazing Fire (L128)."""
+    e = s["einheiten"][n]
+    extra = [k for k in grazing_cards(s, n) if k != e.get("ziel")]
+    return f"; Grazing Fire: VOF marker also on {', '.join(extra)} [7.2.2 p.51]" if extra else ""
 
 
 def open_fire(s, prot, only=None):
@@ -283,6 +361,7 @@ def open_fire(s, prot, only=None):
                 )
                 + (" with Pinned VOF" if state.pinned(e) else "")
                 + " [6.1.1]"
+                + grazing_note(s, n)
             )
             if not cf_vorher and crossfire(s, candidate[0], state.opponent_of_side(e["seite"])):
                 prot.append(f"Crossfire marker on {candidate[0]} (PDFs from two directions) [6.2.4]")
@@ -313,7 +392,7 @@ def fire_after_move(s, n, prot):
     e = s["einheiten"][n]
     carried = carried_markers(e)
     if carried:
-        prot.append(f"{n}: these markers move along: {', '.join(carried)}")  # L109 (Manuel)
+        prot.append(f"{n}: these markers move along: {', '.join(carried)}")  # L109
     if e.get("ziel") is not None:
         prot.append(f"{n} ceases fire due to the movement (adjust PDF/VOF) [6.1.2]")
         e["ziel"] = None
@@ -328,6 +407,40 @@ def fire_after_move(s, n, prot):
                 s["einheiten"][m]["spotted"] = True
             prot.append(f"Enemies on {e['karte']} now all Spotted: remove Unspotted markers [8.5 p.65]")
     open_fire(s, prot, only=[n])
+    # L149 [RULE 6.3.4 p.44] "if the last unit under a VOF from an opposing unit on the same card moves away to an adjacent card
+    # (in any direction), the opposing unit's fire follows the moving unit to the new card. Move the VOF to the new card and place a PDF marker."
+    if state.is_visible(e) and e.get("karte") in s["karten"]:
+        for m, f in s["einheiten"].items():
+            if (
+                f["seite"] != e["seite"]
+                and f.get("karte") in s["karten"]
+                and f["karte"] != e["karte"]
+                and is_firing(f)
+                and f["ziel"] == f["karte"]
+                and geometry.adjacent(s, f["karte"], e["karte"])
+                and not state.valid_target(s, f["karte"], f["seite"])
+            ):
+                ok, _why = geometry.los(
+                    s,
+                    f["karte"],
+                    e["karte"],
+                    ha=geometry.height_bonus(s, f),
+                    hb=geometry.card_height_bonus(s, e["karte"], geometry.opponent_of(f)),
+                )
+                if ok and geometry.in_range(s, f, e["karte"]) and e["karte"] in fire_candidates(s, m):
+                    f["ziel"] = e["karte"]
+                    f.pop("konzentriert", None)
+                    prot.append(
+                        f"{m}: fire follows {n} to {e['karte']}, PDF from {f['karte']} to {e['karte']}"
+                        + pdf_note(s, f["karte"], e["karte"], m)
+                        + " [6.3.4 p.44]"
+                    )
+                else:
+                    f["ziel"] = None
+                    f.pop("konzentriert", None)
+                    prot.append(
+                        f"{m}: last Point Blank target left {f['karte']}, cannot follow: Cease Fire, opens fire anew per 6.1.1 [6.3.4, 6.3.3]"
+                    )
     for m, f in s["einheiten"].items():
         if (
             f["seite"] != e["seite"]
@@ -356,6 +469,30 @@ def cease_fire_on_los_loss(s, prot):
     """[RULE 6.1.2, 9.1, 9.2.1] Target no longer in LOS/range (e.g. Illumination removed in Clean Up): cease fire."""
     for n, e in s["einheiten"].items():
         zk = e.get("ziel")
+        if zk and zk == e.get("karte") and e.get("_rauch_ziel") and e["karte"] in s["karten"]:
+            # L148: smoke/Incoming on the own card has lifted: back to the former target if still possible
+            if not geometry.blocks_los(state.card(s, e["karte"]), False, s):
+                old = e.pop("_rauch_ziel")
+                ok2, _r = (
+                    geometry.los(
+                        s,
+                        e["karte"],
+                        old,
+                        ha=geometry.height_bonus(s, e),
+                        hb=geometry.card_height_bonus(s, old, geometry.opponent_of(e)),
+                    )
+                    if old in s["karten"]
+                    else (False, "")
+                )
+                if ok2 and geometry.in_range(s, e, old) and state.valid_target(s, old, e["seite"]):
+                    e["ziel"] = old
+                    prot.append(f"{n}: smoke on {e['karte']} lifted, fires again at {old} along the PDF [6.1.2]")
+                else:
+                    e["ziel"] = None
+                    prot.append(
+                        f"{n}: smoke on {e['karte']} lifted, former target {old} no longer valid: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
+                    )
+            continue
         if not zk or zk == e.get("karte") or zk not in s["karten"] or e.get("karte") not in s["karten"]:
             continue
         los_ok_, los_reason = geometry.los(
@@ -376,13 +513,37 @@ def cease_fire_on_los_loss(s, prot):
             continue
         if e.pop("_vof_sperre", None):
             prot.append(f"{n}: block lifted, VOF back on {effective_fire_target(s, n)} [6.1.2]")
-        if not los_ok_ or not geometry.in_range(s, e, zk):
+        if los_ok_ and not geometry.in_range(s, e, zk):
+            # L147 [RULE 6.3.2 p.43 example]: out of range (Out of Ammo): the PDF stays, the VOF moves to the last card in range
+            fk = effective_fire_target(s, n)
+            if fk != e["karte"] and state.units_on(s, fk, e["seite"]) and not state.valid_target(s, fk, e["seite"]):
+                # [RULE 6.1.1 p.40 example 2, K16] the VOF would lie on own units: no fire at all
+                e["ziel"] = None
+                e.pop("konzentriert", None)
+                e.pop("_reichweite_vof", None)
+                prot.append(f"{n} ceases fire on {zk}: out of range and own units on {fk} along the PDF [6.3.2, 6.1.1]")
+                continue
+            if e.get("_reichweite_vof") != fk:
+                e["_reichweite_vof"] = fk
+                prot.append(f"{n}: {zk} out of range, PDF stays, VOF marker moves to {fk} [6.3.2 p.43, 7.18.2]")
+            continue
+        if e.pop("_reichweite_vof", None) and los_ok_:
+            # L164: only when the target is really back in LOS and range (no message before a Cease Fire for lost LOS)
+            prot.append(f"{n}: target {zk} in range again, VOF back on {zk} [6.3.2]")
+        if not los_ok_ and los_reason.startswith(f"{e['karte']} has Incoming/Smoke"):
+            # L148 [RULE 6.1.2 p.40 example 1]: smoke on the firing card: "the PDF is removed and the ... VOF is placed on its
+            # card as a reminder that it is still firing and will use ammunition. (This VOF will affect any ... units which enter the card.)"
+            e["_rauch_ziel"] = zk
+            e["ziel"] = e["karte"]
+            e.pop("konzentriert", None)
+            prot.append(
+                f"{n}: no LOS out of {e['karte']} (smoke/Incoming): remove the PDF to {zk}, its VOF stays on {e['karte']} (hits opposing units entering the card) [6.1.2 p.40 example 1]"
+            )
+            continue
+        if not los_ok_:
             e["ziel"] = None
             e.pop("konzentriert", None)
-            reason = (
-                los_reason if not los_ok_ else "out of range"
-            )  # L94: name the real reason instead of a blanket night 9.1
-            prot.append(f"{n} ceases fire on {zk}, remove the VOF marker from {zk}: {reason} [6.1.2]")
+            prot.append(f"{n} ceases fire on {zk}, remove the VOF marker from {zk}: {los_reason} [6.1.2]")  # L94
 
 
 def enemy_cease_fire(s, prot):

@@ -26,13 +26,25 @@ def cc_row(s, e):
     )
 
 
-def ncm_rows(s, name):
-    e = state.unit(s, name)
-    c = state.card(s, e["karte"])
-    v = fire.vof_against(s, e["karte"], e["seite"], ignore_mines=True)
+def _fire_effects(s, e, c, name):
+    """All fire effects against the unit as (label, value, type): direct VOF, Incoming-like VOF, Mines!, Sniper, Grenade,
+    Grenade Miss [RULE 6.4 p.45, 6.3.6 p.45]."""
     candidate = []
-    if v:
-        candidate.append((f"VOF {rules.VOF_NAME.get(v[0], v[0])} from {','.join(v[2])}", v[1], v[0]))
+    tr = [x for x in fire.vof_entries(s, e["karte"]) if x[3] in (None, e["seite"]) and x[0] != "Mines"]
+    ext = [x for x in tr if x[0] in rules.TERRAIN_LIKE_INCOMING]
+    dir_ = [x for x in tr if x[0] not in rules.TERRAIN_LIKE_INCOMING]
+    if ext:
+        bx = min(ext, key=lambda x: x[1])
+        candidate.append((f"VOF {rules.VOF_NAME.get(bx[0], bx[0])} ({bx[2]})", bx[1], bx[0]))
+    if dir_:
+        bd = min(dir_, key=lambda x: x[1])
+        candidate.append(
+            (
+                f"VOF {rules.VOF_NAME.get(bd[0], bd[0])} from {','.join(x[2] for x in dir_ if x[1] == bd[1])}",
+                bd[1],
+                bd[0],
+            )
+        )
     if e.get("mine_hit"):
         mw = min([x["wert"] for x in c.get("extern", []) if x["typ"] == "Mines"] or [-4])
         candidate.append(("Mines! VOF (mine check lost)", mw, "Mines"))  # [RULE 7.9.1 p.54, 6.3.6]
@@ -43,37 +55,11 @@ def ncm_rows(s, name):
         candidate.append(("Grenade VOF (cumulative)", sum(e["grenade"]), "G"))
     if not candidate and c.get("grenade_miss"):
         candidate.append(("Grenade Miss als VOF", -1, "G"))
-    if not candidate:
-        raise rules.Violation(f"No VOF against {name} on {e['karte']} [3.7.4]")
-    base = min(candidate, key=lambda x: x[1])
-    # L61 [RULE 6.4 p.45 "When multiple VOF are affecting a card, take into account their value after modifiers ... Light levels (9.0)
-    # and cover modifiers (5.3) may modify different weapons in different ways"; 5.2.3: Incoming takes the lower C&C value; K15]
-    if v and v[0] in rules.TERRAIN_LIKE_INCOMING:
-        tr = [x for x in fire.vof_entries(s, e["karte"]) if x[3] in (None, e["seite"]) and x[0] != "Mines"]
-        ext = [x for x in tr if x[0] in rules.TERRAIN_LIKE_INCOMING]
-        dir_ = [x for x in tr if x[0] not in rules.TERRAIN_LIKE_INCOMING]
-        if ext:
-            bx = min(ext, key=lambda x: x[1])
-            candidate = [k for k in candidate if not k[0].startswith("VOF ")] + [
-                (f"VOF {rules.VOF_NAME.get(bx[0], bx[0])} ({bx[2]})", bx[1], bx[0])
-            ]
-        if dir_ and not s.get("_ncm_alt"):
-            bd = min(dir_, key=lambda x: x[1])
-            s["_ncm_alt"] = True
-            try:
-                old_target = _ncm_direct(
-                    s,
-                    e,
-                    c,
-                    (f"VOF {rules.VOF_NAME.get(bd[0], bd[0])} from {','.join(x[2] for x in dir_)}", bd[1], bd[0]),
-                )
-            finally:
-                s.pop("_ncm_alt", None)
-        else:
-            old_target = None
-        base = min(candidate, key=lambda x: x[1])
-    else:
-        old_target = None
+    return candidate
+
+
+def _rows_for(s, e, c, base):
+    """NCM rows for one fire effect as the base VOF [RULE 6.4 p.45, Charts & Tables 1]."""
     type_ = base[2]
     rows = [(base[0], base[1])]
     if c.get("grenade_miss") and base[0] != "Grenade Miss als VOF":
@@ -91,6 +77,8 @@ def ncm_rows(s, name):
     cv = fire.cover_of(s, e)
     if cv and e.get("grenade_critical"):
         rows.append((f"Cover {cv['id']} {cv['typ']} lost (Critical Hit Grenade) [7.10.3]", 0))
+    elif cv and e.get("cf_critical"):
+        rows.append((f"Cover {cv['id']} {cv['typ']} lost (Critical Hit Concentrated Fire) [7.11.4]", 0))  # L154
     elif cv:
         rows.append((f"Cover {cv['id']} {cv['typ']}", cv["wert"]))
     if state.pinned(e):
@@ -116,41 +104,96 @@ def ncm_rows(s, name):
         rows.append(
             ("Visibility (ch. 9)" + (f", illumination {il:+d} included" if il is not None else ""), sk)
         )  # [RULE 9.0 p.69]
-    if old_target is not None and sum(x[1] for x in old_target) < sum(x[1] for x in rows):
-        return old_target
     return rows
 
 
-def _ncm_direct(s, e, c, base):
-    """L61: comparison value for direct fire alongside Incoming (6.4 'value after modifiers')."""
-    z = [(base[0], base[1])]
-    if c.get("grenade_miss"):
-        z.append(("Grenade Miss", -1))
-    if fire.crossfire(s, e["karte"], e["seite"]):
-        z.append(("Crossfire (two PDF directions)", -1))
-    for _ in range(e.get("cf", 0)):
-        z.append(("Concentrated Fire", -1))
-    z.append(cc_row(s, e))
-    cv = fire.cover_of(s, e)
-    if cv and e.get("grenade_critical"):
-        z.append((f"Cover {cv['id']} {cv['typ']} lost (Critical Hit Grenade) [7.10.3]", 0))
-    elif cv:
-        z.append((f"Cover {cv['id']} {cv['typ']}", cv["wert"]))
-    if state.pinned(e):
-        z.append(("Pinned", +1))
-    if "Exposed" in e["status"]:
-        z.append(("Exposed", -2))
-    smoke = [x.get("wert") or 0 for x in c.get("extern", []) if x["typ"] == "Smoke"]
-    if smoke and max(smoke):
-        z.append(("Smoke (best value)", max(smoke)))
-    sk = geometry.visibility_on_card(s, e["karte"])
-    if sk:
-        il = geometry.illumination_value(s, e["karte"])
-        z.append(("Visibility (ch. 9)" + (f", Illumination {il:+d} included" if il is not None else ""), sk))
-    return z
+def ncm_rows(s, name):
+    """[RULE 6.4 p.45] 'When multiple VOF are affecting a card, take into account their value after modifiers ... Light levels
+    (9.0) and cover modifiers (5.3) may modify different weapons in different ways' (Clarification 3): every fire effect is
+    evaluated with its own modifiers, the strongest result counts (L61 Incoming, L129 all effects, e.g. Grenade at night)."""
+    e = state.unit(s, name)
+    c = state.card(s, e["karte"])
+    candidate = _fire_effects(s, e, c, name)
+    if not candidate:
+        raise rules.Violation(f"No VOF against {name} on {e['karte']} [3.7.4]")
+    best = None
+    for cand in candidate:
+        rows = _rows_for(s, e, c, cand)
+        if best is None or sum(v for _, v in rows) < sum(v for _, v in best):
+            best = rows
+    return best
+
+
+def _ncm_total(s, name):
+    if s["phase"] == "3.7.4" and name in s.get("kampf_ncm", {}):
+        rows = [tuple(z) for z in s["kampf_ncm"][name]]
+    else:
+        rows = ncm_rows(s, name)
+    raw = sum(v for _, v in rows)
+    return max(-4, min(6, raw)), raw, rows
+
+
+def ncm_groups(s):
+    """L155 (V18): open Combat Effects card by card, per card one group per NCM value.
+    Returns [(card, ncm, [units])] in board order (cards by number, groups by NCM, units in protocol order)."""
+    by_card = {}
+    for n in s.get("kampf_offen", []):
+        if n not in s["einheiten"]:
+            continue
+        try:
+            ncm, _raw, _rows = _ncm_total(s, n)
+        except rules.Violation:
+            continue
+        by_card.setdefault(s["einheiten"][n]["karte"], {}).setdefault(ncm, []).append(n)
+    out = []
+    for k in sorted(by_card, key=lambda x: (state.card(s, x)["reihe"], state.card(s, x)["spalte"])):
+        for ncm in sorted(by_card[k]):
+            out.append((k, ncm, by_card[k][ncm]))
+    return out
+
+
+def print_next_group(s):
+    """L155: the next NCM group as a numbered list, so the player sees how many cards to draw at once."""
+    groups = ncm_groups(s)
+    if not groups:
+        return
+    k, ncm, units = groups[0]
+    same_card = [g for g in groups if g[0] == k]
+    _n, raw, rows = _ncm_total(s, units[0])
+    print(
+        f"Combat Effects card {k}, group 1 of {len(same_card)} on this card: NCM {ncm:+d}"
+        + (f" (raw {raw:+d})" if raw != ncm else "")
+        + f". Draw {len(units)} Action card{'s' if len(units) > 1 else ''}, one per unit, in this order, Combat Resolution column {ncm:+d}:"
+    )
+    for i, n in enumerate(units, 1):
+        e = s["einheiten"][n]
+        print(f"  {i}. {n} ({comms.experience(e)}, {state.steps(e)} step{'s' if state.steps(e) > 1 else ''})")
+    print("  NCM rows:")
+    for t_, v_ in rows:
+        print(f"    {t_} {v_:+d}")  # one per line (L156)
+    print(
+        '  Then per unit in this order: fof.py hit "<unit>" HIT|PIN|MISS [letters under its experience] [RULE 3.7.4 p.17, 6.4.2]'
+    )
+    rest = groups[1:]
+    if rest:
+        cards = {}
+        for g in rest:
+            cards.setdefault(g[0], []).append(len(g[2]))
+        print(
+            "  Afterwards still open: "
+            + "; ".join(f"card {c} {len(v)} group(s), {sum(v)} unit(s)" for c, v in cards.items())
+        )
 
 
 def cmd_ncm(s, args):
+    if args and args[0] in ("weiter", "next", "gruppe", "group"):
+        if s["phase"] != "3.7.4":
+            raise rules.Violation("ncm next only in the Combat Effects Segment 3.7.4")
+        if not ncm_groups(s):
+            print("No Combat Effects open [3.7.4]")
+            return
+        print_next_group(s)
+        return
     name = args[0]
     if s["phase"] == "3.7.4" and name in s.get("kampf_ncm", {}):
         rows = [tuple(z) for z in s["kampf_ncm"][name]]  # state on entering 3.7.4 [RULE 3.7.4 p.17]
@@ -297,7 +340,8 @@ def reduce_unit(s, name, code, prot):
             prot.append(f"{name} ({e['typ']}) becomes a Casualty, remove counter")
         else:
             e["typ"], e["erfahrung"] = lat, rules.LAT_EXPERIENCE[lat]
-            e["vof_rating"] = "S" if lat in ("Fire Team", "Assault Team") else None
+            # L163 [Normandy Unit Breakdown p.47, K12, E72 counter photo]: generic LAT counter values, Assault Team A • P, Fire Team S • C
+            e["vof_rating"], e["reichweite"] = LAT_VALUES[lat]
             if e["vof_rating"] is None:
                 e["ziel"] = None
             commands.mark(e, "Pinned")
@@ -527,6 +571,8 @@ def cmd_hit(s, args):
     briefing.print_board(prot, s)
     if s.get("kampf_offen"):
         print("Still open: " + ", ".join(s["kampf_offen"]))
+        if s["phase"] == "3.7.4":
+            print_next_group(s)  # L155
 
 
 def ammo(e):
@@ -584,9 +630,31 @@ def out_of_ammo(s, n, e, prot):
         return
     e["out_of_ammo"] = True
     prot.append(f"{n}: Out of Ammo marker: VOF S, range Close until resupply [7.18.2 p.61, 8.11 p.68]")
-    if e.get("ziel") and e["ziel"] != e["karte"] and not geometry.in_range(s, e, e["ziel"]):
-        prot.append(f"{n}: target {e['ziel']} now out of range, Cease Fire, reopens per 6.1.1 [3.8, 8.11 p.68, L40]")
-        e["ziel"] = None
+    los_now = (
+        geometry.los(
+            s,
+            e["karte"],
+            e["ziel"],
+            ha=geometry.height_bonus(s, e),
+            hb=geometry.card_height_bonus(s, e["ziel"], geometry.opponent_of(e)),
+        )[0]
+        if e.get("ziel") and e["ziel"] in s["karten"] and e["ziel"] != e["karte"]
+        else False
+    )
+    if e.get("ziel") and e["ziel"] != e["karte"] and los_now and not geometry.in_range(s, e, e["ziel"]):
+        # L164: without LOS (e.g. Illumination removed) the Cease Fire of cease_fire_on_los_loss follows; no VOF shift message
+        # L147 [RULE 6.3.2 p.43 example]: "The PDF stays the same ... but its VOF is moved to the adjacent card" (replaces L40)
+        fk = fire.effective_fire_target(s, n)
+        if fk != e["karte"] and state.units_on(s, fk, e["seite"]) and not state.valid_target(s, fk, e["seite"]):
+            prot.append(
+                f"{n}: target {e['ziel']} now out of range and own units on {fk} along the PDF: Cease Fire, reopens per 6.1.1 [6.3.2, 6.1.1]"
+            )
+            e["ziel"] = None
+        else:
+            e["_reichweite_vof"] = fk
+            prot.append(
+                f"{n}: target {e['ziel']} now out of range (Close): PDF stays, VOF marker S moves to {fk} [6.3.2 p.43, 7.18.2]"
+            )
 
 
 def ammo_surplus(s, n, e, from_, prot):
@@ -747,6 +815,22 @@ def cmd_capture(s, args):
     st = sum(state.steps(s["einheiten"][m]) for m in group)
     for m in group:
         del s["einheiten"][m]
+    if we["seite"] == "US":
+        # [RULE 8.15 p.69] 'return between missions and retain their original Experience Level (it is not considered
+        # an LAT). Make a note of the guard step and its Experience Level on your mission log.' (K35, L126)
+        s.setdefault("wachen", []).append(
+            {
+                "einheit": w,
+                "erfahrung": we.get("erfahrung"),
+                "karte": ge["karte"],
+                "zug": s["zug"],
+                "gefangene": list(group),
+            }
+        )
+        prot.append(
+            f"{w}: guard step {we.get('erfahrung')} noted on the mission log, returns between missions with this "
+            f"Experience Level, not an LAT [8.15 p.69]"
+        )
     if state.steps(we) > 1:
         we["steps"] -= 1
         prot.append(f"{w} details one step as guard (now {we['steps']} steps), guard Removed from Play [8.15]")

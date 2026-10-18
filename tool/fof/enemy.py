@@ -421,6 +421,27 @@ def _is_no_fire_missions(s, ctx):
     return "keine feuerauftraege" in ctx.a or "no fire missions" in ctx.a
 
 
+def advance_cover(s, e, n, target, prot):
+    """L169 [RULE 8.6.1E p.66] 'Enemies who are advancing will move into the highest value cover marker available that
+    allows it to Open Fire upon opposing units': free or own-side cover on the target card, highest value (random tie)."""
+    opp = state.opponent_of_side(e["seite"])
+    free = [
+        c
+        for c in state.card(s, target).get("cover", [])
+        if not any(s["einheiten"][m].get("bereich") == c["id"] for m in state.units_on(s, target, opp))
+    ]
+    if not free:
+        return
+    top = max(c["wert"] for c in free)
+    best = [c for c in free if c["wert"] == top]
+    e["bereich"] = best[0]["id"]
+    prot.append(
+        f"{n} moves under {best[0]['id']} ({best[0]['typ']} +{top}) on {target}"
+        + (f" (tie with {', '.join(c['id'] for c in best[1:])}: choose by R#)" if len(best) > 1 else "")
+        + " [8.6.1E]"
+    )
+
+
 def _enemy_advance(s, ctx):
     """cmd_feindaktion: 'advance' in a"""
     c = state.card(s, ctx.e["karte"])
@@ -441,10 +462,12 @@ def _enemy_advance(s, ctx):
                     + state.open_reading(s, "U24_assault_in_staging")
                 )
     if target:
+        combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
         commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)
         ctx.e["karte"], ctx.e["bereich"] = target, "offen"
         commands.mark(ctx.e, "Exposed")
         ctx.prot.append(f"{ctx.n}: Advance Straight Ahead to {target}, Exposed [Offensive Hierarchy, 8.6.1C]")
+        advance_cover(s, ctx.e, ctx.n, target, ctx.prot)
         fire.fire_after_move(s, ctx.n, ctx.prot)
 
 
@@ -470,10 +493,18 @@ def _enemy_seek_cover(s, ctx):
     else:
         if ctx.o.get("--erfolg") not in ("ja", "nein"):
             n_cards = (kk.get("cover_draw") or 2) + {"Green": -1, "Veteran": 1}.get(comms.experience(ctx.e), 0)
+            n_cards += leader_cards(s, ctx.e)  # L142 [RULE 8.9 p.67]
             raise rules.Violation(
-                f"Seek Cover: draw {n_cards} cards (cover draw of the card, experience {comms.experience(ctx.e)}), word 'Cover'; --success=yes|no"
+                f"Seek Cover: draw {n_cards} cards (cover draw of the card, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}), word 'Cover'; --success=yes|no"
             )
         if ctx.o["--erfolg"] == "ja":
+            present = len([c for c in kk.get("cover", []) if not c.get("feld")])
+            if kk.get("cover_max") is not None and present >= kk["cover_max"]:
+                # L133 [RULE 5.3 p.36] Cover Potential of the card also limits enemy Seek Cover
+                ctx.prot.append(
+                    f"{ctx.n}: Seek Cover drawn successfully, but {ctx.e['karte']} has reached its Cover Potential ({kk['cover_max']}): no new marker [5.3 p.36]"
+                )
+                return
             cid = commands.new_cover_marker(s, ctx.e["karte"], "Basic Cover", 1)
             ctx.e["bereich"] = cid
             commands.mark(ctx.e, "Exposed")
@@ -510,11 +541,19 @@ def _enemy_fall_back(s, ctx):
         state.card(s, target)
         if not geometry.adjacent(s, ctx.e["karte"], target):
             raise rules.Violation(f"{target} not adjacent to {ctx.e['karte']}")
+        commands.diagonal_pdf_check(s, ctx.e, target)  # L131 [RULE 5.1.2 p.32]
+        best = fall_back_candidates(s, ctx.e)  # L141 [RULE 8.6.3 p.66] priorities 2 and 3
+        if best and target not in best:
+            raise rules.Violation(
+                f"Fall Back of {ctx.n}: by 8.6.3 to {', '.join(best)} (towards the enemy edge; first out of every US LOS, then highest cover value incl. free markers; tie: R#) [RULE 8.6.3 p.66]"
+            )
+        combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
         commands.grenade_expires(
             s, ctx.e, ctx.n, ctx.prot
         )  # L92 [RULE 7.10.4] Grenade marker becomes a Grenade Miss on the origin card
+        cv_from = geometry.cover_marker(s, ctx.e)
         ctx.e["karte"], ctx.e["bereich"] = target, "offen"
-        commands.mark(ctx.e, "Exposed")
+        ctx.e.pop("deep_bunker", None)
         free = [
             c
             for c in state.card(s, target).get("cover", [])
@@ -524,9 +563,18 @@ def _enemy_fall_back(s, ctx):
             )
         ]
         if free:
-            ctx.e["bereich"] = max(free, key=lambda c: c["wert"])["id"]
-            ctx.prot.append(f"{ctx.n} falls back to {target} under {ctx.e['bereich']}, Exposed [8.6.3, 8.6.1E]")
+            best = max(free, key=lambda c: c["wert"])
+            ctx.e["bereich"] = best["id"]
+            if cv_from and cv_from["typ"] in rules.FIXED_COVER and best["typ"] in rules.FIXED_COVER:
+                # L131 [RULE 5.1.2 p.32] 'If Trench, Bunker, Pillbox ... exist in two adjacent cards, units may move between them without being marked as Exposed'
+                ctx.prot.append(
+                    f"{ctx.n} falls back to {target} under {best['id']} ({best['typ']}), from {cv_from['typ']}: not Exposed [8.6.3, 5.1.2]"
+                )
+            else:
+                commands.mark(ctx.e, "Exposed")
+                ctx.prot.append(f"{ctx.n} falls back to {target} under {ctx.e['bereich']}, Exposed [8.6.3, 8.6.1E]")
         else:
+            commands.mark(ctx.e, "Exposed")
             ctx.prot.append(f"{ctx.n} falls back to {target} (open), Exposed [8.6.3]")
         fire.fire_after_move(s, ctx.n, ctx.prot)
 
@@ -559,8 +607,26 @@ def _enemy_grenade_concentrate(s, ctx):
     """cmd_feindaktion: 'grenade' in a or 'concentrate' in a"""
     if ctx.o.get("--erfolg") not in ("ja", "nein"):
         raise rules.Violation(
-            "Grenade Attack (only Point Blank or G! rating) or Attempt to Concentrate Fire: 2 cards (enemy experience, +1 with Leader), Grenade symbol or Crosshairs; --success=yes|no --unit=<target unit or cover stack> [7.10, 7.11]"
+            f"Grenade Attack (only Point Blank or G! rating) or Attempt to Concentrate Fire: draw {enemy_attempt_cards(s, ctx.e, 'concentrate' in ctx.a)} cards "
+            f"(base 2, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}{', tripod +1' if 'concentrate' in ctx.a and ctx.e.get('tripod') else ''}), "
+            f"Grenade symbol or Crosshairs; --success=yes|no --unit=<target unit or cover stack>{largest_target_note(s, ctx.e)} [7.10, 7.11, 8.9] "
+            + commands.draw_watch(
+                s,
+                "cf" if "concentrate" in ctx.a else "grenade",
+                ctx.e,
+                ranged="grenade" in ctx.a and not state.valid_target(s, ctx.e["karte"], "Feind"),
+            )
         )
+    cv0 = geometry.cover_marker(s, ctx.e)
+    if "grenade" in ctx.a and cv0 and cv0["typ"] == "Deep Bunker":
+        # [CSR 5 p.14] 'Enemy units will leave the Bunker upon drawing Fall Back or Grenade Attack actions' (L130)
+        ctx.e["bereich"] = "offen"
+        ctx.e.pop("deep_bunker", None)
+        commands.mark(ctx.e, "Exposed")
+        ctx.prot.append(
+            f"{ctx.n} leaves Deep Bunker {cv0['id']} for the Grenade Attack, Exposed; VOF now active [CSR 5 p.14, 5.3.2]"
+        )
+        fire.open_fire(s, ctx.prot, only=[ctx.n])
     grenade_pb = "grenade" in ctx.a and bool(state.valid_target(s, ctx.e["karte"], "Feind"))
     g_without_pdf = state.is_v4(s) and ctx.e.get("vof_rating") == "G" and not fire.is_firing(ctx.e) and not grenade_pb
     rg = leader_rg_target(s, ctx.n) if (state.is_v4(s) and "grenade" in ctx.a and not grenade_pb) else None  # L67 [8.9]
@@ -602,22 +668,42 @@ def _enemy_grenade_concentrate(s, ctx):
         if not ze:
             raise rules.Violation(f"specify --unit=<target unit> (cover stack or random unit without cover on {zk})")
         z = state.unit(s, ze)
+        if zk == ctx.e["karte"]:
+            best = largest_targets(s, zk)  # L143 [RULE 8.6.1B p.66] largest target first on the own card
+            if best and ze not in best:
+                raise rules.Violation(
+                    f"{ctx.n} targets the largest target on its card first: {', '.join(best)} (equal size: R#) [RULE 8.6.1B p.66]"
+                )
         gw = int(ctx.o.get("--wert", s.get("granate_vof", -3)))  # Normandy p.13: German Grenade Attacks are also -4
         if "grenade" in ctx.a and (zk == ctx.e["karte"] or ctx.e.get("vof_rating") == "G" or rg):
             # [RULE 7.10.1 p.54] one unit out of cover or the whole stack under its Cover marker (L124)
             stack = commands.grenade_stack(s, ze)
+            crit = ctx.o.get("--kritisch") == "ja"
+            under = z.get("bereich", "offen") != "offen"
             for m in stack:
                 s["einheiten"][m].setdefault("grenade", []).append(gw)
-            where = f" (stack under {z['bereich']})" if z.get("bereich", "offen") != "offen" else ""
+                if crit and under:
+                    s["einheiten"][m]["grenade_critical"] = True  # L154 [RULE 7.10.3 p.55] also for enemy grenades
+                elif crit:
+                    s["einheiten"][m]["grenade"].append(gw)
+            where = f" (stack under {z['bereich']})" if under else ""
             ctx.prot.append(f"{ctx.n}: Grenade VOF {gw} on {', '.join(stack)}{where} [7.10.1]")
-            commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot)
+            if crit:
+                ctx.prot.append(
+                    "Critical Hit: combined Grenade/Critical Hit marker, the stack loses its cover benefit [7.10.3]"
+                    if under
+                    else f"Critical Hit: a second Grenade VOF on {ze} [7.10.3]"
+                )
+            commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot, ctx.n)
         else:
+            commands.cf_target_check(s, zk, ze, ctx.e, side="US")  # L150 [RULE 7.11.1, 5.2.2 Fig 3]
             for _m in cf_stack(s, ze):
                 s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
             ctx.e["konzentriert"] = True
             ctx.prot.append(
                 f"{ctx.n}: Concentrated Fire marker on {ze} (stack: {', '.join(cf_stack(s, ze))}; -1 NCM, cumulative) [7.11]"
             )
+            commands.cf_critical(s, ze, ctx.o, ctx.prot)  # L154 [RULE 7.11.4]
             if combat.ammo(ctx.e):
                 combat.ammo_use(s, ctx.n, ctx.e, 1, "successful Concentrate Fire", ctx.prot)
     else:
@@ -626,7 +712,7 @@ def _enemy_grenade_concentrate(s, ctx):
             ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk} [7.10.4]")
             ze = ctx.o.get("--einheit")
             commands.grenade_back_notes(
-                s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot
+                s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
             )
         else:
             ctx.prot.append(f"{ctx.n}: attempt failed")
@@ -729,6 +815,8 @@ def _enemy_move_towards(s, ctx):
         raise rules.Violation(
             "Move towards closest Casualty: --target=<adjacent card towards the closest Casualty> [LAT/Pinned Hierarchy]"
         )
+    commands.diagonal_pdf_check(s, ctx.e, target)  # L131 [RULE 5.1.2 p.32]
+    combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
     commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)
     ctx.e["karte"], ctx.e["bereich"] = target, "offen"
     commands.mark(ctx.e, "Exposed")
@@ -740,19 +828,73 @@ def _is_move_towards(s, ctx):
     return "move towards" in ctx.a
 
 
+def closest_opponent_cards(s, e):
+    """L168 [Enemy Activity Chart 'Infiltrate towards closest opposing unit'; Shonai_Dweller BGG 3575248 '"Closest" means
+    closest ... equally distant you have to randomize', UrineJoeGarin 3488797 'draw a R#']: nearest opponent-occupied cards
+    and, per card, the adjacent cards that bring the unit closer."""
+    opp = state.opponent_of_side(e["seite"])
+    occ = sorted(
+        k
+        for k, c in s["karten"].items()
+        if not c.get("staging")
+        and any(s["einheiten"][m]["typ"] != "Casualty" for m in state.units_on(s, k, opp))
+    )
+    if not occ:
+        return []
+    d0 = min(geometry.distance(s, e["karte"], k) for k in occ)
+    out = []
+    for k in occ:
+        if geometry.distance(s, e["karte"], k) != d0:
+            continue
+        steps = sorted(
+            a
+            for a in s["karten"]
+            if geometry.adjacent(s, e["karte"], a)
+            and not s["karten"][a].get("ausserhalb")
+            and geometry.distance(s, a, k) < d0
+        )
+        out.append((k, steps))
+    return out
+
+
 def _enemy_infiltrate(s, ctx):
     """cmd_feindaktion: 'infiltrate' in a"""
     target = ctx.o.get("--ziel")
-    if not target or ctx.o.get("--erfolg") not in ("ja", "nein"):
+    if not target:
+        cands = closest_opponent_cards(s, ctx.e)
+        lines = [f"{k} (step to {', '.join(st) or '-'})" for k, st in cands]
         raise rules.Violation(
-            "Infiltrate: --target=<card towards nearest opponent> --success=yes|no (2 cards, Infiltrate symbol); failure = normal move with Exposed [8.6, 5.1.4]"
+            "Infiltrate towards closest opposing unit: closest opponent card(s) "
+            + "; ".join(f"{i + 1}. {x}" for i, x in enumerate(lines))
+            + (f" - choose by R# column {len(cands)}" if len(cands) > 1 else "")
+            + "; then the step card (R# if several); give --target=<card> [Chart, BGG 3575248, 3488797, L168]"
         )
+    if not geometry.adjacent(s, ctx.e["karte"], target):
+        raise rules.Violation(f"{target} is not adjacent to {ctx.e['karte']} [RULE 5.1.2 p.31]")
+    def _any_vof(k):  # a VOF marker of either side on the card [5.1.4]
+        return any(fire.vof_against(s, k, side) is not None for side in ("US", "Feind"))
+
+    vof_here, vof_there = _any_vof(ctx.e["karte"]), _any_vof(target)
+    if not (vof_here or vof_there) and ctx.o.get("--erfolg") is None:
+        # L168 [RULE 5.1.4 p.32 'as long as either the origin card or the destination card has a VOF marker'; K40]
+        ctx.o["--erfolg"] = "nein"
+        ctx.prot.append(
+            f"{ctx.n}: no VOF on {ctx.e['karte']} or {target}, infiltration not possible: normal move, Exposed [5.1.4, K40]"
+        )
+    if ctx.o.get("--erfolg") not in ("ja", "nein"):
+        raise rules.Violation(
+            f"Infiltrate: --target=<card towards nearest opponent> --success=yes|no ({enemy_attempt_cards(s, ctx.e)} cards: base 2, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}, Infiltrate symbol); failure = normal move with Exposed [8.6, 5.1.4, 8.9]"
+        )
+    state.card(s, target)
+    commands.diagonal_pdf_check(s, ctx.e, target)  # L131
+    combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
     ctx.e["karte"], ctx.e["bereich"] = target, "offen"
     if ctx.o["--erfolg"] == "nein":
         commands.mark(ctx.e, "Exposed")
     ctx.prot.append(
         f"{ctx.n} to {target}" + (", not Exposed (infiltrated)" if ctx.o["--erfolg"] == "ja" else ", Exposed")
     )
+    advance_cover(s, ctx.e, ctx.n, target, ctx.prot)
     fire.fire_after_move(s, ctx.n, ctx.prot)
 
 
@@ -1071,6 +1213,82 @@ def leader_rg_target(s, n):
         if state.valid_target(s, z, e["seite"]) and geometry.in_range(s, dict(e, reichweite=rw), z):
             return z
     return None
+
+
+def leader_cards(s, e):
+    """[RULE 8.9 p.67] 'All enemy units in Visual-Verbal communication with a Good Order enemy leader draw one additional card
+    for any action attempts made.' L142"""
+    return 1 if e.get("seite") == "Feind" and leader_present(s, e) else 0
+
+
+def enemy_attempt_cards(s, e, concentrate=False):
+    """Cards for an enemy attempt: base 2, experience, Leader +1 (8.9), tripod +1 for Concentrate Fire (7.11.2)."""
+    n = 2 + {"Green": -1, "Veteran": 1}.get(comms.experience(e), 0) + leader_cards(s, e)
+    if concentrate and e.get("tripod") and not state.fire_team_side(e):
+        n += 1
+    return max(1, n)
+
+
+def largest_targets(s, kid):
+    """[RULE 8.6.1B p.66] targets on the enemy's own card: 'the largest target (highest number of steps) first, then randomly
+    among equal sized targets'. Returns the names of the largest target(s): a stack under a cover marker counts as one target. L143"""
+    us = [m for m in state.units_on(s, kid, "US") if s["einheiten"][m]["typ"] != "Casualty"]
+    if not us:
+        return []
+    size = {}
+    for m in us:
+        b = s["einheiten"][m].get("bereich", "offen")
+        key = m if b == "offen" else f"stack {b}"
+        size[key] = size.get(key, 0) + state.steps(s["einheiten"][m])
+    top = max(size.values())
+    best = []
+    for m in us:
+        b = s["einheiten"][m].get("bereich", "offen")
+        key = m if b == "offen" else f"stack {b}"
+        if size[key] == top:
+            best.append(m)
+    return best
+
+
+def largest_target_note(s, e):
+    best = largest_targets(s, e["karte"]) if state.valid_target(s, e["karte"], "Feind") else []
+    return f"; on the own card the largest target first: {', '.join(best)}" if best else ""
+
+
+def fall_back_candidates(s, e):
+    """[RULE 8.6.3 p.66] Fall Back towards the own side (one row towards the enemy edge, straight or diagonal, cards that exist):
+    2. cards out of LOS of every US unit; 3. highest cover value (terrain C&C plus the best free cover marker). Returns the
+    best set (several = random choice by R#); empty if no card exists. L141"""
+    c = state.card(s, e["karte"])
+    cands = []
+    for sp in (c["spalte"] - 1, c["spalte"], c["spalte"] + 1):
+        k = geometry.card_at(s, c["reihe"] + 1, sp)
+        if k and not state.card(s, k).get("staging"):
+            cands.append(k)
+    if not cands:
+        return []
+    us_cards = {x["karte"] for x in s["einheiten"].values() if x["seite"] == "US" and x.get("karte") in s["karten"]}
+
+    def seen(k):
+        return any(geometry.los(s, uk, k, hb=geometry.card_height_bonus(s, k, "Feind"))[0] for uk in us_cards)
+
+    hidden = [k for k in cands if not seen(k)]
+    pool = hidden or cands
+
+    def cover_value(k):
+        ck = state.card(s, k)
+        free = [
+            cv["wert"]
+            for cv in ck.get("cover", [])
+            if not any(
+                s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == cv["id"]
+                for m in state.units_on(s, k)
+            )
+        ]
+        return (ck.get("cc") or 0) + (max(free) if free else 0)
+
+    top = max(cover_value(k) for k in pool)
+    return [k for k in pool if cover_value(k) == top]
 
 
 def leader_present(s, e):

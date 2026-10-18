@@ -401,8 +401,13 @@ def set_terrain(s, kid, type_, o):
     c["elevation"] = 1 + hills  # [RULE 2.2.1 p.9, 5.2.2A p.35] each Hill card +1
     if hills:
         c["terrain"] = f"{type_} on {hills} Hill"
-        if isinstance(c.get("raender"), str) or c.get("raender") is None:
-            c["raender"] = "gruen"  # E9: Hill cards have dark edges
+        if c.get("raender") != "gruen" and o.get("--raender"):
+            s.setdefault("_hinweise", []).append(
+                f"{kid}: white edges of the {type_} card ignored, the Hill card underneath has dark edges [5.2.2A p.35, BGG 3478872, 3447470]"
+            )
+        # L157 [RULE 5.2.2A p.35] "The dark LOS borders on the Hill card supersede any light borders on the non-Hill Terrain card"
+        # (Shonai_Dweller BGG 3478872: "There is no white border if you a using terrain on top of a Hill card"); E9
+        c["raender"] = "gruen"
     missing = [k for k in ("cc", "cover_max", "cover_draw", "raender") if c.get(k) is None]
     if missing:
         raise rules.Violation(
@@ -476,6 +481,10 @@ def cmd_objective(s, args):
     if not state.in_setup(s):
         raise rules.Violation("Tactical Controls only before turn 1; later only CCP via 4.2.1l [RULE 2.4.1 p.10]")
     z = s.setdefault("ziele", {})
+    if not args or (args[0] not in ("route", "konzentration") and len(args) < 2):
+        raise rules.Violation(
+            "objective primary|secondary|ap|ccp|cop <card> | objective route <1-4> <card> | objective concentration <card> <fire asset> | objective phaseline <n> <row>"
+        )
     kind = args[0]
     prot = []
     if kind == "phaseline":

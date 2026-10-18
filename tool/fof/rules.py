@@ -77,7 +77,9 @@ ACTIONS = {
     "4.2.3j": ("Flip a unit with a Fire Team side to its Fire Team side", 1, "auto", "HQ", "4.2.3j p.24"),
     "4.2.4a": ("Attempt to Spot", 1, "attempt", "HQ", "4.2.4a p.25, 8.5 p.65"),
     "4.2.4b": ("Attempt to Concentrate Fire", 1, "attempt", "HQ", "4.2.4b p.25, 7.11 p.56"),
+    "4.2.4c": ("Attempt to have a Platoon Concentrate Fire", 2, "attempt", "PLT", "4.2.4c p.25, 7.11 p.56"),
     "4.2.4d": ("Attempt to make a Grenade Attack", 1, "attempt", "HQ", "4.2.4d p.25, 7.10 p.54"),
+    "4.2.4h": ("Attempt to have a Platoon make a Grenade Attack", 2, "attempt", "PLT", "4.2.4h p.25, 7.10 p.54"),
     "4.2.4i": ("Attempt to Call for Fire from an Off-Map Firing Agency", 1, "cff", "HQ", "4.2.4i p.25, 7.16 p.57"),
     "4.2.4j": ("Call for Indirect Fire from an On-Map Mortar", 1, "auto", "HQ", "4.2.4j p.25, 7.3.2 p.53"),
     "4.2.4k": ("Cease Fire", 1, "auto", "HQ", "4.2.4k p.26, 6.3.3 p.43"),
@@ -180,7 +182,12 @@ CMD_VOF_MODIFIERS = {
 TERRAIN_LIKE_INCOMING = ("Incoming", "AirStrike", "Indirect")
 
 
-FIXED_COVER = ("Trench", "Bunker", "Pillbox")  # [RULE 5.1.1 p.31, 5.1.2 p.32] movement without Exposed
+FIXED_COVER = (
+    "Trench",
+    "Bunker",
+    "Pillbox",
+    "Deep Bunker",
+)  # [RULE 5.1.1 p.31, 5.1.2 p.32] movement without Exposed; Deep Bunker like a Bunker (CSR 5)
 
 
 STRUCTURES = ("Bunker", "Pillbox")  # [RULE 5.3.2 p.37] fire arc, no Point Blank
@@ -277,6 +284,36 @@ PYRO_AERIAL = ("RSP", "RSC", "GSP", "GSC", "Handheld Illumination")  # [RULE 4.4
 
 
 PYRO_COLOR = ("Red Smoke", "Green Smoke", "Yellow Smoke", "Purple Smoke")
+# [RULE 12.7 p.82, Charts & Tables 2 Skills] Experience Point cost per skill marker (L146)
+SKILL_COST = {
+    "General Initiative": 2,
+    "Paralyzed to Assault Team": 2,
+    "Paralyzed to Fire Team": 1,
+    "Spawn Team": 1,
+    "Extra Draw": 1,
+    "Auto Spot": 1,
+    "Auto Cover": 1,
+    "Auto Concentrate": 1,
+    "Auto Infiltrate": 1,
+    "Auto Grenade": 1,
+}
+# E67 (marker photos): the 12 two-sided Skill markers of the Normandy box (front / back)
+SKILL_MARKERS_NORMANDY = [
+    ["General Initiative", "Extra Draw"],
+    ["Auto Infiltrate", "Extra Draw"],
+    ["Spawn Team", "Auto Grenade"],
+    ["Auto Spot", "Paralyzed to Assault Team"],
+    ["Auto Infiltrate", "Auto Grenade"],
+    ["Extra Draw", "General Initiative"],
+    ["Extra Draw", "General Initiative"],
+    ["Spawn Team", "Auto Cover"],
+    ["Paralyzed to Assault Team", "Auto Spot"],
+    ["Spawn Team", "Auto Cover"],
+    ["Spawn Team", "Auto Concentrate"],
+    ["Paralyzed to Fire Team", "Auto Concentrate"],
+]
+SKILLS_MAX_PER_HQ = 3  # [RULE 12.7 p.82] "No one HQ or Staff may have more than three Skill markers"
+PROMOTION_COST = {"Green": 1, "Line": 3}  # [RULE 12.3 p.81] Green to Line 1, Line to Veteran 3
 
 
 PYRO_CODES_OFF = ("CF", "M2PO", "InfAP2PO", "M2SO", "InfAP2SO", "M2S")  # [RULE 4.4.1 p.30] plus XPL#

@@ -83,6 +83,22 @@ def xp_mission_end(s, prot):
             assigned.append(k)
 
 
+def guards_returning(s, prot):
+    """[RULE 8.15 p.69] Guard steps return between missions at their original Experience Level and are not LATs;
+    replacements (12.4 p.81) only for steps lost as casualties or prisoners (K35, L126)."""
+    guards = s.get("wachen", [])
+    if guards:
+        prot.append(
+            "Guard steps returning between missions (8.15 p.69, original Experience Level, not LATs): "
+            + ", ".join(f"{g['einheit']} 1 step {g['erfahrung']} (guard since turn {g['zug']})" for g in guards)
+        )
+    lost = s.get("us_casualties_gesamt", 0) + s.get("us_gefangen", 0)
+    prot.append(
+        f"Replacements only for steps lost as casualties or prisoners ({lost} this mission); surplus replacement "
+        f"steps are lost [12.4 p.81]"
+    )
+
+
 def mission_end_v4(s, prot):
     if s.get("patrouille_mission"):
         return patrol_end(s, prot)
@@ -98,6 +114,16 @@ def mission_end_v4(s, prot):
             f"replacements {k.get('ersatz_green', 6)} Green plus {vet} Veteran ({s.get('us_casualties_gesamt', 0)} casualty steps over the whole mission, 1 per 4) [12.4 p.81, Normandy p.13]; "
             "replace ammo and assets completely (BGG E14)"
         )
+        guards_returning(s, prot)
+        lost = [f"{n} ({', '.join(e['skills'])})" for n, e in s["einheiten"].items() if e.get("skills")]
+        if lost:
+            prot.append(
+                "Skills not used by the end of the mission are lost: "
+                + "; ".join(lost)
+                + " (remove the markers) [RULE 12.7 p.82]"
+            )
+            for e in s["einheiten"].values():
+                e.pop("skills", None)
     elif k.get("versuch", 1) < k.get("versuche_max", 1) and state.option(s, "U9_reattempt"):
         prot.append(f"Reattempt possible (attempt {k['versuch']} of {k['versuche_max']}): fof.py reattempt [3.9 p.17]")
     else:
@@ -211,6 +237,9 @@ def patrol_end(s, prot):
     erl = p.setdefault("erledigt", [])
     if p.get("platoon") and p["platoon"] not in erl:
         erl.append(p["platoon"])
+    # L166 [RULE 12.3.1 p.81]: remember who took part, for promotions after this and later patrols
+    tg = p.setdefault("teilgenommen", [])
+    tg.extend(m for m in p.get("mitglieder", []) if m not in tg)
     remainder = [x for x in ("1", "2", "3") if x not in erl]
     prot.append(
         f"Patrol {len(erl)} (Platoon {p.get('platoon')}) ended: "
@@ -289,7 +318,12 @@ def cmd_patrol(s, args):
             x["stationaer"] = True
     p.update(platoon=plt, mitglieder=members, route_index=0, primaer_besucht=False, erfolg=False)
     s["einzelzug"] = True
-    prot.append(f"Patrol Platoon {plt}: {', '.join(members)}; setup on row 1 (setup <unit> <11-15>)")
+    row1 = sorted(
+        k for k, c in s["karten"].items() if c["reihe"] == 1 and not c.get("staging") and not c.get("ausserhalb")
+    )
+    prot.append(
+        f"Patrol Platoon {plt}: {', '.join(members)}; setup on row 1 (setup <unit> <{row1[0]}-{row1[-1]}>)"
+    )  # L159: row 1 from the map (M5 has six columns)
     without = [
         m
         for m in members
@@ -312,9 +346,125 @@ def cmd_patrol(s, args):
     briefing.print_board(prot, s)
 
 
+def _between_missions(s):
+    return state.in_setup(s) or s.get("missionsende") or s.get("reattempt_setup")
+
+
+def _promoted_steps(s):
+    """L166: promoted steps per unit in this between-mission/patrol window (old list format = whole unit counted)."""
+    b = s.get("befoerdert") or {}
+    if isinstance(b, list):
+        b = {n: 99 for n in b}
+    return b
+
+
+def cmd_xp_promote(s, args):
+    """xp promote <unit> --from=Green|Line --steps=<n> [--result=<level>]: 12.3 one level per step, 1 XP Green to Line, 3 XP
+    Line to Veteran, one level per mission, no attachments, Combat Patrol: only patrol members (12.3.1). L146"""
+    if not _between_missions(s):
+        raise rules.Violation("Promotions only between missions or patrols (12.2, 3.9)")
+    n = args[0]
+    o = options.parse_opts(args[1:])
+    e = state.unit(s, n)
+    frm = o.get("--aus")
+    if frm not in rules.PROMOTION_COST:
+        raise rules.Violation("--from=Green|Line (a step rises one level per mission) [RULE 12.3 p.81]")
+    steps = int(o.get("--steps", 1))
+    if e.get("attachment"):
+        raise rules.Violation(f"{n} is an attachment: no promotion with Experience Points [RULE 12.3 p.81]")
+    # L166 [RULE 12.3 p.81] 'You may only increase a step by one Level': counted per step, not per unit
+    done_steps = _promoted_steps(s).get(n, 0)
+    if done_steps + steps > max(1, state.steps(e)):
+        raise rules.Violation(
+            f"{n}: {done_steps} of {state.steps(e)} step(s) already promoted this time; one level per step and mission [RULE 12.3 p.81]"
+        )
+    p = s.get("patrouille") or {}
+    if s.get("patrouille_mission"):
+        # L166 [RULE 12.3.1 p.81] 'only units that participated in a patrol may be promoted': members of finished patrols
+        erl = p.get("erledigt", [])
+        took_part = set(p.get("teilgenommen", [])) | {
+            m for m, x in s["einheiten"].items() if x["seite"] == "US" and x.get("platoon") in erl
+        }
+        if n not in took_part and e.get("herkunft") not in took_part:
+            raise rules.Violation(
+                f"{n} has not yet taken part in a patrol of this mission: no promotion [RULE 12.3.1 p.81, Normandy MSR 1]"
+            )
+    if state.is_lat(e) and e["typ"] != "Fire Team":
+        raise rules.Violation("LATs are reconstituted first (12.2), promotion then on the squad")
+    cost = rules.PROMOTION_COST[frm] * steps
+    if sum(x["punkte"] for x in s.get("xp", [])) < cost:
+        raise rules.Violation(f"Not enough Experience Points ({cost} needed) [RULE 12.3 p.81]")
+    new = o.get("--ergebnis") or ("Line" if frm == "Green" else "Veteran")
+    prot = []
+    book_xp(
+        s,
+        -cost,
+        f"promotion {n}: {steps} step(s) {frm} to {'Line' if frm == 'Green' else 'Veteran'}, unit now {new}",
+        prot,
+    )
+    e["erfahrung"] = new
+    pr = _promoted_steps(s)
+    pr[n] = pr.get(n, 0) + steps
+    s["befoerdert"] = pr
+    prot.append(f"{n}: experience {new} (12.6 table for mixed steps: --result=)")
+    state.save_state(s, "; ".join(prot), "12.3 p.81, 12.6 p.82")
+    briefing.print_board(prot, s)
+
+
+def skill_markers_fit(markers, wanted):
+    """L158 [RULE 12.7 p.82 'Skills are limited by what is available in the counter mix']: can every wanted skill get its own
+    two-sided marker (one face per marker)? Small backtracking matching."""
+
+    def place(i, used):
+        if i == len(wanted):
+            return True
+        for j, m in enumerate(markers):
+            if j not in used and wanted[i] in m and place(i + 1, used | {j}):
+                return True
+        return False
+
+    return place(0, frozenset())
+
+
+def cmd_xp_skill(s, args):
+    """xp skill <HQ> <skill>: buy a skill marker (12.7): cost from the Skills chart, at most three per HQ/Staff, counter mix. L146"""
+    if not _between_missions(s):
+        raise rules.Violation("Skills are bought between missions or patrols [RULE 12.7 p.82]")
+    n, skill = args[0], " ".join(args[1:]).split("--")[0].strip()
+    o = options.parse_opts([a for a in args[1:] if a.startswith("--")])
+    e = state.unit(s, n)
+    if not (state.is_hq(e) or e["typ"] == "Staff"):
+        raise rules.Violation("Skill markers go to a PLT HQ, CO Staff or the CO HQ [RULE 12.7 p.82]")
+    if skill not in rules.SKILL_COST:
+        raise rules.Violation(f"Skill unknown; known: {', '.join(rules.SKILL_COST)}")
+    if len(e.get("skills") or []) >= rules.SKILLS_MAX_PER_HQ:
+        raise rules.Violation(f"{n} already holds {rules.SKILLS_MAX_PER_HQ} Skill markers [RULE 12.7 p.82]")
+    in_play = [sk for x in s["einheiten"].values() for sk in (x.get("skills") or [])]
+    markers = s.get("skill_marker") or rules.SKILL_MARKERS_NORMANDY
+    if not skill_markers_fit(markers, in_play + [skill]):
+        raise rules.Violation(
+            f"Skill {skill}: no free marker with this face (two-sided markers, in play: {', '.join(in_play) or 'none'}) [RULE 12.7 p.82, E67]"
+        )
+    cost = int(o.get("--kosten", rules.SKILL_COST[skill]))
+    if sum(x["punkte"] for x in s.get("xp", [])) < cost:
+        raise rules.Violation(f"Not enough Experience Points ({cost} needed) [RULE 12.7 p.82]")
+    prot = []
+    book_xp(s, -cost, f"Skill {skill} for {n}", prot)
+    e.setdefault("skills", []).append(skill)
+    prot.append(
+        f"{n}: Skill marker {skill} ({len(e['skills'])} of {rules.SKILLS_MAX_PER_HQ}); PLT HQ: usable by its platoon, CO HQ/Staff: only by that unit [12.7 p.82]"
+    )
+    state.save_state(s, "; ".join(prot), "12.7 p.82")
+    briefing.print_board(prot, s)
+
+
 def cmd_xp(s, args):
     if not state.is_v4(s):
         raise rules.Violation("Experience only in campaign missions")
+    if args and args[0] in ("befoerdern", "promote"):
+        return cmd_xp_promote(s, args[1:])
+    if args and args[0] in ("skill",):
+        return cmd_xp_skill(s, args[1:])
     if args and args[0] in ("plus", "ausgeben"):
         n = int(args[1]) * (1 if args[0] == "plus" else -1)
         reason = " ".join(args[2:]) or ("manual" if n > 0 else "spent")
@@ -341,6 +491,7 @@ def cmd_reattempt(s, args):
         if not s.get("reattempt_setup"):
             raise rules.Violation("No reattempt preparation pending")
         prot = []
+        s.pop("befoerdert", None)  # L146: one promotion level per mission/patrol
         for n, e in list(s["einheiten"].items()):
             if e["seite"] == "US" and state.is_lat(e) and e["typ"] != "Fire Team":
                 e["typ"], e["erfahrung"] = "Fire Team", "Green"
@@ -466,6 +617,7 @@ def cmd_reattempt(s, args):
             "cf",
             "grenade",
             "grenade_critical",
+            "cf_critical",
             "mine_hit",
             "nur_pdf",
             "indirekt",
@@ -535,6 +687,42 @@ def cmd_reattempt(s, args):
     briefing.print_board(prot, s)
 
 
+def experience_from_steps(levels):
+    """[RULE 12.6 p.82] experience of a multi-step unit from its steps (table 12.6, read from the rulebook layout):
+    2 steps: V+L/G Line, L+G Green; 3 steps: VVG Line, VVL Veteran, LL+any Line, GGV Line, GGL Green, VLG Line;
+    4 steps: VVV+any Veteran, VV+any+any Line, LLL+any Line, LLVG Line, LLGG Green, GGG+any Green. None = not in the table. L152"""
+    order = {"Veteran": 0, "Line": 1, "Green": 2}
+    lv = sorted(levels, key=lambda x: order.get(x, 1))
+    if not lv or any(x not in order for x in lv):
+        return None
+    if len(set(lv)) == 1:
+        return lv[0]
+    c = {x: lv.count(x) for x in order}
+    if len(lv) == 2:
+        return "Line" if c["Veteran"] else "Green"
+    if len(lv) == 3:
+        if c["Veteran"] == 2:
+            return "Veteran" if c["Line"] else "Line"
+        if c["Line"] >= 2:
+            return "Line"
+        if c["Green"] == 2:
+            return "Line" if c["Veteran"] else "Green"
+        return "Line"  # V L G
+    if len(lv) == 4:
+        if c["Veteran"] >= 3:
+            return "Veteran"
+        if c["Veteran"] == 2:
+            return "Line"
+        if c["Line"] >= 3:
+            return "Line"
+        if c["Green"] >= 3:
+            return "Green"
+        if c["Line"] == 2:
+            return "Green" if c["Green"] == 2 else "Line"  # LLGG Green, LLVG Line
+        return None  # V L G G: not in the table
+    return None
+
+
 def cmd_reconstitute(s, args):
     """[RULE 3.9 step 3 p.17] Squads, HQs and company weapons teams (no attachments) from LATs; each LAT = 1 Green step."""
     if not s.get("reattempt_setup"):
@@ -555,6 +743,7 @@ def cmd_reconstitute(s, args):
         raise rules.Violation(f"{n} is an attachment, no reconstitution (3.9 step 3)")
     prot = []
     maxst = orig.get("steps", 1)
+    old_level = s["einheiten"][n].get("erfahrung", "Line") if n in s["einheiten"] else None
     if n in s["einheiten"]:
         e = s["einheiten"][n]
         if state.steps(e) + len(lats) > maxst:
@@ -581,9 +770,19 @@ def cmd_reconstitute(s, args):
         e["erfahrung"] = o["--erfahrung"]
         prot.append(f"Experience {o['--erfahrung']} (12.6 table, promotions via xp spend)")
     elif not state.is_hq(e):
-        s.setdefault("_hinweise", []).append(
-            f"{n}: determine experience per 12.6 p.82 (LAT = Green step) and set it with --experience= or set"
-        )
+        old_steps = state.steps(e) - len(lats)
+        # L167 [RULE 3.9 step 3, 12.2 'Reduce all other LAT units to Green']: each LAT counts as one Green step
+        levels = [old_level] * old_steps + ["Green"] * len(lats)
+        derived = experience_from_steps(levels)  # L152 [RULE 12.6 p.82]
+        if derived:
+            e["erfahrung"] = derived
+            prot.append(
+                f"Experience {derived} from the steps {'+'.join(x[0] for x in levels)} (table 12.6; set --experience= for a different step mix)"
+            )
+        else:
+            s.setdefault("_hinweise", []).append(
+                f"{n}: step mix {'+'.join(x[0] for x in levels)} is not in table 12.6; set the experience with --experience= or set"
+            )
     for t in lats:
         del s["einheiten"][t]
     prot.append(f"used up: {', '.join(lats)}")
@@ -617,6 +816,12 @@ def cmd_campaign(s, args):
     print(f"- Fire Missions: {s.get('feuermissionen')}")
     print(
         f"- Experience {sum(x['punkte'] for x in s.get('xp', []))}; US casualty steps {s.get('us_casualties_gesamt', 0)}; prisoners {s.get('gefangene', 0)}; evacuated {s.get('evakuiert', 0)}"
+        + (
+            "; guard steps returning between missions (8.15): "
+            + ", ".join(f"{g['einheit']} {g['erfahrung']}" for g in s["wachen"])
+            if s.get("wachen")
+            else ""
+        )
     )
     print("## Units")
     for n, e in s["einheiten"].items():

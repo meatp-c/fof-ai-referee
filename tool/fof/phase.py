@@ -86,7 +86,7 @@ def segment_note(s, row_id):
             and not c.get("fertig")
         ]
         return (
-            ("draw Initiative: " + ", ".join(n) + " [RULE 3.3.2b p.16]")
+            ("draw Initiative, in any order you choose (one impulse after the other, hq <name>): " + ", ".join(n) + " [RULE 3.3.2b p.16 'Select a PLT HQ', K39]")
             if n
             else "skipped: no non-activated PLT HQ on the board [RULE 3.3.2b p.16]"
         )
@@ -100,7 +100,7 @@ def segment_note(s, row_id):
             and not c.get("fertig")
         ]
         return (
-            ("1 Command each without draw: " + "; ".join(n) + " [RULE 3.3.2c p.16]")
+            ("1 Command each without draw, in any order you choose: " + "; ".join(n) + " [RULE 3.3.2c p.16 'Select a CO Staff', K39]")
             if n
             else "done or skipped: no open non-activated CO Staff [RULE 3.3.2c p.16]"
         )
@@ -192,6 +192,12 @@ def enter_segment(s, new, prot):
                 + ", ".join(f"{k} (PC {s['karten'][k]['pc']})" for k in open_reading)
                 + " [8.2.4]"
             )
+            for letter in sorted({s["karten"][k]["pc"] for k in open_reading if s["karten"][k]["pc"] != "?"}):
+                same = [k for k in open_reading if s["karten"][k]["pc"] == letter]
+                if len(same) > 1:  # L134 [RULE 8.2.4 p.62] 'resolve them in a random order'
+                    prot.append(
+                        f"{len(same)} cards with PC {letter} ({', '.join(same)}): draw the order by R#, column {len(same)}, note it with fof.py note [8.2.4]"
+                    )
         else:
             prot.append("no PC markers with friendly units")
     if new == "3.7.3":
@@ -224,6 +230,11 @@ def enter_segment(s, new, prot):
                 s["kampf_ncm"][n] = [list(z) for z in combat.ncm_rows(s, n)]
             except rules.Violation:
                 pass
+        if combat.ncm_groups(s):
+            g = combat.ncm_groups(s)
+            prot.append(
+                f"{len(g)} NCM group(s) on {len({x[0] for x in g})} card(s); next group: fof.py ncm next (numbered list, cards to draw) [V18, L155]"
+            )
         combat.ammo_3_7_4(s, prot)  # [RULE 7.18.4 p.61] ammo of the firing units
         if any(c.get("leitungen") for c in s["karten"].values()):
             comms.line_checks_3_7_4(s, prot)
@@ -401,7 +412,7 @@ def check_capture(s, prot):
             c["casualties_feind"] = 0
         for n in state.units_on(s, kid):
             e = s["einheiten"][n]
-            # K33 (Manuel): "alone" also when the other same-side units on the card are only Paralyzed/Litter Teams
+            # K33: "alone" also when the other same-side units on the card are only Paralyzed/Litter Teams
             if e["typ"] in ("Paralyzed Team", "Litter Team") and not [
                 m
                 for m in state.units_on(s, kid, e["seite"])
@@ -583,6 +594,8 @@ def cmd_end_turn(s, args):
             prot.append(f"{n}: remove Grenade VOF")
         if e.pop("grenade_critical", None):
             prot.append(f"{n}: remove Critical Hit Grenade marker [7.10.3]")
+        if e.pop("cf_critical", None):
+            prot.append(f"{n}: remove Critical Hit Concentrated Fire marker [7.11.4]")  # L154
         e.pop("konzentriert", None)
     for kid, c in s["karten"].items():
         if c.get("illum"):

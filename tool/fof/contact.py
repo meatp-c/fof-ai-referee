@@ -529,15 +529,21 @@ def check_place_v4(s, u, k, kid, pk):
     if state.units_on(s, k, "Feind") and not u.get("_gleiche_karte_ok"):
         return f"{k}: enemies already there (8.4.3 'Other Enemy Units')"
     without_pb = (u.get("cover") in rules.STRUCTURES) or state.is_mortar(u)
-    if k != kid and state.units_on(s, k, "US") and not without_pb:
-        return f"{k}: friendly units there (8.4.3)"
-    if (
-        k != kid
-        and any(state.units_on(s, between, "US") for between in (geometry.line_between(s, k, kid) or []))
-        and u.get("platz") not in ("max_los",)
-        and not state.is_mortar(u)
-    ):
-        return f"{k}: friendly units between {k} and {kid} (8.4.3)"
+    no_pdf = u.get("platz") == "max_los" or not pk.get("place_vof", True) or not u.get("vof_rating")
+    if k != kid and state.units_on(s, k, "US") and not without_pb and not no_pdf:
+        return f"{k}: friendly units there (8.4.3)"  # L151: only units that place a PDF (8.4.3 example 2: Spotter with US units)
+    if k != kid and not no_pdf and not state.is_mortar(u):
+        between = geometry.line_between(s, k, kid) or []
+        overhead = (u.get("vof_rating") == "H" or u.get("tripod")) and all(
+            fire.overhead_possible(s, k, b, kid) for b in between if state.units_on(s, b)
+        )
+        grazing = u.get("tripod") and all(
+            state.card(s, b).get("elevation", 1) == state.card(s, k).get("elevation", 1) for b in between + [kid]
+        )
+        if any(state.units_on(s, b, "US") for b in between) and not (overhead or grazing):
+            return f"{k}: friendly units between {k} and {kid} (8.4.3, no Grazing/Overhead Fire)"
+        if any(state.units_on(s, b, "Feind") for b in between) and not overhead:
+            return f"{k}: own enemy units between {k} and {kid} (8.4.3 example 1: only with Overhead Fire)"  # L151
     if enemy_pdf_or_vof(s, k):
         return f"{k}: {enemy_pdf_or_vof(s, k)} (8.4.3)"
     return None
@@ -579,7 +585,14 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
         if u["platz"] == "mit_vorigem" and cid_before.get(idx - 1) and not u.get("eigene_deckung"):
             cid = cid_before[idx - 1]
         elif u.get("cover") and not u.get("ohne_deckung") and not u.get("infiltration"):
-            cover_type, cover_value = u["cover"], u.get("cover_wert", 1)
+            cover_type = u["cover"]
+            cover_value = u.get("cover_wert")
+            if cover_value is None:  # L135: take the value from the setup table instead of a silent +1 (audit C3)
+                cover_value = s.get("cover_werte", {}).get(cover_type)
+            if cover_value is None:
+                raise rules.Violation(
+                    f"Package unit {u.get('einheit') or u.get('einheit_wahl')}: no value for cover marker {cover_type} (cover_wert in the package or cover_werte table)"
+                )
             if state.card(s, place).get("gebaeude_tabelle") and cover_type not in rules.STRUCTURES:
                 if not building_list:
                     raise rules.Violation(

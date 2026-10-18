@@ -194,8 +194,21 @@ COMMANDS = [
     ("mine", "mine", "contact.cmd_mine", "mine <unit> yes|no", "result of a mine check (7.9.1)"),
     ("sniper", "sniper", "enemy.cmd_sniper", "sniper <sniper> <target>", "target of the sniper VOF in 3.7.4 (7.15)"),
     ("capture", "gefangen", "combat.cmd_capture", "capture <enemy> <guard>", "take prisoners (3.5.1, 8.15)"),
+    (
+        "grenade",
+        "granate",
+        "commands.cmd_grenade",
+        "grenade response <responder> --success=yes|no [--critical=yes] [--jam=yes]",
+        "7.10.5 free Grenade Attack response after a Point Blank attack (no Command)",
+    ),
     # combat
-    ("ncm", "ncm", "combat.cmd_ncm", "ncm <unit>", "net combat modifier of one unit (6.4)"),
+    (
+        "ncm",
+        "ncm",
+        "combat.cmd_ncm",
+        "ncm <unit> | ncm next",
+        "net combat modifier of one unit (6.4); 'next' = next Combat Effects group as a numbered list (3.7.4)",
+    ),
     (
         "hit",
         "treffer",
@@ -222,7 +235,13 @@ COMMANDS = [
         "drop something without a Command (5.1.6B)",
     ),
     # campaign
-    ("xp", "xp", "campaign.cmd_xp", "xp [add <n> <reason> | spend <n> <reason>]", "experience log (12.1)"),
+    (
+        "xp",
+        "xp",
+        "campaign.cmd_xp",
+        "xp [add <n> <reason> | spend <n> <reason> | promote <unit> --from=Green|Line --steps=n | skill <HQ> <skill>]",
+        "experience log (12.1)",
+    ),
     ("reattempt", "reattempt", "campaign.cmd_reattempt", "reattempt [done]", "mission reattempt (3.9)"),
     (
         "reconstitute",
@@ -248,7 +267,9 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
     "phase": {"next": "weiter"},
     "patrouille": {"next": "naechste"},
     "reattempt": {"done": "fertig"},
-    "xp": {"add": "plus", "spend": "ausgeben"},
+    "xp": {"add": "plus", "spend": "ausgeben", "promote": "befoerdern"},
+    "granate": {"response": "antwort"},
+    "ncm": {"next": "weiter"},
     "pc": {"reveal": "aufdecken", "set": "setzen", "clear": "frei", "contact": "kontakt"},
     "ziel": {"primary": "primaer", "secondary": "sekundaer", "concentration": "konzentration"},
     "leitung": {"lay": "legen"},

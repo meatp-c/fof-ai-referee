@@ -220,6 +220,8 @@ def card_count(s, akt, orig, z, extra=0, base_cff=None):
         # [RULE 8.5 Spotting Chart] the spotter's experience is already in spot_modifikatoren ("Spotting Recipient is Green -1 / Veteran +1"), do not count it twice (L41)
         return max(1, base + extra), who, base
     n = base + {"Green": -1, "Veteran": 1}.get(experience(who), 0) + extra
+    if akt in ("4.2.4b", "4.2.4c") and z.get("tripod") and not state.fire_team_side(z):
+        n += 1  # L137 [RULE 7.11.2 p.56] 'plus one additional card if firing a tripod-mounted machine gun'
     if n <= 0:
         raise rules.Violation(f"Number of cards {n}: attempt not possible [Clarification 1 to 4.2, May 2025]")
     return n, who, base

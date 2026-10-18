@@ -231,6 +231,10 @@ def enemy_event(s, ev, o, prot):
                 elif state.fire_team_side(e):
                     e["status"].remove("Fire Team side")
                     prot.append(f"{n}: back to the front side (no VOF) [4.2.3f]")
+                elif e["typ"] == "Assault Team":
+                    prot.append(f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]")
+            elif e["typ"] == "Assault Team" and not state.pinned(e):
+                prot.append(f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]")
             else:
                 s.setdefault("rally_offen", []).append(n)
                 prot.append(

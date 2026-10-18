@@ -14,7 +14,12 @@ Needs `pdftotext` (poppler-utils). It writes into data/:
     <name>_kompakt.txt                 (optional) any further PDF, included in `search`
 The German file names are kept because the engine reads them (see GLOSSARY.md).
 """
-import argparse, json, pathlib, re, subprocess, sys
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"

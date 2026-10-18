@@ -31,6 +31,8 @@ OPT_ALIASES = {
     "--lines": "--leitungen",
     "--device": "--geraet",
     "--from": "--aus",
+    "--result": "--ergebnis",
+    "--cost": "--kosten",
     "--extra": "--zusatz",
     "--what": "--was",
     "--choice": "--wahl",
