@@ -1,103 +1,581 @@
 """Enemy behaviour: activity check hierarchy, enemy actions, snipers, spotters, leaders (8.x)."""
 
-import types
+import dataclasses
+import functools
+import typing
 
 from . import briefing, combat, commands, comms, contact, fire, geometry, options, rules, state
 
 
 OFFENSIVE_TACTICS = ("Offensive Assault", "Assault", "Overrun")
 
+# row ids of the Enemy Activity Check Hierarchy (L260, review H1: a translated literal made the Leader rows unreachable)
+ROW_NONE = "none"
+ROW_Z4 = "Z4"
+ROW_Z6 = "Z6"
 
-def enemy_row(s, n):
-    """v4 wrapper: Sniper/Spotter/Out-of-Ammo (8.8, 8.10, 8.11), With Leader column (8.9), Offensive hierarchy (counterattack), G! unit without PDF."""
+MINE_CHECK_REASON = "enemy enters a mined card"
+# chart result naming both alternatives; resolved by the situation in _grenade_mode (L272)
+CHART_GRENADE_OR_CF = "grenade attack (or concentrate fire)"
+
+
+def enemy_segments(s):
+    """(Enemy Higher HQ Event segment, Enemy Activity Check segment) of the mission's sequence of play: offensive
+    3.4.1/3.4.2, defensive 3.2.1/3.2.2 [RULE 3.0 p.15]. L261 (review H2): derived from state.sop, not hard-wired."""
+    sop = state.sop(s)
+    event_seg = next(i for i, name in sop if name.startswith("Enemy Higher HQ Event"))
+    check_seg = next(i for i, name in sop if name.startswith("Enemy Activity Check"))
+    return event_seg, check_seg
+
+
+def series_rules(s):
+    """True when the series rules apply instead of the FM1 PAC run-1 simplifications: a company game (CO HQ on the
+    board) or a mission that records the open rules questions (setup 'optionen'). One predicate for the former copies
+    in enemy.py and contact.py (L262); the Activity Check additionally counts special rules (_Situation.has_los)."""
+    return state.company(s) or "optionen" in s
+
+
+def under_fire(s, e):
+    """[PLAYER AID Key 'Under Fire'] a VOF on the card without unactivated Mines and Pending (BGG E35); a mine hit counts
+    as an active VOF."""
+    return fire.vof_against(s, e["karte"], "Feind", ignore_mines=True) is not None or bool(e.get("mine_hit"))
+
+
+def fire_from_other_direction(s, kid, own_target):
+    """[Enemy Activity Chart Z7] opposing fire reaches kid from a direction other than the own PDF (L263, review M28:
+    directions are compared, not cards; Point Blank fire on the own card has no direction)."""
+    own = geometry.direction(s, kid, own_target) if own_target != kid else None
+    return any(geometry.direction(s, kid, k) != own for k in fire.pdfs_to(s, kid, "Feind"))
+
+
+def best_free_cover(s, kid):
+    """Cover markers on kid an enemy may enter (no US unit under them), highest value only; several = random choice by
+    R# [RULE 8.6.1E p.66]. Empty list without a free marker (L264, review M26)."""
+    free = state.free_cover(s, kid, side="Feind")
+    if not free:
+        return []
+    top = max(c["wert"] for c in free)
+    return [c for c in free if c["wert"] == top]
+
+
+def move_enemy(s, n, target, prot, *, cover=True, exposed=True, how="moves", rule="8.6.1C"):
+    """The one path for an enemy unit changing its card (L264, review M19-M23, M26, structure 1): ammo above capacity
+    stays behind [RULE 8.11 p.68], a Grenade marker expires [RULE 7.10.4], Deep Bunker left [CSR 5], the highest free
+    cover marker on the target card [RULE 8.6.1E p.66], Exposed [RULE 8.6.1C p.66] unless moving between fixed cover of
+    adjacent cards [RULE 5.1.2 p.32], fire after the move [RULE 6.1.2] and the mine check of the target card [7.9.1,
+    Normandy rules only, as before]. cover=False keeps the unit in the open (correction command, move towards a
+    Casualty); exposed=False after a successful infiltration. Returns the cover marker entered or None."""
     e = s["einheiten"][n]
-    if state.is_v4(s) or s.get("feind_taktik") in OFFENSIVE_TACTICS:
-        z4 = enemy_row_v4(s, n)
-        if z4:
-            return z4
-    row_, column, result = enemy_row_basic(s, n)
-    row_id = row_.split(" ")[0]
-    if row_id in LAT_WITH_LEADER and leader_present(s, e):
-        column, result = LAT_WITH_LEADER[row_id]
-        return row_ + " (With Leader, 8.9)", column, result
-    if not (state.pinned(e) or state.is_lat(e) or state.fire_team_side(e)):
-        kid = e["karte"]
-        opponent_present = bool(state.valid_target(s, kid, "Feind"))
-        cover = e.get("bereich", "offen") != "offen"
-        if s.get("feind_taktik") in OFFENSIVE_TACTICS:
-            z, sp, er = enemy_row_offensive(s, n, opponent_present, cover, fire.is_firing(e))
-            return z + f" [Enemy Offensive Activity Check Hierarchy, {s['feind_taktik']}]", sp, er
-        if (
-            state.is_v4(s)
-            and e.get("vof_rating") == "G"
-            and not fire.is_firing(e)
-            and row_id in ("Z4", "keine", "none")
-            and fire_candidates_g(s, n)
-        ):
-            T = tactic_index(s)
-            return (
-                "Z5 G! unit without PDF with target in LOS (player aid)",
-                ["3", "2", "Auto"][T],
-                [
-                    {"1-2": "No Action", "3": "Grenade Attack (or Concentrate Fire)"},
-                    {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)"},
-                    {"Auto": "Grenade Attack (or Concentrate Fire)"},
-                ][T],
+    origin = e["karte"]
+    combat.ammo_surplus(s, n, e, origin, prot)  # L145 [RULE 8.11 p.68]
+    commands.grenade_expires(
+        s, e, n, prot
+    )  # L92 [RULE 7.10.4] Grenade marker becomes a Grenade Miss on the origin card
+    cv_from = geometry.cover_marker(s, e)
+    e["karte"], e["bereich"] = target, "offen"
+    e.pop("deep_bunker", None)  # cover ids are per card: the marker stays behind (review M19)
+    chosen, best = None, []
+    if cover:
+        best = best_free_cover(s, target)
+        if best:
+            chosen = best[0]
+            e["bereich"] = chosen["id"]
+    fixed = bool(cv_from and chosen and cv_from["typ"] in rules.FIXED_COVER and chosen["typ"] in rules.FIXED_COVER)
+    if exposed and not fixed:
+        commands.mark(e, rules.EXPOSED)
+    where = (
+        f" under {chosen['id']} ({chosen['typ']} +{chosen['wert']})"
+        + (f" (tie with {', '.join(c['id'] for c in best[1:])}: choose by R#)" if len(best) > 1 else "")
+        if chosen
+        else " (open)"
+    )
+    status = (
+        f", from {cv_from['typ']}: not Exposed [5.1.2]"
+        if exposed and fixed
+        else (", Exposed" if exposed else ", not Exposed (infiltrated)")
+    )
+    prot.append(f"{n} {how} to {target}{where}{status} [{rule}" + (", 8.6.1E]" if chosen else "]"))
+    fire.fire_after_move(s, n, prot, origin=origin)
+    if state.is_v4(s):
+        contact.request_mine_check(s, [n], target, prot, MINE_CHECK_REASON)
+    return chosen
+
+
+def grenade_target_check(s, zk, ze, attacker):
+    """[RULE 7.10.1 p.54] the target of an enemy Grenade Attack is an opposing unit on the attacked card (L265, review
+    M11: --unit was not validated, a -4 Grenade VOF could land on the attacker's own side)."""
+    z = state.unit(s, ze)
+    if z["seite"] == attacker["seite"]:
+        raise rules.Violation(f"{ze} is on the attacker's own side, no target of a Grenade Attack [7.10.1]")
+    if z.get("karte") != zk:
+        raise rules.Violation(f"{ze} is on {z.get('karte')}, the Grenade Attack hits {zk} [7.10.1]")
+    if z["typ"] == "Casualty":
+        raise rules.Violation(f"{ze} is a Casualty, not a valid target [6.1.1]")
+    return z
+
+
+# ---- Enemy Activity Check Hierarchy as data (review structure 4)
+#
+# CHART: row key -> Row(label, columns, results[, with_leader]). columns/results are indexed by the chart column set:
+# the defensive tactic (tactic_index: Delay 0, Hasty 1, Deliberate 2), the offensive tactic (Assault 0, Overrun 1), or a
+# single entry for the LAT/Pinned and v4 rows. A label may name situation facts as {field} (format_map on _Situation).
+# The *_ROWS tuples hold the hierarchy order: the first row whose predicate holds applies.
+
+NA, SC, FB = "No Action", "Move into or Seek Cover", "Fall Back"
+GA, GCF = "Grenade Attack", "Grenade Attack (or Concentrate Fire)"
+ACF, ADV, INF = "Attempt to Concentrate Fire", "Advance Straight Ahead", "Infiltrate towards closest opposing unit"
+NO_SHIFT = "No Action (Shift PDF not possible)"
+SNIPER_FORTIFICATIONS = ("Foxholes", "Trench", "Bunker", "Pillbox", "Deep Bunker", "Cave")
+
+
+class Row(typing.NamedTuple):
+    label: str
+    columns: tuple
+    results: tuple
+    with_leader: typing.Optional[tuple] = None  # (column, result) with a Good Order Leader present [8.9 p.67]
+
+
+def _auto(label, action=NA):
+    return Row(label, ("Auto",), ({"Auto": action},))
+
+
+CHART = {
+    # LAT/Pinned hierarchy without Leader; with_leader = the 'With Leader' column [8.9]
+    "P1": Row(
+        "P1 Pinned, opponent on card, without cover",
+        ("5",),
+        ({"1": NA, "2": SC, "3": "Rally", "4-5": FB},),
+        ("4", {"1-2": SC, "3": "Rally", "4": FB}),
+    ),
+    "P2": Row(
+        "P2 Pinned, opponent on card, under cover",
+        ("5",),
+        ({"1-2": NA, "3": "Rally", "4-5": FB},),
+        ("3", {"1": NA, "2-3": "Rally"}),
+    ),
+    "P3": Row(
+        "P3 Pinned, without cover",
+        ("5",),
+        ({"1-2": NA, "3": SC, "4": "Rally", "5": FB},),
+        ("3", {"1": NA, "2": SC, "3": "Rally"}),
+    ),
+    "P4": Row("P4 Pinned, under cover", ("4",), ({"1-2": NA, "3": "Rally", "4": FB},), ("Auto", {"Auto": "Rally"})),
+    "P6": Row("P6 Assault Team on opponent's card", ("2",), ({"1": NA, "2": GA},), ("Auto", {"Auto": GA})),
+    "P7": Row(
+        "P7 Assault Team not on opponent's card",
+        ("2",),
+        ({"1": NA, "2": "Infiltrate to nearest opponent"},),
+        ("3", {"1": NA, "2-3": "Infiltrate to nearest opponent"}),
+    ),
+    "P8": Row(
+        "P8 Fire Team without cover on opponent's card",
+        ("5",),
+        ({"1": NA, "2": SC, "3-5": FB},),
+        ("4", {"1": NA, "2-3": SC, "4": FB}),
+    ),
+    "P9": Row(
+        "P9 Fire Team under cover on opponent's card",
+        ("5",),
+        ({"1-2": NA, "3": GA, "4-5": FB},),
+        ("3", {"1": NA, "2": GA, "3": FB}),
+    ),
+    "P10": Row("P10 Leader on Fire Team side", ("3",), ({"1": NA, "2-3": "Rally"},), ("Auto", {"Auto": "Rally"})),
+    "P11": Row(
+        "P11 Spotter/Sniper/Weapon Team on Fire Team side",
+        ("2",),
+        ({"1": NA, "2": "Rally"},),
+        ("Auto", {"Auto": "Rally"}),
+    ),
+    "P12": Row(
+        "P12 Litter Team with Casualty",
+        ("3",),
+        ({"1": NA, "2-3": "Fall Back with Casualty"},),
+        ("Auto", {"Auto": "Fall Back with Casualty"}),
+    ),
+    "P13": Row(
+        "P13 Litter Team with Casualty in LOS",
+        ("3",),
+        ({"1": NA, "2-3": "Move towards closest Casualty"},),
+        ("2", {"1": NA, "2": "Move towards closest Casualty"}),
+    ),
+    "P14": Row(
+        "P14 Litter Team without Casualty in LOS",
+        ("3",),
+        ({"1-2": NA, "3": "Rally"},),
+        ("2", {"1": NA, "2": "Rally"}),
+    ),
+    "P15": Row("P15 Paralyzed Team", ("Auto",), ({"Auto": NA},), ("2", {"1": NA, "2": "Rally"})),
+    "none_lat": _auto("none (no LAT row applies)"),
+    # Defensive hierarchy, columns Delay / Hasty / Deliberate
+    "Z1": Row(
+        "Z1 opponent on card, without cover",
+        ("5", "4", "3"),
+        (
+            {"1": NA, "2": SC, "3-4": FB, "5": GA},
+            {"1": NA, "2": SC, "3": FB, "4": GA},
+            {"1": SC, "2": FB, "3": GA},
+        ),
+    ),
+    "Z2": Row(
+        "Z2 opponent on card, under cover",
+        ("4", "3", "3"),
+        ({"1": NA, "2-3": FB, "4": GA}, {"1": NA, "2": FB, "3": GA}, {"1": NA, "2-3": GA}),
+    ),
+    "Z3": Row(
+        "Z3 A/G!/H with Out of Ammo",
+        ("Auto", "3", "2"),
+        ({"Auto": FB}, {"1": NA, "2-3": FB}, {"1": NA, "2": FB}),
+    ),
+    # [FM1 p.36] Deliberate Defense: 'ignore a "Remove unit, place PC marker" action result and do "No Action" instead'
+    "Z4_fm1": _auto("Z4 not under fire, no LOS to opponents (special rule FM1 p.36: No Action instead of Remove)"),
+    "Z4_u1": _auto(
+        "Z4 not under fire, no LOS to opponents (special rule FM1 p.36 also in Run 2/3: No Action){u1_note}"
+    ),
+    ROW_Z4: _auto("Z4 not under fire, no LOS to opponents", "Remove unit; place PC marker"),
+    "Z5": Row(
+        "Z5 not under fire, target along PDF",
+        ("3", "2", "Auto"),
+        ({"1-2": NA, "3": GCF}, {"1": NA, "2": GCF}, {"Auto": GCF}),
+    ),
+    ROW_Z6: Row(
+        "Z6 under fire, without cover",
+        ("5", "5", "3"),
+        (
+            {"1": NA, "2": SC, "3-4": FB, "5": GCF},
+            {"1": NA, "2-3": SC, "4": FB, "5": GCF},
+            {"1-2": SC, "3": GCF},
+        ),
+    ),
+    "Z7": Row(
+        "Z7 under fire from a direction other than own PDF",
+        ("5", "5", "4"),
+        (
+            {"1": NA, "2": GCF, "3": "Shift PDF", "4-5": FB},
+            {"1": NA, "2": GCF, "3-4": "Shift PDF", "5": FB},
+            {"1": NA, "2": GCF, "3-4": "Shift PDF"},
+        ),
+    ),
+    "Z8": Row(
+        "Z8 A/H unit that has opened fire{u4_note}",
+        ("3", "3", "Auto"),
+        ({"1-2": NA, "3": ACF}, {"1": NA, "2-3": ACF}, {"Auto": ACF}),
+    ),
+    "Z9": Row(
+        "Z9 Trading fire, own VOF better",
+        ("3", "2", "3"),
+        ({"1-2": NA, "3": GCF}, {"1": NA, "2": GCF}, {"1": NA, "2-3": GCF}),
+    ),
+    "Z10": Row(
+        "Z10 Trading fire, own VOF equal or worse",
+        ("3", "5", "2"),
+        ({"1": NA, "2": GCF, "3": FB}, {"1-2": NA, "3-4": GCF, "5": FB}, {"1": NA, "2": GCF}),
+    ),
+    ROW_NONE: _auto("none (no row applies)"),
+    # [PLAYER AID] 'Also applies to a G! rated unit on a card with no PDF, but with a target in LOS'
+    "Z5_g": Row(
+        "Z5 G! unit without PDF with target in LOS (player aid)",
+        ("3", "2", "Auto"),
+        ({"1-2": NA, "3": GCF}, {"1": NA, "2": GCF}, {"Auto": GCF}),
+    ),
+    # L67/L86 (K28) [RULE 8.9 p.67] Leader with Rifle Grenades as a G! unit along his card's PDF
+    "Z5_leader": Row(
+        "Z5 Leader with Rifle Grenade ({rounds} rounds) as G! along the PDF to {rgz} [8.9 p.67]",
+        ("3", "2", "Auto"),
+        ({"1-2": NA, "3": GA}, {"1": NA, "2": GA}, {"Auto": GA}),
+    ),
+    "Z6_leader": Row(
+        "Z6 Leader with Rifle Grenade under fire, no cover (as G!, target {rgz}) [8.9 p.67, K28]",
+        ("5", "5", "3"),
+        (
+            {"1": NA, "2": SC, "3-4": FB, "5": GA},
+            {"1": NA, "2-3": SC, "4": FB, "5": GA},
+            {"1-2": SC, "3": GA},
+        ),
+    ),
+    "Z7_leader": Row(
+        "Z7 Leader with Rifle Grenade under fire from a direction other than his card's PDF (as G!, target {rgz}; "
+        "Shift PDF lapses without a VOF = No Action) [8.9 p.67, K28]",
+        ("5", "5", "4"),
+        (
+            {"1": NA, "2": GA, "3": NO_SHIFT, "4-5": FB},
+            {"1": NA, "2": GA, "3-4": NO_SHIFT, "5": FB},
+            {"1": NA, "2": GA, "3-4": NO_SHIFT},
+        ),
+    ),
+    "Z10_leader": Row(
+        "Z10 Leader with Rifle Grenade in a firefight (as G! -4, target {rgz}; compare with the best opposing VOF on "
+        "the chart) [8.9 p.67, K28]",
+        ("3", "2", "3"),
+        ({"1-2": NA, "3": GA}, {"1": NA, "2": GA}, {"1": NA, "2-3": GA}),
+    ),
+    # [PLAYER AID Enemy Offensive Activity Check Hierarchy] columns Assault / Overrun
+    "O1": Row(
+        "O1 on a card with opposing units, without cover",
+        ("5", "6"),
+        ({"1": NA, "2-3": SC, "4": FB, "5": GA}, {"1": NA, "2": FB, "3-4": ADV, "5-6": GA}),
+    ),
+    "O2": Row(
+        "O2 on a card with opposing units, under cover",
+        ("5", "6"),
+        ({"1": NA, "2": FB, "3-5": GA}, {"1": NA, "2": FB, "3-4": ADV, "5-6": GA}),
+    ),
+    "O3": Row("O3 A/G!/H with Out of Ammo", ("3", "2"), ({"1-2": NA, "3": FB}, {"1": NA, "2": ADV})),
+    # L89 [RULE 8.9 p.67] Leader with Rifle Grenade as a G! unit with a target along the card's PDF (table O4)
+    "O4_leader": Row(
+        "O4 Leader with Rifle Grenade ({rounds} rounds) as G! along the PDF to {rgz} [8.9 p.67]",
+        ("4", "Auto"),
+        ({"1": NA, "2-3": GA, "4": ADV}, {"Auto": GA}),
+    ),
+    # L89: player aid O4: Assault 1/4 No Action, 2-3/4 Grenade Attack, 4/4 Advance; Overrun Auto Grenade Attack
+    "O4": Row(
+        "O4 A/G!/H with a valid target along the PDF",
+        ("4", "Auto"),
+        ({"1": NA, "2-3": GCF, "4": ADV}, {"Auto": GCF}),
+    ),
+    "O5": Row("O5 all other cases", ("4", "3"), ({"1": NA, "2-3": INF, "4": ADV}, {"1": INF, "2-3": ADV})),
+    # v4 rows the series chart does not know (8.8, 8.10, 8.11)
+    "O-A": _auto("O-A Out-of-Ammo team on Fire Team side, Spotted: Fall Back instead of hierarchy [8.11 p.68]", FB),
+    "S3": _auto("S3 Sniper in a field fortification stays put even when Spotted [8.8 Exception]"),
+    "S1": _auto("S1 Sniper Spotted: Fall Back until out of LOS, then Unspotted again [8.8 p.67]", FB),
+    "S2": _auto("S2 Sniper Unspotted: fires by target priority or does nothing [8.8 p.67]"),
+    "SP0": _auto("SP0 Spotter without fire missions: remove [8.10 p.68]", "Remove (no fire missions left)"),
+    "SP2": _auto("SP2 Spotter without target in LOS: nothing [8.10 p.68]"),
+    "SP1": _auto(
+        "SP1 Spotter: Call for Fire on {spotter_target} ({spotter_cards} cards{target_marker_note}, burst symbol; "
+        "experience already included) [8.10 p.68]",
+        "Call for Fire",
+    ),
+}
+
+
+class _Situation:
+    """Facts about one enemy unit for the chart predicates, each computed on first use (several need LOS checks)."""
+
+    def __init__(self, s, n):
+        self.s, self.n = s, n
+        self.e = s["einheiten"][n]
+        self.kid = self.e["karte"]
+        self.typ = self.e["typ"]
+        self.row_id = None  # id of the basic row, set by enemy_row
+
+    def __getitem__(self, key):  # str.format_map on the chart labels
+        return getattr(self, key)
+
+    @functools.cached_property
+    def opp(self):
+        return bool(state.valid_target(self.s, self.kid, "Feind"))
+
+    @functools.cached_property
+    def cover(self):
+        return self.e.get("bereich", "offen") != "offen"
+
+    @functools.cached_property
+    def under_fire(self):
+        return under_fire(self.s, self.e)
+
+    @functools.cached_property
+    def firing(self):
+        return fire.is_firing(self.e)
+
+    @functools.cached_property
+    def pinned(self):
+        return state.pinned(self.e)
+
+    @functools.cached_property
+    def ft_side(self):
+        return state.fire_team_side(self.e)
+
+    @functools.cached_property
+    def lat_like(self):
+        """Pinned, LAT or Fire Team side: the LAT/Pinned hierarchy applies."""
+        return self.pinned or state.is_lat(self.e) or self.ft_side
+
+    @functools.cached_property
+    def out_of_ammo_agh(self):
+        return bool(self.e.get("out_of_ammo")) and self.e.get("vof_rating") in ("A", "G", "H")
+
+    @functools.cached_property
+    def has_los(self):
+        s, kid = self.s, self.kid
+        los_ = bool(fire.fire_candidates(s, self.n))
+        if series_rules(s) or s.get("sonderregeln"):
+            # [PLAYER AID Enemy Activity Hierarchy] 'no LOS to an opposing unit' is pure LOS (5.2), independent of
+            # weapon range and bunker fire arc [RULE 5.3.2 p.37 'Being in a Bunker ... does not affect a unit's LOS']
+            los_ = los_ or any(
+                geometry.los(
+                    s, kid, k, ha=geometry.card_height_bonus(s, kid, "Feind"), hb=geometry.card_height_bonus(s, k, "US")
+                )[0]
+                for k in s["karten"]
+                if k != kid and state.units_on(s, k, "US")
             )
-        rgz = leader_rg_target(s, n) if state.is_v4(s) else None
-        if rgz and row_id == "keine":
-            T = tactic_index(s)
-            if fire.vof_against(s, kid, "Feind", ignore_mines=True) is None:
-                return (
-                    f"Z5 Leader with Rifle Grenade ({e.get('rifle_grenades')} rounds) as G! along the PDF to {rgz} [8.9 p.67]",
-                    ["3", "2", "Auto"][T],
-                    [
-                        {"1-2": "No Action", "3": "Grenade Attack"},
-                        {"1": "No Action", "2": "Grenade Attack"},
-                        {"Auto": "Grenade Attack"},
-                    ][T],
-                )
-            # L86 (K28): Leader under fire. His 'own PDF' is the PDF of his card (8.9 'along their card's existing PDF').
-            if not cover:
-                return (
-                    f"Z6 Leader with Rifle Grenade under fire, no cover (as G!, target {rgz}) [8.9 p.67, K28]",
-                    ["5", "5", "3"][T],
-                    [
-                        {"1": "No Action", "2": "Move into or Seek Cover", "3-4": "Fall Back", "5": "Grenade Attack"},
-                        {"1": "No Action", "2-3": "Move into or Seek Cover", "4": "Fall Back", "5": "Grenade Attack"},
-                        {"1-2": "Move into or Seek Cover", "3": "Grenade Attack"},
-                    ][T],
-                )
-            if any(k != rgz for k in fire.pdfs_to(s, kid, "Feind")):
-                return (
-                    f"Z7 Leader with Rifle Grenade under fire from a direction other than his card's PDF (as G!, target {rgz}; Shift PDF lapses without a VOF = No Action) [8.9 p.67, K28]",
-                    ["5", "5", "4"][T],
-                    [
-                        {
-                            "1": "No Action",
-                            "2": "Grenade Attack",
-                            "3": "No Action (Shift PDF not possible)",
-                            "4-5": "Fall Back",
-                        },
-                        {
-                            "1": "No Action",
-                            "2": "Grenade Attack",
-                            "3-4": "No Action (Shift PDF not possible)",
-                            "5": "Fall Back",
-                        },
-                        {"1": "No Action", "2": "Grenade Attack", "3-4": "No Action (Shift PDF not possible)"},
-                    ][T],
-                )
-            return (
-                f"Z10 Leader with Rifle Grenade in a firefight (as G! -4, target {rgz}; compare with the best opposing VOF on the chart) [8.9 p.67, K28]",
-                ["3", "2", "3"][T],
-                [
-                    {"1-2": "No Action", "3": "Grenade Attack"},
-                    {"1": "No Action", "2": "Grenade Attack"},
-                    {"1": "No Action", "2-3": "Grenade Attack"},
-                ][T],
-            )
-    return row_, column, result
+        return los_
+
+    @functools.cached_property
+    def quiet(self):
+        """Z4: not under fire, no LOS to opponents, not firing."""
+        return not self.under_fire and not self.has_los and not self.firing
+
+    @functools.cached_property
+    def casualty_in_los(self):
+        s, kid = self.s, self.kid
+        return any(c.get("casualties_feind") and geometry.los(s, kid, k)[0] for k, c in s["karten"].items() if k != kid)
+
+    @functools.cached_property
+    def a_rating(self):
+        s = self.s
+        return ("A", "H", "A/S") if ("optionen" in s and state.option(s, "U4_as_zaehlt_als_a")) else ("A", "H")
+
+    @functools.cached_property
+    def own_vof_better(self):
+        """Z9: own VOF better than the opposing one (None with a mine hit but no active Mines marker, L266)."""
+        e, kid = self.e, self.kid
+        own_unit = rules.VOF_VALUE.get(fire.current_vof_rating(e, e["ziel"] == kid), 0)
+        opposing = fire.vof_against(self.s, kid, "Feind")
+        return opposing is not None and own_unit < opposing[1]
+
+    @functools.cached_property
+    def rgz(self):
+        """Target card of a Leader's Rifle Grenade along his card's PDF (v4), else None."""
+        return leader_rg_target(self.s, self.n) if state.is_v4(self.s) else None
+
+    @functools.cached_property
+    def leader_row(self):
+        # L260 (review H1): the Leader rows compared with the untranslated id 'keine' and were never reached. A Leader
+        # (no VOF rating, never firing) falls through the chart to 'none' unless he is under fire without cover (Z6);
+        # that generic Z6 is replaced by the Leader's Z6 (K28), the other cases come from 'none'.
+        return bool(self.rgz) and self.row_id in (ROW_NONE, ROW_Z6)
+
+    @functools.cached_property
+    def spotter_target(self):
+        return spotter_target(self.s, self.n)
+
+    @property
+    def spotter_cards(self):
+        return self.e.get("karten_folge", 3) + (1 if self._target_marker == self.spotter_target else 0)
+
+    @property
+    def target_marker_note(self):
+        return " incl. +1 Target marker" if self._target_marker == self.spotter_target else ""
+
+    @property
+    def _target_marker(self):
+        return self.s.get("feind_target", {}).get(self.e.get("typname"))
+
+    @property
+    def rounds(self):
+        return self.e.get("rifle_grenades")
+
+    @property
+    def u1_note(self):
+        return state.open_reading(self.s, "U1_remove_pc_no_action")
+
+    @property
+    def u4_note(self):
+        return state.open_reading(self.s, "U4_as_zaehlt_als_a") if self.e.get("vof_rating") == "A/S" else ""
+
+
+def _is_sniper_row(c):
+    return is_sniper(c.e)
+
+
+V4_ROWS = (
+    ("O-A", lambda c: c.e.get("ooa_fallback") and c.ft_side and c.e.get("spotted")),
+    (None, lambda c: c.lat_like),  # the LAT/Pinned hierarchy applies
+    ("S3", lambda c: _is_sniper_row(c) and (geometry.cover_marker(c.s, c.e) or {}).get("typ") in SNIPER_FORTIFICATIONS),
+    ("S1", lambda c: _is_sniper_row(c) and c.e.get("spotted")),
+    ("S2", _is_sniper_row),
+    ("SP0", lambda c: c.e.get("spotter") and c.e.get("missionen", 0) <= 0),
+    ("SP2", lambda c: c.e.get("spotter") and not c.spotter_target),
+    ("SP1", lambda c: c.e.get("spotter")),
+)
+
+LAT_ROWS = (
+    ("P1", lambda c: c.pinned and c.opp and not c.cover),
+    ("P2", lambda c: c.pinned and c.opp),
+    ("P3", lambda c: c.pinned and not c.cover),
+    ("P4", lambda c: c.pinned),
+    ("P6", lambda c: c.typ == "Assault Team" and c.opp),
+    ("P7", lambda c: c.typ == "Assault Team"),
+    ("P8", lambda c: c.typ == "Fire Team" and c.opp and not c.cover),
+    ("P9", lambda c: c.typ == "Fire Team" and c.opp),
+    ("P10", lambda c: c.ft_side and state.is_hq(c.e)),
+    ("P11", lambda c: c.ft_side),
+    ("P12", lambda c: c.typ == "Litter Team" and state.card(c.s, c.kid).get("casualties_feind")),
+    ("P13", lambda c: c.typ == "Litter Team" and c.casualty_in_los),
+    ("P14", lambda c: c.typ == "Litter Team"),
+    ("P15", lambda c: c.typ == "Paralyzed Team"),
+    ("none_lat", lambda _c: True),
+)
+
+DEFENSIVE_ROWS = (
+    ("Z1", lambda c: c.opp and not c.cover),
+    ("Z2", lambda c: c.opp),
+    ("Z3", lambda c: c.out_of_ammo_agh),
+    ("Z4_fm1", lambda c: c.quiet and c.s.get("sonderregeln", {}).get("remove_pc_no_action")),
+    ("Z4_u1", lambda c: c.quiet and "optionen" in c.s and state.option(c.s, "U1_remove_pc_no_action")),
+    (ROW_Z4, lambda c: c.quiet),
+    ("Z5", lambda c: not c.under_fire and c.firing),
+    (ROW_Z6, lambda c: c.under_fire and not c.cover),
+    ("Z7", lambda c: c.under_fire and c.firing and fire_from_other_direction(c.s, c.kid, c.e["ziel"])),
+    (
+        "Z8",
+        lambda c: (
+            c.firing and c.e.get("vof_rating") in c.a_rating and c.e["ziel"] != c.kid and not c.e.get("konzentriert")
+        ),
+    ),
+    ("Z9", lambda c: c.under_fire and c.firing and c.own_vof_better),
+    ("Z10", lambda c: c.under_fire and c.firing),
+    (ROW_NONE, lambda _c: True),
+)
+
+# v4 additions to the defensive chart for Good Order units: a G! unit without PDF, a Leader with Rifle Grenades
+SPECIAL_ROWS = (
+    (
+        "Z5_g",
+        lambda c: (
+            state.is_v4(c.s)
+            and c.e.get("vof_rating") == "G"
+            and not c.firing
+            and c.row_id in (ROW_Z4, ROW_NONE)
+            and fire_candidates_g(c.s, c.n)
+        ),
+    ),
+    ("Z5_leader", lambda c: c.leader_row and not c.under_fire),
+    ("Z6_leader", lambda c: c.leader_row and not c.cover),
+    ("Z7_leader", lambda c: c.leader_row and fire_from_other_direction(c.s, c.kid, c.rgz)),
+    ("Z10_leader", lambda c: c.leader_row),
+)
+
+OFFENSIVE_ROWS = (
+    ("O1", lambda c: c.opp and not c.cover),
+    ("O2", lambda c: c.opp),
+    ("O3", lambda c: c.out_of_ammo_agh),
+    ("O4_leader", lambda c: c.rgz),
+    (
+        "O4",
+        lambda c: (
+            c.e.get("vof_rating") in ("A", "G", "H")
+            and (c.firing or (c.e.get("vof_rating") == "G" and fire_candidates_g(c.s, c.n)))
+        ),
+    ),
+    ("O5", lambda _c: True),
+)
+
+
+def _first_row(rows, sit):
+    """Key of the first row whose predicate holds (None: no row of this table applies)."""
+    for key, holds in rows:
+        if holds(sit):
+            return key
+    return None
+
+
+def chart_row(sit, key, column=0):
+    """(row text, R# column, results) of a chart row for the situation; column = index of the tactic column (a row
+    with a single entry applies to every tactic)."""
+    row = CHART[key]
+    i = column if len(row.columns) > 1 else 0
+    return row.label.format_map(sit), row.columns[i], dict(row.results[i])
 
 
 def tactic_index(s):
@@ -105,202 +583,41 @@ def tactic_index(s):
     return {"Delay": 0, "Hasty": 1, "Deliberate": 2}.get(s.get("feind_taktik", "Hasty"), 2)
 
 
-def enemy_row_basic(s, n):
-    """Hierarchy row of an enemy (Enemy Activity Check Hierarchy Chart; Defensive Delay/Hasty/Deliberate or LAT/Pinned without Leader)."""
-    e = s["einheiten"][n]
-    kid = e["karte"]
-    opponent_present = bool(state.valid_target(s, kid, "Feind"))
-    cover = e.get("bereich", "offen") != "offen"
-    # [PLAYER AID Key 'Under Fire'] without unactivated Mines and Pending (BGG E35); mine hit = active VOF
-    under_fire = fire.vof_against(s, kid, "Feind", ignore_mines=True) is not None or bool(e.get("mine_hit"))
+def _basic(sit):
+    """Key of the basic row: LAT/Pinned hierarchy or the defensive hierarchy."""
+    sit.under_fire  # noqa: B018  the VOF and LOS checks run in the former order (their LOS notes keep their order)
+    if sit.lat_like:
+        return _first_row(LAT_ROWS, sit)
+    sit.has_los  # noqa: B018
+    return _first_row(DEFENSIVE_ROWS, sit)
+
+
+def enemy_row(s, n):
+    """Row of the Enemy Activity Check for unit n: v4 rows (Sniper 8.8, Spotter 8.10, Out of Ammo 8.11), the basic row,
+    the With Leader column (8.9), the Offensive hierarchy (counterattack), G! unit without PDF, Leader with Rifle
+    Grenades. Returns (row text, R# column, {R# band: action})."""
+    sit = _Situation(s, n)
+    offensive = s.get("feind_taktik") in OFFENSIVE_TACTICS
+    if state.is_v4(s) or offensive:
+        key = _first_row(V4_ROWS, sit)
+        if key:
+            return chart_row(sit, key)
+    key = _basic(sit)
     T = tactic_index(s)
-    if state.pinned(e) or state.is_lat(e) or state.fire_team_side(e):
-        if state.pinned(e):
-            if opponent_present and not cover:
-                return (
-                    "P1 Pinned, opponent on card, without cover",
-                    "5",
-                    {"1": "No Action", "2": "Move into or Seek Cover", "3": "Rally", "4-5": "Fall Back"},
-                )
-            if opponent_present:
-                return (
-                    "P2 Pinned, opponent on card, under cover",
-                    "5",
-                    {"1-2": "No Action", "3": "Rally", "4-5": "Fall Back"},
-                )
-            if not cover:
-                return (
-                    "P3 Pinned, without cover",
-                    "5",
-                    {"1-2": "No Action", "3": "Move into or Seek Cover", "4": "Rally", "5": "Fall Back"},
-                )
-            return "P4 Pinned, under cover", "4", {"1-2": "No Action", "3": "Rally", "4": "Fall Back"}
-        if e["typ"] == "Assault Team":
-            if opponent_present:
-                return "P6 Assault Team on opponent's card", "2", {"1": "No Action", "2": "Grenade Attack"}
-            return (
-                "P7 Assault Team not on opponent's card",
-                "2",
-                {"1": "No Action", "2": "Infiltrate to nearest opponent"},
-            )
-        if e["typ"] == "Fire Team" and opponent_present:
-            if not cover:
-                return (
-                    "P8 Fire Team without cover on opponent's card",
-                    "5",
-                    {"1": "No Action", "2": "Move into or Seek Cover", "3-5": "Fall Back"},
-                )
-            return (
-                "P9 Fire Team under cover on opponent's card",
-                "5",
-                {"1-2": "No Action", "3": "Grenade Attack", "4-5": "Fall Back"},
-            )
-        if state.fire_team_side(e):
-            if state.is_hq(e):
-                return "P10 Leader on Fire Team side", "3", {"1": "No Action", "2-3": "Rally"}
-            return "P11 Spotter/Sniper/Weapon Team on Fire Team side", "2", {"1": "No Action", "2": "Rally"}
-        if e["typ"] == "Litter Team":
-            if state.card(s, kid).get("casualties_feind"):
-                return "P12 Litter Team with Casualty", "3", {"1": "No Action", "2-3": "Fall Back with Casualty"}
-            if any(
-                c.get("casualties_feind") and geometry.los(s, kid, k)[0] for k, c in s["karten"].items() if k != kid
-            ):
-                return (
-                    "P13 Litter Team with Casualty in LOS",
-                    "3",
-                    {"1": "No Action", "2-3": "Move towards closest Casualty"},
-                )
-            return "P14 Litter Team without Casualty in LOS", "3", {"1-2": "No Action", "3": "Rally"}
-        if e["typ"] == "Paralyzed Team":
-            return "P15 Paralyzed Team", "Auto", {"Auto": "No Action"}
-        return "none (no LAT row applies)", "Auto", {"Auto": "No Action"}
-    has_los = bool(fire.fire_candidates(s, n))
-    if state.company(s) or "optionen" in s or s.get("sonderregeln"):
-        # [PLAYER AID Enemy Activity Hierarchy] 'no LOS to an opposing unit' is pure LOS (5.2), independent of weapon range
-        # and bunker fire arc [RULE 5.3.2 p.37 'Being in a Bunker ... does not affect a unit's LOS']
-        has_los = has_los or any(
-            geometry.los(
-                s, kid, k, ha=geometry.card_height_bonus(s, kid, "Feind"), hb=geometry.card_height_bonus(s, k, "US")
-            )[0]
-            for k in s["karten"]
-            if k != kid and state.units_on(s, k, "US")
-        )
-    if opponent_present and not cover:
-        return (
-            "Z1 opponent on card, without cover",
-            ["5", "4", "3"][T],
-            [
-                {"1": "No Action", "2": "Move into or Seek Cover", "3-4": "Fall Back", "5": "Grenade Attack"},
-                {"1": "No Action", "2": "Move into or Seek Cover", "3": "Fall Back", "4": "Grenade Attack"},
-                {"1": "Move into or Seek Cover", "2": "Fall Back", "3": "Grenade Attack"},
-            ][T],
-        )
-    if opponent_present:
-        return (
-            "Z2 opponent on card, under cover",
-            ["4", "3", "3"][T],
-            [
-                {"1": "No Action", "2-3": "Fall Back", "4": "Grenade Attack"},
-                {"1": "No Action", "2": "Fall Back", "3": "Grenade Attack"},
-                {"1": "No Action", "2-3": "Grenade Attack"},
-            ][T],
-        )
-    if e.get("out_of_ammo") and e.get("vof_rating") in ("A", "G", "H"):
-        return (
-            "Z3 A/G!/H with Out of Ammo",
-            ["Auto", "3", "2"][T],
-            [{"Auto": "Fall Back"}, {"1": "No Action", "2-3": "Fall Back"}, {"1": "No Action", "2": "Fall Back"}][T],
-        )
-    if not under_fire and not has_los and not fire.is_firing(e):
-        if s.get("sonderregeln", {}).get("remove_pc_no_action"):
-            # [FM1 p.36] Deliberate Defense: 'ignore a "Remove unit, place PC marker" action result and do "No Action" instead'
-            return (
-                "Z4 not under fire, no LOS to opponents (special rule FM1 p.36: No Action instead of Remove)",
-                "Auto",
-                {"Auto": "No Action"},
-            )
-        if "optionen" in s and state.option(s, "U1_remove_pc_no_action"):
-            return (
-                "Z4 not under fire, no LOS to opponents (special rule FM1 p.36 also in Run 2/3: No Action)"
-                + state.open_reading(s, "U1_remove_pc_no_action"),
-                "Auto",
-                {"Auto": "No Action"},
-            )
-        return "Z4 not under fire, no LOS to opponents", "Auto", {"Auto": "Remove unit; place PC marker"}
-    if not under_fire and fire.is_firing(e):
-        return (
-            "Z5 not under fire, target along PDF",
-            ["3", "2", "Auto"][T],
-            [
-                {"1-2": "No Action", "3": "Grenade Attack (or Concentrate Fire)"},
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)"},
-                {"Auto": "Grenade Attack (or Concentrate Fire)"},
-            ][T],
-        )
-    if under_fire and not cover:
-        return (
-            "Z6 under fire, without cover",
-            ["5", "5", "3"][T],
-            [
-                {
-                    "1": "No Action",
-                    "2": "Move into or Seek Cover",
-                    "3-4": "Fall Back",
-                    "5": "Grenade Attack (or Concentrate Fire)",
-                },
-                {
-                    "1": "No Action",
-                    "2-3": "Move into or Seek Cover",
-                    "4": "Fall Back",
-                    "5": "Grenade Attack (or Concentrate Fire)",
-                },
-                {"1-2": "Move into or Seek Cover", "3": "Grenade Attack (or Concentrate Fire)"},
-            ][T],
-        )
-    if under_fire and fire.is_firing(e) and any(k != e["ziel"] for k in fire.pdfs_to(s, kid, "Feind")):
-        return (
-            "Z7 under fire from a direction other than own PDF",
-            ["5", "5", "4"][T],
-            [
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)", "3": "Shift PDF", "4-5": "Fall Back"},
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)", "3-4": "Shift PDF", "5": "Fall Back"},
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)", "3-4": "Shift PDF"},
-            ][T],
-        )
-    a_rating = ("A", "H", "A/S") if ("optionen" in s and state.option(s, "U4_as_zaehlt_als_a")) else ("A", "H")
-    if fire.is_firing(e) and e.get("vof_rating") in a_rating and e["ziel"] != kid and not e.get("konzentriert"):
-        return (
-            "Z8 A/H unit that has opened fire"
-            + (state.open_reading(s, "U4_as_zaehlt_als_a") if e.get("vof_rating") == "A/S" else ""),
-            ["3", "3", "Auto"][T],
-            [
-                {"1-2": "No Action", "3": "Attempt to Concentrate Fire"},
-                {"1": "No Action", "2-3": "Attempt to Concentrate Fire"},
-                {"Auto": "Attempt to Concentrate Fire"},
-            ][T],
-        )
-    if under_fire and fire.is_firing(e):
-        own_unit = rules.VOF_VALUE.get(fire.current_vof_rating(e, e["ziel"] == kid), 0)
-        if own_unit < fire.vof_against(s, kid, "Feind")[1]:
-            return (
-                "Z9 Trading fire, own VOF better",
-                ["3", "2", "3"][T],
-                [
-                    {"1-2": "No Action", "3": "Grenade Attack (or Concentrate Fire)"},
-                    {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)"},
-                    {"1": "No Action", "2-3": "Grenade Attack (or Concentrate Fire)"},
-                ][T],
-            )
-        return (
-            "Z10 Trading fire, own VOF equal or worse",
-            ["3", "5", "2"][T],
-            [
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)", "3": "Fall Back"},
-                {"1-2": "No Action", "3-4": "Grenade Attack (or Concentrate Fire)", "5": "Fall Back"},
-                {"1": "No Action", "2": "Grenade Attack (or Concentrate Fire)"},
-            ][T],
-        )
-    return "none (no row applies)", "Auto", {"Auto": "No Action"}
+    row_, column, result = chart_row(sit, key, 0 if sit.lat_like else T)
+    sit.row_id = row_.split(" ")[0]
+    with_leader = CHART[key].with_leader
+    if with_leader and leader_present(s, sit.e):
+        return row_ + " (With Leader, 8.9)", with_leader[0], dict(with_leader[1])
+    if sit.lat_like:
+        return row_, column, result
+    if offensive:
+        z, sp, er = chart_row(sit, _first_row(OFFENSIVE_ROWS, sit), int(s["feind_taktik"] == "Overrun"))
+        return z + f" [Enemy Offensive Activity Check Hierarchy, {s['feind_taktik']}]", sp, er
+    special = _first_row(SPECIAL_ROWS, sit)
+    if special:
+        return chart_row(sit, special, T)
+    return row_, column, result
 
 
 def prepare_enemy_check(s, prot):
@@ -312,7 +629,7 @@ def prepare_enemy_check(s, prot):
                 and not state.fire_team_side(e)
                 and not [m for m in state.units_on(s, e["karte"], "Feind") if m != n]
             ):
-                commands.mark(e, "Fire Team side")
+                commands.mark(e, rules.FIRE_TEAM_SIDE)
                 prot.append(f"{n}: Leader alone on {e['karte']}, flipped to Fire Team side [8.9 p.67]")
     enemies = [n for n, e in s["einheiten"].items() if e["seite"] == "Feind"]
     for n in enemies:
@@ -320,9 +637,11 @@ def prepare_enemy_check(s, prot):
     # L60: units from an Enemy Higher HQ Event this turn do not check again [RULE 3.4.1 p.16]
     without = (
         [n for n in s.get("ereignis_einheiten", []) if n in enemies]
-        if s.get("ereignis_erledigt") == [s["zug"], "3.4.1"]
+        if s.get("ereignis_erledigt") == [s["zug"], enemy_segments(s)[0]]
         else []
     )
+    for n in without:
+        s["einheiten"][n]["check_offen"] = False  # L281: the one place for it (events.py wrote it before, uselessly)
     if without:
         prot.append(
             f"no Activity Check for {', '.join(without)} (already affected by the Enemy Higher HQ Event) [3.4.1 p.16]"
@@ -342,9 +661,20 @@ def prepare_enemy_check(s, prot):
         prot.append(f"Activity Check for {', '.join(enemies)}: fof.py enemycheck [8.6.2]")
 
 
+def auto_command(s, n, action):
+    """Executable enemyaction line for an Auto result; a Spotter's Call for Fire carries its target as an option
+    (L267, review M25: the target used to sit inside the quoted action string with the German key)."""
+    cmd = f'fof.py enemyaction "{n}" "{action}"'
+    if action.lower().startswith("call for fire"):
+        z = spotter_target(s, n)
+        return cmd + (f" --target={z}" if z else " --target=<card>") + " --success=yes|no"
+    return cmd + " ..."
+
+
 def cmd_enemy_check(s, args):
-    if s["phase"] != "3.4.2":
-        print(f"Note: Activity Check belongs in 3.4.2, currently {s['phase']}")
+    check_seg = enemy_segments(s)[1]
+    if s["phase"] != check_seg:
+        print(f"Note: Activity Check belongs in {check_seg}, currently {s['phase']}")
     for n, e in s["einheiten"].items():
         if e["seite"] != "Feind":
             continue
@@ -355,7 +685,8 @@ def cmd_enemy_check(s, args):
             + f": {row_} [Enemy Activity Chart, {s.get('feind_taktik', 'Hasty')}]"
         )
         if column == "Auto":
-            print(f'  Auto: {list(result.values())[0]}   fof.py enemyaction "{n}" "{list(result.values())[0]}" ...')
+            action = next(iter(result.values()))  # an Auto row has exactly one result
+            print(f"  Auto: {action}   {auto_command(s, n, action)}")
         else:
             print(f"  R# column {column}: " + "; ".join(f"{k} = {v}" for k, v in result.items()))
             print(f'  then fof.py enemyaction "{n}" "<action>" [--target=K] [--success=yes|no] [--unit=<target unit>]')
@@ -421,27 +752,6 @@ def _is_no_fire_missions(s, ctx):
     return "keine feuerauftraege" in ctx.a or "no fire missions" in ctx.a
 
 
-def advance_cover(s, e, n, target, prot):
-    """L169 [RULE 8.6.1E p.66] 'Enemies who are advancing will move into the highest value cover marker available that
-    allows it to Open Fire upon opposing units': free or own-side cover on the target card, highest value (random tie)."""
-    opp = state.opponent_of_side(e["seite"])
-    free = [
-        c
-        for c in state.card(s, target).get("cover", [])
-        if not any(s["einheiten"][m].get("bereich") == c["id"] for m in state.units_on(s, target, opp))
-    ]
-    if not free:
-        return
-    top = max(c["wert"] for c in free)
-    best = [c for c in free if c["wert"] == top]
-    e["bereich"] = best[0]["id"]
-    prot.append(
-        f"{n} moves under {best[0]['id']} ({best[0]['typ']} +{top}) on {target}"
-        + (f" (tie with {', '.join(c['id'] for c in best[1:])}: choose by R#)" if len(best) > 1 else "")
-        + " [8.6.1E]"
-    )
-
-
 def _enemy_advance(s, ctx):
     """cmd_feindaktion: 'advance' in a"""
     c = state.card(s, ctx.e["karte"])
@@ -449,26 +759,27 @@ def _enemy_advance(s, ctx):
     if c["reihe"] == geometry.first_card_row(s):
         if s.get("feind_taktik") == "Overrun":
             remove_enemy(s, ctx.n, ctx.prot, reason="Overrun: Advance from row 1 leaves the board")
-            target = None
-        else:
-            target = ctx.o.get("--ziel")
-            if (
-                not target
-                or not geometry.adjacent(s, ctx.e["karte"], target)
-                or (state.card(s, target).get("staging") and not state.option(s, "U24_assault_in_staging"))
-            ):
-                raise rules.Violation(
-                    "Assault from row 1: --target=<adjacent card towards the nearest US unit>"
-                    + state.open_reading(s, "U24_assault_in_staging")
-                )
-    if target:
-        combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
-        commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)
-        ctx.e["karte"], ctx.e["bereich"] = target, "offen"
-        commands.mark(ctx.e, "Exposed")
-        ctx.prot.append(f"{ctx.n}: Advance Straight Ahead to {target}, Exposed [Offensive Hierarchy, 8.6.1C]")
-        advance_cover(s, ctx.e, ctx.n, target, ctx.prot)
-        fire.fire_after_move(s, ctx.n, ctx.prot)
+            return
+        target = ctx.o.get("--ziel")
+        if (
+            not target
+            or not geometry.adjacent(s, ctx.e["karte"], target)
+            or (state.card(s, target).get("staging") and not state.option(s, "U24_assault_in_staging"))
+        ):
+            raise rules.Violation(
+                "Assault from row 1: --target=<adjacent card towards the nearest US unit>"
+                + state.open_reading(s, "U24_assault_in_staging")
+            )
+    if not target:
+        # L268 (review M23): no card straight ahead used to be a silent no-op that still closed the check
+        missing = state.card_id(c["reihe"] - 1, c["spalte"])
+        raise rules.Violation(
+            f"Advance Straight Ahead of {ctx.n}: card {missing} (row {c['reihe'] - 1}, column {c['spalte']}) does not "
+            f"exist; extend the map (fof.py extend {c['reihe'] - 1} {c['spalte']} <type>) or redraw the result "
+            f"[8.4.5, 8.6.1]"
+        )
+    # L169 [RULE 8.6.1E p.66] advancing enemies take the highest free cover marker on the target card
+    move_enemy(s, ctx.n, target, ctx.prot, how="advances straight ahead", rule="Offensive Hierarchy, 8.6.1C")
 
 
 def _is_advance(s, ctx):
@@ -478,18 +789,16 @@ def _is_advance(s, ctx):
 def _enemy_seek_cover(s, ctx):
     """cmd_feindaktion: 'seek cover' in a or 'move into' in a"""
     kk = state.card(s, ctx.e["karte"])
-    free = [
-        c
-        for c in kk.get("cover", [])
-        if not any(
-            s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == c["id"]
-            for m in state.units_on(s, ctx.e["karte"])
+    best = best_free_cover(s, ctx.e["karte"])  # L264 (review M26): highest value, not the first marker
+    if best and ctx.e.get("bereich", "offen") == "offen":
+        commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
+        ctx.e["bereich"] = best[0]["id"]
+        commands.mark(ctx.e, rules.EXPOSED)
+        ctx.prot.append(
+            f"{ctx.n} moves under {best[0]['id']} ({best[0]['typ']} +{best[0]['wert']})"
+            + (f" (tie with {', '.join(c['id'] for c in best[1:])}: choose by R#)" if len(best) > 1 else "")
+            + ", Exposed [8.6.1C, 8.6.1E]"
         )
-    ]
-    if free and ctx.e.get("bereich", "offen") == "offen":
-        ctx.e["bereich"] = free[0]["id"]
-        commands.mark(ctx.e, "Exposed")
-        ctx.prot.append(f"{ctx.n} moves under {free[0]['id']} ({free[0]['typ']}), Exposed [8.6.1C]")
     else:
         if ctx.o.get("--erfolg") not in ("ja", "nein"):
             n_cards = (kk.get("cover_draw") or 2) + {"Green": -1, "Veteran": 1}.get(comms.experience(ctx.e), 0)
@@ -505,11 +814,25 @@ def _enemy_seek_cover(s, ctx):
                     f"{ctx.n}: Seek Cover drawn successfully, but {ctx.e['karte']} has reached its Cover Potential ({kk['cover_max']}): no new marker [5.3 p.36]"
                 )
                 return
-            cid = commands.new_cover_marker(s, ctx.e["karte"], "Basic Cover", 1)
+            gt, gw = "Basic Cover", 1
+            if kk.get("gebaeude_tabelle") and state.is_v4(s):
+                # L219 [Normandy CSR 8 p.15 'When cover is found on Village, Farm, Cemetery and Church cards, it may be a
+                # building or Basic +1 Cover']: building table also for enemy Seek Cover; enemies never take upper stories
+                if not ctx.o.get("--gebaeude"):
+                    raise rules.Violation(
+                        "Enemy Seek Cover on Village/Farm/Cemetery/Church: R# column 8 on the building table, --building=<R#> [CSR 8 p.15]"
+                    )
+                gt, gw, _upper = contact.building_cover(
+                    s, ctx.e["karte"], ctx.e, ctx.o["--gebaeude"], ctx.o.get("--gebaeude_wert")
+                )
+            cid = commands.new_cover_marker(s, ctx.e["karte"], gt, gw)
+            if gt != "Basic Cover":
+                next(c_ for c_ in kk["cover"] if c_["id"] == cid)["feld"] = False
+            commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
             ctx.e["bereich"] = cid
-            commands.mark(ctx.e, "Exposed")
+            commands.mark(ctx.e, rules.EXPOSED)
             ctx.prot.append(
-                f"{ctx.n}: new cover marker {cid} (+1) on {ctx.e['karte']}, {ctx.n} under it, Exposed [4.2.2e]"
+                f"{ctx.n}: new cover marker {cid} ({gt} +{gw}) on {ctx.e['karte']}, {ctx.n} under it, Exposed [4.2.2e, CSR 8]"
             )
         else:
             ctx.prot.append(f"{ctx.n}: Seek Cover failed")
@@ -543,40 +866,16 @@ def _enemy_fall_back(s, ctx):
             raise rules.Violation(f"{target} not adjacent to {ctx.e['karte']}")
         commands.diagonal_pdf_check(s, ctx.e, target)  # L131 [RULE 5.1.2 p.32]
         best = fall_back_candidates(s, ctx.e)  # L141 [RULE 8.6.3 p.66] priorities 2 and 3
+        if not best and restricted_mover(ctx.e):
+            raise rules.Violation(
+                f"Fall Back of {ctx.n}: no adjacent card towards the enemy edge without VOF (Pinned/Paralyzed/Litter, 4.2.5, E90): "
+                f'no movement, book fof.py enemyaction "{ctx.n}" "No Action" [RULE 4.2.5 p.26, 8.6.1C p.66]'
+            )
         if best and target not in best:
             raise rules.Violation(
                 f"Fall Back of {ctx.n}: by 8.6.3 to {', '.join(best)} (towards the enemy edge; first out of every US LOS, then highest cover value incl. free markers; tie: R#) [RULE 8.6.3 p.66]"
             )
-        combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
-        commands.grenade_expires(
-            s, ctx.e, ctx.n, ctx.prot
-        )  # L92 [RULE 7.10.4] Grenade marker becomes a Grenade Miss on the origin card
-        cv_from = geometry.cover_marker(s, ctx.e)
-        ctx.e["karte"], ctx.e["bereich"] = target, "offen"
-        ctx.e.pop("deep_bunker", None)
-        free = [
-            c
-            for c in state.card(s, target).get("cover", [])
-            if not any(
-                s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == c["id"]
-                for m in state.units_on(s, target)
-            )
-        ]
-        if free:
-            best = max(free, key=lambda c: c["wert"])
-            ctx.e["bereich"] = best["id"]
-            if cv_from and cv_from["typ"] in rules.FIXED_COVER and best["typ"] in rules.FIXED_COVER:
-                # L131 [RULE 5.1.2 p.32] 'If Trench, Bunker, Pillbox ... exist in two adjacent cards, units may move between them without being marked as Exposed'
-                ctx.prot.append(
-                    f"{ctx.n} falls back to {target} under {best['id']} ({best['typ']}), from {cv_from['typ']}: not Exposed [8.6.3, 5.1.2]"
-                )
-            else:
-                commands.mark(ctx.e, "Exposed")
-                ctx.prot.append(f"{ctx.n} falls back to {target} under {ctx.e['bereich']}, Exposed [8.6.3, 8.6.1E]")
-        else:
-            commands.mark(ctx.e, "Exposed")
-            ctx.prot.append(f"{ctx.n} falls back to {target} (open), Exposed [8.6.3]")
-        fire.fire_after_move(s, ctx.n, ctx.prot)
+        move_enemy(s, ctx.n, target, ctx.prot, how="falls back", rule="8.6.3")
 
 
 def fall_back_offmap(s, e):
@@ -603,33 +902,76 @@ def _is_fall_back(s, ctx):
     return "fall back" in ctx.a
 
 
-def _enemy_grenade_concentrate(s, ctx):
-    """cmd_feindaktion: 'grenade' in a or 'concentrate' in a"""
-    if ctx.o.get("--erfolg") not in ("ja", "nein"):
+def _grenade_mode(s, ctx):
+    """Which of the two chart alternatives applies: 'grenade' (Point Blank target on the own card, G! unit, Leader with
+    Rifle Grenades) or 'concentrate'. The chart result 'Grenade Attack (or Concentrate Fire)' names both; the engine
+    prints it as the Auto command, so it is resolved by the situation instead of refused (L272). Returns
+    (mode, grenade_pb, g_without_pdf, rg)."""
+    e = ctx.e
+    has_grenade = "grenade" in ctx.a
+    if has_grenade and "concentrate" in ctx.a and not ctx.a.startswith(CHART_GRENADE_OR_CF):
+        # LOW: any other text naming both used to run the prompt of one and the booking of the other
         raise rules.Violation(
-            f"Grenade Attack (only Point Blank or G! rating) or Attempt to Concentrate Fire: draw {enemy_attempt_cards(s, ctx.e, 'concentrate' in ctx.a)} cards "
-            f"(base 2, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}{', tripod +1' if 'concentrate' in ctx.a and ctx.e.get('tripod') else ''}), "
-            f"Grenade symbol or Crosshairs; --success=yes|no --unit=<target unit or cover stack>{largest_target_note(s, ctx.e)} [7.10, 7.11, 8.9] "
-            + commands.draw_watch(
-                s,
-                "cf" if "concentrate" in ctx.a else "grenade",
-                ctx.e,
-                ranged="grenade" in ctx.a and not state.valid_target(s, ctx.e["karte"], "Feind"),
-            )
+            f"'{ctx.action}' names both Grenade Attack and Concentrate Fire: book the chart result "
+            f"'Grenade Attack (or Concentrate Fire)' or one of the two [Enemy Activity Chart]"
         )
+    grenade_pb = has_grenade and bool(state.valid_target(s, e["karte"], "Feind"))
+    g_without_pdf = (
+        has_grenade and state.is_v4(s) and e.get("vof_rating") == "G" and not fire.is_firing(e) and not grenade_pb
+    )
+    rg = leader_rg_target(s, ctx.n) if (state.is_v4(s) and has_grenade and not grenade_pb) else None  # L67 [8.9]
+    g_firing = has_grenade and e.get("vof_rating") == "G" and fire.is_firing(e)  # Mortar Team with its own PDF
+    grenade_ok = grenade_pb or g_without_pdf or bool(rg) or g_firing
+    if has_grenade and "concentrate" not in ctx.a and not grenade_ok:
+        raise rules.Violation(
+            f"{ctx.n}: Grenade Attack only against a Point Blank target or as a G!/Rifle Grenade unit; at range the "
+            f"chart alternative is 'Concentrate Fire' [7.10, 7.3.2, 8.9]"
+        )
+    mode = "grenade" if grenade_ok else "concentrate"
+    return mode, grenade_pb, g_without_pdf, rg
+
+
+def _grenade_prompt(s, ctx, mode, grenade_pb):
+    """Draw prompt for the attempt (Violation) unless --success is given."""
+    if ctx.o.get("--erfolg") in ("ja", "nein"):
+        return
+    concentrate = mode == "concentrate"
+    raise rules.Violation(
+        f"{'Attempt to Concentrate Fire' if concentrate else 'Grenade Attack (only Point Blank or G! rating)'}: draw "
+        f"{enemy_attempt_cards(s, ctx.e, concentrate)} cards "
+        f"(base 2, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}{', tripod +1' if concentrate and ctx.e.get('tripod') else ''}), "
+        f"{'Crosshairs' if concentrate else 'Grenade symbol'}; --success=yes|no --unit=<target unit or cover stack>{largest_target_note(s, ctx.e)} [7.10, 7.11, 8.9] "
+        + commands.draw_watch(s, "cf" if concentrate else "grenade", ctx.e, ranged=mode == "grenade" and not grenade_pb)
+    )
+
+
+def _leave_deep_bunker(s, ctx):
+    """[CSR 5 p.14] 'Enemy units will leave the Bunker upon drawing Fall Back or Grenade Attack actions' (L130). The unit
+    opens fire at once; a target tie is settled with --target (L273, review M20: the tie used to be unrecoverable)."""
     cv0 = geometry.cover_marker(s, ctx.e)
-    if "grenade" in ctx.a and cv0 and cv0["typ"] == "Deep Bunker":
-        # [CSR 5 p.14] 'Enemy units will leave the Bunker upon drawing Fall Back or Grenade Attack actions' (L130)
-        ctx.e["bereich"] = "offen"
-        ctx.e.pop("deep_bunker", None)
-        commands.mark(ctx.e, "Exposed")
-        ctx.prot.append(
-            f"{ctx.n} leaves Deep Bunker {cv0['id']} for the Grenade Attack, Exposed; VOF now active [CSR 5 p.14, 5.3.2]"
-        )
-        fire.open_fire(s, ctx.prot, only=[ctx.n])
-    grenade_pb = "grenade" in ctx.a and bool(state.valid_target(s, ctx.e["karte"], "Feind"))
-    g_without_pdf = state.is_v4(s) and ctx.e.get("vof_rating") == "G" and not fire.is_firing(ctx.e) and not grenade_pb
-    rg = leader_rg_target(s, ctx.n) if (state.is_v4(s) and "grenade" in ctx.a and not grenade_pb) else None  # L67 [8.9]
+    if not (cv0 and cv0["typ"] == "Deep Bunker"):
+        return
+    ctx.e["bereich"] = "offen"
+    ctx.e.pop("deep_bunker", None)
+    commands.mark(ctx.e, rules.EXPOSED)
+    ctx.prot.append(
+        f"{ctx.n} leaves Deep Bunker {cv0['id']} for the Grenade Attack, Exposed; VOF now active [CSR 5 p.14, 5.3.2]"
+    )
+    fire.open_fire(s, ctx.prot, only=[ctx.n])
+    if ctx.e.get("ziel_offen"):
+        zk = ctx.o.get("--ziel")
+        if zk not in ctx.e["ziel_offen"]:
+            raise rules.Violation(
+                f"{ctx.n} leaves the Deep Bunker and has several targets: R# from {', '.join(ctx.e['ziel_offen'])}; "
+                f"repeat with --target=<card> [6.1.1]"
+            )
+        ctx.e["ziel"] = zk
+        ctx.e.pop("ziel_offen", None)
+        ctx.prot.append(f"{ctx.n} opens fire on {zk} (chosen by R#) [6.1.1]")
+
+
+def _grenade_target_card(s, ctx, grenade_pb, g_without_pdf, rg):
+    """The attacked card; a G! unit without PDF places its PDF first; a Leader fires a Rifle Grenade along the PDF."""
     if not fire.is_firing(ctx.e) and not grenade_pb and not g_without_pdf and not rg:
         raise rules.Violation(f"{ctx.n} is not firing, no Concentrate Fire possible [4.2.4b]")
     if g_without_pdf:
@@ -646,9 +988,58 @@ def _enemy_grenade_concentrate(s, ctx):
         ctx.prot.append(
             f"{ctx.n} fires a Rifle Grenade along the PDF to {rg}; {ctx.e['rifle_grenades']} round(s) left [8.9 p.67, Normandy p.23]"
         )
+    return zk
+
+
+def _apply_grenade_hit(s, ctx, zk, ze, z):
+    """[RULE 7.10.1 p.54] one unit out of cover or the whole stack under its Cover marker (L124)."""
+    gw = options.int_opt(ctx.o, "--wert", "--value", s.get("granate_vof", rules.GRENADE_VOF_DEFAULT))  # L274 (M27)
+    stack = commands.grenade_stack(s, ze)
+    crit = ctx.o.get("--kritisch") == "ja"
+    under = z.get("bereich", "offen") != "offen"
+    for m in stack:
+        s["einheiten"][m].setdefault("grenade", []).append(gw)
+        if crit and under:
+            s["einheiten"][m]["grenade_critical"] = True  # L154 [RULE 7.10.3 p.55] also for enemy grenades
+        elif crit:
+            s["einheiten"][m]["grenade"].append(gw)
+    where = f" (stack under {z['bereich']})" if under else ""
+    ctx.prot.append(f"{ctx.n}: Grenade VOF {gw} on {', '.join(stack)}{where} [7.10.1]")
+    if crit:
+        ctx.prot.append(
+            "Critical Hit: combined Grenade/Critical Hit marker, the stack loses its cover benefit [7.10.3]"
+            if under
+            else f"Critical Hit: a second Grenade VOF on {ze} [7.10.3]"
+        )
+    commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot, ctx.n)
+
+
+def _apply_concentrate_hit(s, ctx, zk, ze):
+    """[RULE 7.11 p.56] Concentrated Fire marker on the target (stack under a cover marker, 7.11.2)."""
+    commands.cf_target_check(s, zk, ze, ctx.e, side="US")  # L150 [RULE 7.11.1, 5.2.2 Fig 3]
+    for _m in cf_stack(s, ze):
+        s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
+    ctx.e["konzentriert"] = True
+    ctx.prot.append(
+        f"{ctx.n}: Concentrated Fire marker on {ze} (stack: {', '.join(cf_stack(s, ze))}; -1 NCM, cumulative) [7.11]"
+    )
+    commands.cf_critical(s, ze, ctx.o, ctx.prot)  # L154 [RULE 7.11.4]
+    if combat.fire_ammo(ctx.e):  # L173
+        combat.ammo_use(s, ctx.n, ctx.e, 1, "successful Concentrate Fire", ctx.prot)
+
+
+def _enemy_grenade_concentrate(s, ctx):
+    """cmd_feindaktion: 'grenade' in a or 'concentrate' in a (prompt, Deep Bunker exit, target, hit or miss; L272)"""
+    mode, grenade_pb, g_without_pdf, rg = _grenade_mode(s, ctx)
+    _grenade_prompt(s, ctx, mode, grenade_pb)
+    if "grenade" in ctx.a:
+        # a drawn Grenade Attack result (also 'Grenade Attack (or Concentrate Fire)') leaves the Deep Bunker [CSR 5];
+        # before the 'not firing' check, so a target tie can be settled with --target (L273, review M20)
+        _leave_deep_bunker(s, ctx)
+    zk = _grenade_target_card(s, ctx, grenade_pb, g_without_pdf, rg)
     if (
         state.is_v4(s)
-        and "grenade" in ctx.a
+        and mode == "grenade"
         and not grenade_pb
         and combat.ammo(ctx.e)
         and (ctx.e.get("vof_rating") == "G" or ctx.e.get("grenade_ranged"))
@@ -661,61 +1052,33 @@ def _enemy_grenade_concentrate(s, ctx):
     if grenade_pb and cv and cv["typ"] in rules.STRUCTURES:
         # [RULE 5.3 p.37] Grenade Attack against a Point Blank opponent: unit leaves Bunker/Pillbox and becomes Exposed
         ctx.e["bereich"] = "offen"
-        commands.mark(ctx.e, "Exposed")
+        commands.mark(ctx.e, rules.EXPOSED)
         ctx.prot.append(f"{ctx.n} leaves {cv['typ']} {cv['id']} for the Point Blank attack, Exposed [5.3 p.37]")
+    grenade_hit = mode == "grenade" and (zk == ctx.e["karte"] or ctx.e.get("vof_rating") == "G" or rg)
     if ctx.o["--erfolg"] == "ja":
         ze = ctx.o.get("--einheit")
         if not ze:
             raise rules.Violation(f"specify --unit=<target unit> (cover stack or random unit without cover on {zk})")
-        z = state.unit(s, ze)
+        z = grenade_target_check(s, zk, ze, ctx.e) if grenade_hit else state.unit(s, ze)  # L265 (M11)
         if zk == ctx.e["karte"]:
             best = largest_targets(s, zk)  # L143 [RULE 8.6.1B p.66] largest target first on the own card
             if best and ze not in best:
                 raise rules.Violation(
                     f"{ctx.n} targets the largest target on its card first: {', '.join(best)} (equal size: R#) [RULE 8.6.1B p.66]"
                 )
-        gw = int(ctx.o.get("--wert", s.get("granate_vof", -3)))  # Normandy p.13: German Grenade Attacks are also -4
-        if "grenade" in ctx.a and (zk == ctx.e["karte"] or ctx.e.get("vof_rating") == "G" or rg):
-            # [RULE 7.10.1 p.54] one unit out of cover or the whole stack under its Cover marker (L124)
-            stack = commands.grenade_stack(s, ze)
-            crit = ctx.o.get("--kritisch") == "ja"
-            under = z.get("bereich", "offen") != "offen"
-            for m in stack:
-                s["einheiten"][m].setdefault("grenade", []).append(gw)
-                if crit and under:
-                    s["einheiten"][m]["grenade_critical"] = True  # L154 [RULE 7.10.3 p.55] also for enemy grenades
-                elif crit:
-                    s["einheiten"][m]["grenade"].append(gw)
-            where = f" (stack under {z['bereich']})" if under else ""
-            ctx.prot.append(f"{ctx.n}: Grenade VOF {gw} on {', '.join(stack)}{where} [7.10.1]")
-            if crit:
-                ctx.prot.append(
-                    "Critical Hit: combined Grenade/Critical Hit marker, the stack loses its cover benefit [7.10.3]"
-                    if under
-                    else f"Critical Hit: a second Grenade VOF on {ze} [7.10.3]"
-                )
-            commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot, ctx.n)
+        if grenade_hit:
+            _apply_grenade_hit(s, ctx, zk, ze, z)
         else:
-            commands.cf_target_check(s, zk, ze, ctx.e, side="US")  # L150 [RULE 7.11.1, 5.2.2 Fig 3]
-            for _m in cf_stack(s, ze):
-                s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
-            ctx.e["konzentriert"] = True
-            ctx.prot.append(
-                f"{ctx.n}: Concentrated Fire marker on {ze} (stack: {', '.join(cf_stack(s, ze))}; -1 NCM, cumulative) [7.11]"
-            )
-            commands.cf_critical(s, ze, ctx.o, ctx.prot)  # L154 [RULE 7.11.4]
-            if combat.ammo(ctx.e):
-                combat.ammo_use(s, ctx.n, ctx.e, 1, "successful Concentrate Fire", ctx.prot)
+            _apply_concentrate_hit(s, ctx, zk, ze)
+    elif mode == "grenade" and zk == ctx.e["karte"]:
+        state.card(s, zk)["grenade_miss"] = True
+        ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk} [7.10.4]")
+        ze = ctx.o.get("--einheit")
+        commands.grenade_back_notes(
+            s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
+        )
     else:
-        if "grenade" in ctx.a and zk == ctx.e["karte"]:
-            state.card(s, zk)["grenade_miss"] = True
-            ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk} [7.10.4]")
-            ze = ctx.o.get("--einheit")
-            commands.grenade_back_notes(
-                s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
-            )
-        else:
-            ctx.prot.append(f"{ctx.n}: attempt failed")
+        ctx.prot.append(f"{ctx.n}: attempt failed")
 
 
 def _is_grenade_concentrate(s, ctx):
@@ -766,7 +1129,7 @@ def _enemy_rally(s, ctx):
                 f"Rally under VOF: {kz} cards (base 2, experience {ez}), word 'Rally'; --success=yes|no [6.5.1]"
             )
         if not ctx.under_vof or ctx.o["--erfolg"] == "ja":
-            ctx.e["status"].remove("Pinned")
+            ctx.e["status"].remove(rules.PINNED)
             ctx.prot.append(f"{ctx.n}: Pinned marker removed, VOF Basic again [6.5.1]")
         else:
             ctx.prot.append(f"{ctx.n}: Rally failed")
@@ -774,7 +1137,7 @@ def _enemy_rally(s, ctx):
         if ctx.under_vof and ctx.o.get("--erfolg") not in ("ja", "nein"):
             raise rules.Violation("Flip to Front under VOF: 2 cards, word 'Rally'; --success=yes|no [4.2.3f]")
         if not ctx.under_vof or ctx.o["--erfolg"] == "ja":
-            ctx.e["status"].remove("Fire Team side")
+            ctx.e["status"].remove(rules.FIRE_TEAM_SIDE)
             ctx.prot.append(f"{ctx.n}: back to the front side [4.2.3f]")
         else:
             ctx.prot.append(f"{ctx.n}: Rally failed")
@@ -816,12 +1179,7 @@ def _enemy_move_towards(s, ctx):
             "Move towards closest Casualty: --target=<adjacent card towards the closest Casualty> [LAT/Pinned Hierarchy]"
         )
     commands.diagonal_pdf_check(s, ctx.e, target)  # L131 [RULE 5.1.2 p.32]
-    combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
-    commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)
-    ctx.e["karte"], ctx.e["bereich"] = target, "offen"
-    commands.mark(ctx.e, "Exposed")
-    ctx.prot.append(f"{ctx.n} to {target} (towards Casualty), Exposed [8.6.1C]")
-    fire.fire_after_move(s, ctx.n, ctx.prot)
+    move_enemy(s, ctx.n, target, ctx.prot, cover=False, how="moves towards the Casualty")  # in the open, as before
 
 
 def _is_move_towards(s, ctx):
@@ -836,8 +1194,7 @@ def closest_opponent_cards(s, e):
     occ = sorted(
         k
         for k, c in s["karten"].items()
-        if not c.get("staging")
-        and any(s["einheiten"][m]["typ"] != "Casualty" for m in state.units_on(s, k, opp))
+        if not c.get("staging") and any(s["einheiten"][m]["typ"] != "Casualty" for m in state.units_on(s, k, opp))
     )
     if not occ:
         return []
@@ -871,6 +1228,7 @@ def _enemy_infiltrate(s, ctx):
         )
     if not geometry.adjacent(s, ctx.e["karte"], target):
         raise rules.Violation(f"{target} is not adjacent to {ctx.e['karte']} [RULE 5.1.2 p.31]")
+
     def _any_vof(k):  # a VOF marker of either side on the card [5.1.4]
         return any(fire.vof_against(s, k, side) is not None for side in ("US", "Feind"))
 
@@ -887,19 +1245,27 @@ def _enemy_infiltrate(s, ctx):
         )
     state.card(s, target)
     commands.diagonal_pdf_check(s, ctx.e, target)  # L131
-    combat.ammo_surplus(s, ctx.n, ctx.e, ctx.e["karte"], ctx.prot)  # L145 [RULE 8.11 p.68]
-    ctx.e["karte"], ctx.e["bereich"] = target, "offen"
-    if ctx.o["--erfolg"] == "nein":
-        commands.mark(ctx.e, "Exposed")
-    ctx.prot.append(
-        f"{ctx.n} to {target}" + (", not Exposed (infiltrated)" if ctx.o["--erfolg"] == "ja" else ", Exposed")
-    )
-    advance_cover(s, ctx.e, ctx.n, target, ctx.prot)
-    fire.fire_after_move(s, ctx.n, ctx.prot)
+    # L264 (review M21): the Grenade marker now expires here as well (move_enemy)
+    move_enemy(s, ctx.n, target, ctx.prot, exposed=ctx.o["--erfolg"] == "nein", how="infiltrates", rule="8.6, 5.1.4")
 
 
 def _is_infiltrate(s, ctx):
     return "infiltrate" in ctx.a
+
+
+@dataclasses.dataclass
+class EnemyActionCtx:
+    """The working record of one enemy action (cmd_enemy_action; review Struktur 10: a dataclass instead of a
+    SimpleNamespace). The handlers of ENEMY_ACTION_HANDLERS read it and append to prot."""
+
+    a: str  # the drawn result, lower case (the handler tests match on it)
+    action: str  # the result as given
+    e: dict  # the enemy unit
+    n: str  # its name
+    o: dict  # parsed options
+    prot: list = dataclasses.field(default_factory=list)  # protocol lines
+    under_vof: bool = False  # the unit's card is under friendly VOF
+    origin_card: typing.Optional[str] = None  # card before the action
 
 
 ENEMY_ACTION_HANDLERS = [
@@ -918,27 +1284,33 @@ ENEMY_ACTION_HANDLERS = [
 ]
 
 
+ENEMY_ACTION_USAGE = 'enemyaction <enemy> "<result>" [--target=K] [--success=yes|no] [--unit=<target>]'
+
+
 def cmd_enemy_action(s, args):
+    rules.need(args, 2, ENEMY_ACTION_USAGE)  # L269 (review H12)
     n = args[0]
     e = state.unit(s, n)
     if e["seite"] != "Feind":
         raise rules.Violation(f"{n} is not an enemy")
     action = args[1]
-    event_rally = s["phase"] == "3.4.1" and n in s.get("rally_offen", []) and action.lower().startswith("rally")
-    if s["phase"] != "3.4.2" and not event_rally:
-        raise rules.Violation(f"Enemy actions only in the Enemy Activity Check segment 3.4.2, currently {s['phase']}")
+    event_seg, check_seg = enemy_segments(s)  # L261 (review H2): defensive missions use 3.2.1/3.2.2
+    event_rally = s["phase"] == event_seg and n in s.get("rally_offen", []) and action.lower().startswith("rally")
+    if s["phase"] != check_seg and not event_rally:
+        raise rules.Violation(
+            f"Enemy actions only in the Enemy Activity Check segment {check_seg}, currently {s['phase']}"
+        )
     o = options.parse_opts(args[2:])
     prot = []
     a = action.lower()
     if event_rally:
         s["rally_offen"].remove(n)
-    if e.get("unbeweglich") and any(w in a for w in ("fall back", "move", "infiltrate", "advance")):
+    # L270: 'move' alone also matched 'Move into or Seek Cover', which an immobile AT gun may do
+    if e.get("unbeweglich") and any(w in a for w in ("fall back", "move towards", "infiltrate", "advance")):
         raise rules.Violation(f"{n} is an immobile AT gun: draw the result again [RULE 8.12 p.68]")
     origin_card = e["karte"]
     under_vof = fire.vof_against(s, e["karte"], "Feind") is not None
-    ctx = types.SimpleNamespace(
-        a=a, action=action, e=e, n=n, o=o, prot=prot, under_vof=under_vof, origin_card=origin_card
-    )
+    ctx = EnemyActionCtx(a=a, action=action, e=e, n=n, o=o, prot=prot, under_vof=under_vof, origin_card=origin_card)
     for test, handler in ENEMY_ACTION_HANDLERS:
         if test(s, ctx):
             handler(s, ctx)
@@ -949,7 +1321,7 @@ def cmd_enemy_action(s, args):
         s["einheiten"][n]["check_offen"] = False
         e2 = s["einheiten"][n]
         if state.is_v4(s) and e2["karte"] != origin_card:
-            contact.request_mine_check(s, [n], e2["karte"], prot, "enemy enters mine card")
+            # the mine check of the new card is requested by move_enemy (L264)
             if is_sniper(e2) and not any(
                 geometry.los(
                     s, e2["karte"], k, ha=geometry.height_bonus(s, e2), hb=geometry.card_height_bonus(s, k, "US")
@@ -968,6 +1340,9 @@ def cmd_enemy_action(s, args):
 
 
 def remove_enemy(s, n, prot, reason="", pc=False):
+    """Enemy counter off the board, back to the pool [8.3] (Fall Back off the map edge, Sniper/Spotter removal, PC
+    return). Not routed through combat.remove_from_play: the counter returns to the counter mix at once, so it is
+    not listed as Removed from Play (L449); package and ammo marker are handled here."""
     e = s["einheiten"][n]
     kid = e["karte"]
     if pc and not state.card(s, kid).get("pc"):
@@ -1011,8 +1386,8 @@ def choose_sniper_targets(s, prot):
     s["sniper_offen"] = {}
     for n in [m for m, e in s["einheiten"].items() if is_sniper(e) and fire.is_firing(e) and not state.pinned(e)]:
         kid = fire.effective_fire_target(s, n)
-        candidate = [m for m in state.units_on(s, kid, state.opponent_of_side(s["einheiten"][n]["seite"]))]
-        exp = [m for m in candidate if "Exposed" in s["einheiten"][m]["status"]]
+        candidate = state.units_on(s, kid, state.opponent_of_side(s["einheiten"][n]["seite"]))
+        exp = [m for m in candidate if rules.EXPOSED in s["einheiten"][m]["status"]]
         if exp:
             candidate = exp
         if len(candidate) == 1:
@@ -1028,6 +1403,7 @@ def choose_sniper_targets(s, prot):
 
 
 def cmd_sniper(s, args):
+    rules.need(args, 2, "sniper <sniper> <target unit>")  # L269 (review H12)
     n, z = args[0], args[1]
     candidate = s.get("sniper_offen", {}).get(n)
     if not candidate:
@@ -1041,52 +1417,6 @@ def cmd_sniper(s, args):
     prot = [f"Sniper VOF (-3) from {n} on {z} [7.15 p.57]"]
     state.save_state(s, "; ".join(prot), "7.15 p.57")
     briefing.print_board(prot, s)
-
-
-def enemy_row_v4(s, n):
-    """Returns a hierarchy row for cases v3 does not know, otherwise None."""
-    e = s["einheiten"][n]
-    if e.get("ooa_fallback") and state.fire_team_side(e) and e.get("spotted"):
-        return (
-            "O-A Out-of-Ammo team on Fire Team side, Spotted: Fall Back instead of hierarchy [8.11 p.68]",
-            "Auto",
-            {"Auto": "Fall Back"},
-        )
-    if state.pinned(e) or state.is_lat(e) or state.fire_team_side(e):
-        return None
-    if is_sniper(e):
-        cv = geometry.cover_marker(s, e)
-        if cv and cv["typ"] in ("Foxholes", "Trench", "Bunker", "Pillbox", "Deep Bunker", "Cave"):
-            return (
-                "S3 Sniper in a field fortification stays put even when Spotted [8.8 Exception]",
-                "Auto",
-                {"Auto": "No Action"},
-            )
-        if e.get("spotted"):
-            return (
-                "S1 Sniper Spotted: Fall Back until out of LOS, then Unspotted again [8.8 p.67]",
-                "Auto",
-                {"Auto": "Fall Back"},
-            )
-        return "S2 Sniper Unspotted: fires by target priority or does nothing [8.8 p.67]", "Auto", {"Auto": "No Action"}
-    if e.get("spotter"):
-        if e.get("missionen", 0) <= 0:
-            return (
-                "SP0 Spotter without fire missions: remove [8.10 p.68]",
-                "Auto",
-                {"Auto": "Remove (no fire missions left)"},
-            )
-        z = spotter_target(s, n)
-        if not z:
-            return "SP2 Spotter without target in LOS: nothing [8.10 p.68]", "Auto", {"Auto": "No Action"}
-        tk = s.get("feind_target", {}).get(e.get("typname"))
-        k = e.get("karten_folge", 3) + (1 if tk == z else 0)
-        return (
-            f"SP1 Spotter: Call for Fire on {z} ({k} cards{' incl. +1 Target marker' if tk == z else ''}, burst symbol; experience already included) [8.10 p.68]",
-            "Auto",
-            {"Auto": f"Call for Fire --ziel={z}"},
-        )
-    return None
 
 
 def spotter_target(s, n):
@@ -1117,60 +1447,6 @@ def spotter_target(s, n):
     if len(candidate) > 1:
         s.setdefault("_hinweise", []).append(f"Spotter targets tied: {', '.join(candidate)}; choose by R# [8.10]")
     return candidate[0]
-
-
-def enemy_row_offensive(s, n, opponent_present, cover, firing_):
-    """[PLAYER AID Enemy Offensive Activity Check Hierarchy] Columns Assault and Overrun."""
-    e = s["einheiten"][n]
-    ov = s.get("feind_taktik") == "Overrun"
-    if opponent_present and not cover:
-        return (
-            "O1 on a card with opposing units, without cover",
-            "6" if ov else "5",
-            {"1": "No Action", "2": "Fall Back", "3-4": "Advance Straight Ahead", "5-6": "Grenade Attack"}
-            if ov
-            else {"1": "No Action", "2-3": "Move into or Seek Cover", "4": "Fall Back", "5": "Grenade Attack"},
-        )
-    if opponent_present:
-        return (
-            "O2 on a card with opposing units, under cover",
-            "6" if ov else "5",
-            {"1": "No Action", "2": "Fall Back", "3-4": "Advance Straight Ahead", "5-6": "Grenade Attack"}
-            if ov
-            else {"1": "No Action", "2": "Fall Back", "3-5": "Grenade Attack"},
-        )
-    if e.get("out_of_ammo") and e.get("vof_rating") in ("A", "G", "H"):
-        return (
-            "O3 A/G!/H with Out of Ammo",
-            "2" if ov else "3",
-            {"1": "No Action", "2": "Advance Straight Ahead"} if ov else {"1-2": "No Action", "3": "Fall Back"},
-        )
-    rgz = leader_rg_target(s, n) if state.is_v4(s) else None
-    if rgz:
-        # L89 [RULE 8.9 p.67] Leader with Rifle Grenade as a G! unit with a target along the card's PDF (offensive table O4)
-        return (
-            f"O4 Leader with Rifle Grenade ({e.get('rifle_grenades')} rounds) as G! along the PDF to {rgz} [8.9 p.67]",
-            "Auto" if ov else "4",
-            {"Auto": "Grenade Attack"}
-            if ov
-            else {"1": "No Action", "2-3": "Grenade Attack", "4": "Advance Straight Ahead"},
-        )
-    if e.get("vof_rating") in ("A", "G", "H") and (firing_ or (e.get("vof_rating") == "G" and fire_candidates_g(s, n))):
-        # L89: player aid O4: Assault 1/4 No Action, 2-3/4 Grenade Attack, 4/4 Advance; Overrun Auto Grenade Attack (previously swapped)
-        return (
-            "O4 A/G!/H with a valid target along the PDF",
-            "Auto" if ov else "4",
-            {"Auto": "Grenade Attack (or Concentrate Fire)"}
-            if ov
-            else {"1": "No Action", "2-3": "Grenade Attack (or Concentrate Fire)", "4": "Advance Straight Ahead"},
-        )
-    return (
-        "O5 all other cases",
-        "3" if ov else "4",
-        {"1": "Infiltrate towards closest opposing unit", "2-3": "Advance Straight Ahead"}
-        if ov
-        else {"1": "No Action", "2-3": "Infiltrate towards closest opposing unit", "4": "Advance Straight Ahead"},
-    )
 
 
 def fire_candidates_g(s, n):
@@ -1255,6 +1531,11 @@ def largest_target_note(s, e):
     return f"; on the own card the largest target first: {', '.join(best)}" if best else ""
 
 
+def restricted_mover(e):
+    """[RULE 4.2.5 p.26] Pinned units and Paralyzed/Litter Teams move to an adjacent card only without VOF there (E90)."""
+    return state.pinned(e) or e.get("typ") in ("Paralyzed Team", "Litter Team")
+
+
 def fall_back_candidates(s, e):
     """[RULE 8.6.3 p.66] Fall Back towards the own side (one row towards the enemy edge, straight or diagonal, cards that exist):
     2. cards out of LOS of every US unit; 3. highest cover value (terrain C&C plus the best free cover marker). Returns the
@@ -1265,26 +1546,28 @@ def fall_back_candidates(s, e):
         k = geometry.card_at(s, c["reihe"] + 1, sp)
         if k and not state.card(s, k).get("staging"):
             cands.append(k)
+    if restricted_mover(e):
+        # E90/L213 [RULE 4.2.5 p.26, 8.6.1C p.66] reading B: Pinned units, Paralyzed and Litter Teams need no
+        # friendly-occupied card (8.6.1C), but 'with no VOF on it' still applies
+        cands = [k for k in cands if fire.vof_against(s, k, e["seite"]) is None]
     if not cands:
         return []
     us_cards = {x["karte"] for x in s["einheiten"].values() if x["seite"] == "US" and x.get("karte") in s["karten"]}
 
-    def seen(k):
-        return any(geometry.los(s, uk, k, hb=geometry.card_height_bonus(s, k, "Feind"))[0] for uk in us_cards)
+    def seen(k):  # L271: with the US height bonus like every other LOS pair
+        return any(
+            geometry.los(
+                s, uk, k, ha=geometry.card_height_bonus(s, uk, "US"), hb=geometry.card_height_bonus(s, k, "Feind")
+            )[0]
+            for uk in us_cards
+        )
 
     hidden = [k for k in cands if not seen(k)]
     pool = hidden or cands
 
     def cover_value(k):
         ck = state.card(s, k)
-        free = [
-            cv["wert"]
-            for cv in ck.get("cover", [])
-            if not any(
-                s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == cv["id"]
-                for m in state.units_on(s, k)
-            )
-        ]
+        free = [cv["wert"] for cv in state.free_cover(s, k, side="Feind")]
         return (ck.get("cc") or 0) + (max(free) if free else 0)
 
     top = max(cover_value(k) for k in pool)
@@ -1302,21 +1585,3 @@ def leader_present(s, e):
         and x is not e
         for x in s["einheiten"].values()
     )
-
-
-LAT_WITH_LEADER = {
-    "P1": ("4", {"1-2": "Move into or Seek Cover", "3": "Rally", "4": "Fall Back"}),
-    "P2": ("3", {"1": "No Action", "2-3": "Rally"}),
-    "P3": ("3", {"1": "No Action", "2": "Move into or Seek Cover", "3": "Rally"}),
-    "P4": ("Auto", {"Auto": "Rally"}),
-    "P6": ("Auto", {"Auto": "Grenade Attack"}),
-    "P7": ("3", {"1": "No Action", "2-3": "Infiltrate to nearest opponent"}),
-    "P8": ("4", {"1": "No Action", "2-3": "Move into or Seek Cover", "4": "Fall Back"}),
-    "P9": ("3", {"1": "No Action", "2": "Grenade Attack", "3": "Fall Back"}),
-    "P10": ("Auto", {"Auto": "Rally"}),
-    "P11": ("Auto", {"Auto": "Rally"}),
-    "P12": ("Auto", {"Auto": "Fall Back with Casualty"}),
-    "P13": ("2", {"1": "No Action", "2": "Move towards closest Casualty"}),
-    "P14": ("2", {"1": "No Action", "2": "Rally"}),
-    "P15": ("2", {"1": "No Action", "2": "Rally"}),
-}

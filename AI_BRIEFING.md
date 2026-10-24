@@ -49,7 +49,7 @@ VOF, PDF, Crossfire and Activity Level are derived by the tool from the units' f
   source card has another PDF. PDF lists are sorted by source card number.
 - Vertical short lists, at most two columns, no wide tables, no arrows, no code blocks.
 - **One rule step per message**, then stop and wait for the player.
-- Show remaining Commands only as a total ("5 Commands").
+- Show Commands as a total plus how many can still be spent in this impulse ("5 Commands, 2 still to spend").
 - End every answer with the tool's check line: `CHECKSTAMP OK Turn X Phase Y Entry N`.
 
 ## 5. Shorthand the player uses
@@ -77,6 +77,8 @@ python3 tool/fof.py gi ? 3                      # General Initiative
 python3 tool/fof.py enemycheck                  # 3.4.2: hierarchy row and R# column
 python3 tool/fof.py enemyaction "German LMG 2" "No Action"
 python3 tool/fof.py pc reveal 24 C ; python3 tool/fof.py pc 24 ; python3 tool/fof.py pc contact 24 6 --direction=Right
+python3 tool/fof.py vehicle move "M4 Sherman 1" 34 ; python3 tool/fof.py vehicle done "M4 Sherman 1"   # 3.6 vehicles
+python3 tool/fof.py at 7                        # AT number read off the drawn card
 python3 tool/fof.py ncm "1/2" ; python3 tool/fof.py hit "1/2" HIT PF
 python3 tool/fof.py endturn                     # 3.8 Clean Up, next turn
 ```

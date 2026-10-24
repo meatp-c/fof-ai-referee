@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 import re
 import sys
 
@@ -32,7 +33,7 @@ Commands:"""
 # Handler None: handled directly in main() (needs no game state or prints the briefing).
 COMMANDS = [
     # (english, german, handler, usage, description)
-    ("new", "neu", None, "new <setup.json> [game]", "create a game from a mission setup file"),
+    ("new", "neu", None, "new <setup.json> [game] [--force]", "create a game from a mission setup file"),
     ("status", "stand", None, "status", "board briefing (also written to <game>/BRIEFING.md)"),
     ("check", "pruefung", None, "check", "consistency check of the game state (CHECKSTAMP line)"),
     ("help", "hilfe", None, "help [<command>]", "list the commands or show one command's usage"),
@@ -52,17 +53,23 @@ COMMANDS = [
         "extend",
         "erweitern",
         "setup.cmd_extend",
-        "extend <row> <column> <type> [...]",
+        "extend <row> <column> <type> [--hill=n] [--edges=..] [--no=..]",
         "map extension (8.4.5), off-limits to US units outside the boundaries",
     ),
     (
         "objective",
         "ziel",
         "setup.cmd_objective",
-        "objective primary|secondary|ap|ccp|concentration|route|cop|phaseline ...",
+        "objective primary|secondary|ap|ccp|cop <card> | objective route <1-4> <card> | objective concentration <card> <fire asset> | objective phaseline <n> <row>",
         "Tactical Controls (2.4.1)",
     ),
-    ("set", "werte", "setup.cmd_values", "set <unit> field=value ...", "enter unverified counter values before turn 1"),
+    (
+        "set",
+        "werte",
+        "setup.cmd_values",
+        "set <unit> field=value ... [--reason=..]",
+        "enter counter values (before turn 1, during play only with --reason)",
+    ),
     (
         "setup",
         "aufstellen",
@@ -137,7 +144,7 @@ COMMANDS = [
     (
         "undo",
         "zurueck",
-        "state.cmd_undo",
+        "history.cmd_undo",
         "undo <entry no> --reason=..",
         "back to the state after protocol entry <no> (snapshots of the last 40 entries); lists the discarded entries",
     ),
@@ -225,7 +232,7 @@ COMMANDS = [
         "radio | radio check <hq> [<unit>] | radio damage <card> <device> intact|destroyed",
         "communication overview and checks (4.3, 4.3.5)",
     ),
-    ("line", "leitung", "comms.cmd_line", "line <card> ok|cut | line lay <card>", "phone lines (4.3.4)"),
+    ("line", "leitung", "comms.cmd_line", "line <card> ok|cut | line lay <card> <unit>", "phone lines (4.3.4)"),
     ("runner", "runner", "comms.cmd_runner", "runner", "runner overview (4.3.2); orders 4.2.1f/g/h"),
     (
         "drop",
@@ -252,6 +259,20 @@ COMMANDS = [
     ),
     ("campaign", "kampagne", "campaign.cmd_campaign", "campaign", "Mission Log (2.3.1, 12.2)"),
     (
+        "vehicle",
+        "fahrzeug",
+        "vehicles.cmd_vehicle",
+        "vehicle [status] | move <v> <card> [--area=] | fire <unit> <target> | cf <v> --unit= --success= | spot <v> --target= --success= | done <unit> | enemy [--unit=] [--target=] | target <R#> | react <unit> <target> | traffic <terrain> normal|slow|no",
+        "vehicle actions in the AT Combat & Vehicle Movement Phase 3.6 (10.5)",
+    ),
+    (
+        "at",
+        "at",
+        "vehicles.cmd_at",
+        "at <AT number>|:<card no>|grenade yes|no|again|stop",
+        "resolve the open AT draw (10.5.3, 10.6)",
+    ),
+    (
         "patrol",
         "patrouille",
         "campaign.cmd_patrol",
@@ -262,6 +283,39 @@ COMMANDS = [
 CMD_ALIASES = {en: de for en, de, *_ in COMMANDS}
 BY_GERMAN = {de: (en, de, handler, usage, desc) for en, de, handler, usage, desc in COMMANDS}
 
+# Minimum number of positional (non --option) arguments, checked once in main() against the usage of the table (review
+# H12, L337). Only commands whose every form needs these arguments; forms that depend on a sub-word are checked in
+# their handlers, with the same usage text (usage()).
+MIN_ARGS = {
+    "new": 1,
+    "rule": 1,
+    "search": 1,
+    "note": 1,
+    "terrain": 2,
+    "extend": 3,
+    "objective": 2,
+    "set": 2,
+    "setup": 1,
+    "multistory": 1,
+    "illum": 2,
+    "undo": 1,
+    "line": 2,
+    "drop": 2,
+    "reconstitute": 1,
+}
+assert set(MIN_ARGS) <= set(CMD_ALIASES), "MIN_ARGS keys are English command names"
+
+
+def usage(command):
+    """Usage text of a command (English or German name) from the command table: the one source for handlers (L337)."""
+    return BY_GERMAN[CMD_ALIASES.get(command, command)][3]
+
+
+def check_min_args(cmd, args):
+    """cmd: German command name; a Violation with the usage if positional arguments are missing."""
+    en = BY_GERMAN[cmd][0]
+    rules.need([a for a in args if not a.startswith("--")], MIN_ARGS.get(en, 0), usage(cmd))
+
 
 SUBWORD_ALIASES = {  # per (German) command: English positional word -> German word
     "phase": {"next": "weiter"},
@@ -270,6 +324,17 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
     "xp": {"add": "plus", "spend": "ausgeben", "promote": "befoerdern"},
     "granate": {"response": "antwort"},
     "ncm": {"next": "weiter"},
+    "fahrzeug": {
+        "move": "bewegen",
+        "fire": "feuer",
+        "done": "fertig",
+        "enemy": "feind",
+        "target": "ziel",
+        "react": "reaktion",
+        "traffic": "verkehr",
+        "spot": "spotten",
+    },
+    "at": {"grenade": "granate", "yes": "ja", "no": "nein", "again": "nochmal"},
     "pc": {"reveal": "aufdecken", "set": "setzen", "clear": "frei", "contact": "kontakt"},
     "ziel": {"primary": "primaer", "secondary": "sekundaer", "concentration": "konzentration"},
     "leitung": {"lay": "legen"},
@@ -290,6 +355,11 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
         "add": "dazu",
     },
 }
+
+
+def _alias_item(x):
+    head, sep, tail = x.rpartition(":")
+    return head + sep + options.VALUE_ALIASES.get(tail, tail) if sep else options.VALUE_ALIASES.get(x, x)
 
 
 def argv_to_german(argv):
@@ -315,12 +385,9 @@ def argv_to_german(argv):
                     ("corner", "diagonal"),
                 ):
                     v = v.replace(en_, de_)
-            elif eq:
-                v = (
-                    ",".join(options.VALUE_ALIASES.get(x, x) for x in v.split(","))
-                    if k in ("--richtung",)
-                    else options.VALUE_ALIASES.get(v, v)
-                )
+            elif eq and k in options.ENUM_VALUE_OPTIONS:
+                # L222: value aliases only for enumerated options; per-unit lists ("1/1:yes,2/1:no") item by item
+                v = ",".join(_alias_item(x) for x in v.split(","))
             out.append(k + eq + v)
         else:
             out.append(sub.get(a, a))
@@ -328,12 +395,18 @@ def argv_to_german(argv):
 
 
 def cmd_rule(args):
+    rules.need(args, 1, usage("rule"))
     idx = json.loads((state.DATA / "regelindex.json").read_text(encoding="utf-8"))
     company_ = (state.DATA / "regelbuch_kompakt.txt").read_text(encoding="utf-8").split("\n")
     nr = args[0]
     if nr not in idx:
         sys.exit(f"Rule {nr} not in the index. Example: 4.2.2a is part of 4.2.2.")
-    start = idx[nr]["zeile_kompakt"]
+    start = idx[nr].get("zeile_kompakt")
+    if not start:  # L338: an index entry without a line in the compact text (zeile_kompakt null)
+        raise rules.Violation(
+            f"Rule {nr} ({idx[nr].get('titel', '?')}, p.{idx[nr].get('seite', '?')}) has no line in the compact rule text; "
+            "look it up in the rulebook or with fof.py search"
+        )
     following = sorted(
         (v["zeile_kompakt"], k) for k, v in idx.items() if v["zeile_kompakt"] and v["zeile_kompakt"] > start
     )
@@ -347,11 +420,23 @@ def cmd_rule(args):
 
 
 def cmd_search(args):
+    if not " ".join(args).strip():  # L338: an empty term matched every line of the corpus
+        raise rules.Violation(f"Usage: {usage('search')}")
     rx = re.compile(re.escape(" ".join(args)), re.I)
     for f in sorted(state.DATA.glob("*_kompakt.txt")):
         for i, l in enumerate(f.read_text(encoding="utf-8").split("\n"), 1):
             if rx.search(l):
                 print(f"{f.name}:{i}: {l.strip()[:140]}")
+
+
+def cmd_new(args):
+    """Review M5 (L335): 'new' refuses a game folder that already holds a spielstand.json unless --force is given;
+    phase.cmd_new gets the positional arguments only."""
+    o = options.parse_opts(args)
+    pos = [a for a in args if not a.startswith("--")]
+    name = os.environ.get("FOF_PARTIE") or (pos[1] if len(pos) > 1 else "partie1")  # same rule as phase.cmd_new
+    state.check_new_game_folder(name, bool(o.get("--force")))
+    return phase.cmd_new(pos)
 
 
 def resolve(handler):
@@ -384,16 +469,17 @@ def main(argv=None):
         return
     cmd, *args = argv_to_german(argv)
     try:
+        if cmd not in BY_GERMAN:
+            raise rules.Violation(f"Unknown command {cmd}; fof.py help lists the commands")
+        check_min_args(cmd, args)
         if cmd == "hilfe":
             return cmd_help(args)
         if cmd == "neu":
-            return phase.cmd_new(args)
+            return cmd_new(args)
         if cmd == "regel":
             return cmd_rule(args)
         if cmd == "suche":
             return cmd_search(args)
-        if cmd not in BY_GERMAN:
-            raise rules.Violation(f"Unknown command {cmd}; fof.py help lists the commands")
         s = state.load_state()
         if cmd == "stand":
             print(briefing.briefing(s))

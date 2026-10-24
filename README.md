@@ -53,6 +53,7 @@ project/
    (units with their counter values, terrain card values, packages, event tables, fire support, assets).
    Keys stay German, see GLOSSARY.md.
 3. `python3 tool/fof.py new my_mission.json game1` creates the game folder `game1` and makes it current.
+   It refuses a folder that already holds a game; add `--force` to overwrite it.
 4. Before turn 1 the tool lists what is still missing (terrain per card, objectives, setup positions, visibility ...).
    Fill those in with `terrain`, `setup`, `objective`, `visibility`, then `phase next` starts the game.
 
@@ -76,20 +77,28 @@ retreat <unit> [<card>]           3.5.2 retreat of a Paralyzed/Litter Team (mand
 grenade response <unit> --success=yes|no   7.10.5 free grenade response after a Point Blank attack (no Command)
 xp promote <unit> --from=Green|Line --steps=n | xp skill <HQ> <skill>   promotions and skill purchases between missions (12.3, 12.7)
 undo <entry no> --reason=..       restore the state after that entry, lists the discarded entries for the board
+vehicle move <v> <card> | vehicle fire <unit> <target> | vehicle cf <v> --unit= --success= | vehicle spot <v> --target= --success= | vehicle done <unit>
+vehicle enemy | vehicle react <unit> <target> | vehicle traffic <terrain> normal|slow|no   AT Combat & Vehicle Movement Phase 3.6 (10.5)
+at <AT number>|:<card no>         resolve the open AT draw (10.5.3, 10.6)
 ```
 Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c Infiltrate, 4.2.2e Seek Cover,
 4.2.3a Rally, 4.2.4a Spot, 4.2.4c/4.2.4h Platoon Concentrate Fire/Grenade Attack (--success=<unit>:yes|no,..), 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).
 
 ## Scope and limits
-- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 4 and most of mission 5
-  (offensive missions, night patrols, combat patrols, reattempts, counter attacks, campaign experience). Several hundred turns of real play.
+- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 6
+  (offensive missions, night patrols, combat patrols, reattempts, counter attacks, tanks and AT guns, campaign
+  experience). Several hundred turns of real play.
 - One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
   `CHANGELOG.md` lists the changes.
-- Not implemented: vehicles and AT combat (chapter 10), helicopters/air assault, urban combat (13.0).
+- Vehicles and AT combat (chapter 10) cover the WWII rows of the Vehicle and AT Weapons chart as used in Normandy
+  Mission 6. Not implemented: helicopters/air assault, urban combat (13.0), enemy reconstitution (6.5.2).
   Other campaigns need their own setup data and may need code for their special rules.
 - Where the rules are unclear the tool uses a documented reading. `fof.py options` lists these, and output marks
   them as `[open Uxx]`. You can switch them in the setup's `optionen`.
 - The engine trusts the values you enter for draws. It does not draw cards.
+
+## Tests
+`python3 -m pytest tests` runs the unit tests (Python 3.9+, pytest). Tests that need mission data skip in the kit.
 
 ## License
 Code and documentation: MIT, see LICENSE. Rules, charts, cards and mission texts of the game are GMT Games' property and are

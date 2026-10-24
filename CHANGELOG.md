@@ -1,5 +1,52 @@
 # Changelog
 
+## 2026-10-24 (fifth release)
+Engine updates from Normandy Missions 5 and 6 (the first mission with tanks and AT guns) and from a full code review
+of the engine:
+- Vehicles and AT combat (chapter 10): new module `vehicles.py` with the Vehicle and AT Weapons chart (WWII rows, AT
+  modifiers, result V), vehicles as units (crew = steps, Tank HQ as HQ), action 4.2.1i Activate for AT Combat, the
+  AT Combat & Vehicle Movement Phase 3.6 with alternating actions (10.5.1), activation groups (tanks, jeeps, AT guns
+  and AT-capable infantry), trafficability per terrain, move, fire, Concentrate Fire and Spot as plan steps, Reaction
+  Fire, enemy vehicle and AT actions, AT draws (`at <number>`), wrecks with cover, Grenade VOF and friendly fire on
+  vehicles (10.5.3), stacking counts infantry steps only (5.1.5). Commands `vehicle ...` and `at ...`. L187-L196,
+  L200, L201, L205, L214, L290-L305
+- Fire: VOF markers per 6.2.1 (top marker from outside, best friendly and best enemy Point Blank VOF as corner
+  markers); units waiting for a target choice on one card join the first PDF instead of laying a second one (6.3.5);
+  PDF markers that disappear are named for removal; Battalion Fire Mission hint after 3 bursts (7.16.2B); mortars
+  never fire from building cover (7.3.1); Cease Fire is passed to every unit on the card (4.2.4k). L179, L198, L203,
+  L206, L207, L217, L218
+- Grenades and ammo: the grenade marker expires as Grenade Miss when the target seeks cover within its card (7.10.4);
+  rockets are used for grenade attacks only (7.18.1D); jam-prone detection for rocket teams and Out of Ammo units
+  (7.12); new Fire Teams after a jam open fire at once; weapon choice `--weapon=rifle|own` for a unit with its own
+  ranged grenade and a picked-up rifle grenade; Pick Up needs `--what`. L171-L178, L211, L216
+- Enemy: Fall Back of pinned enemies and enemy Paralyzed/Litter Teams avoids cards with a VOF; enemy Seek Cover on
+  village/farm/church cards can find buildings (Normandy CSR 8); removed enemy counters go back to the counter mix and
+  their numbers are reused; one movement path for every enemy move (ammo surplus, grenade expiry, Exposed, cover,
+  fire after move, mine check); the Enemy Activity Check hierarchy is data instead of code; defensive missions use
+  the right enemy segments (3.2.1/3.2.2). L213, L215, L219, L260-L282, L320
+- Capture and retreat: vehicles and pinned units are no captors (3.5.1), `phase next` waits for an open capture,
+  the guard must meet the captor conditions, prisoners leave the board through one removal path. L199, L208, L209,
+  L370-L374
+- Campaign: `reconstitute` only during the reattempt preparation (3.9); mission number in the patrol end text;
+  `patrol next` checks platoon and `--with` before it books anything. L185, L186, L336
+- Input checks everywhere: missing or non-numeric arguments are a VIOLATION with the usage instead of a traceback;
+  options come from an explicit registry (unknown, empty and repeated options are refused); English value aliases
+  (yes/no/open ...) are translated only for enumerations, free text stays untouched; `--move-target-marker` no longer
+  overwrites the Call for Fire target. L192, L212, L220-L223, L230-L257, L330-L338, L373
+- Safety: `new` refuses a folder that already holds a game (`--force` to overwrite) and checks the setup before it
+  switches the current game; the game state is written atomically; a damaged `spielstand.json` names the latest
+  snapshot to restore. L223, L335, L348
+- Initiative and General Initiative prompts name the small number in the star, not the helmet number. L210, L212
+- Speed: one fire map per read-only pass (marker summary, activity level, NCM rows), the state is read once per
+  command, a Platoon Move runs the board-wide fire check once after the last member. L344, L349, L382, L450
+- Code structure (no change in play): `cmd_order`, `cmd_vehicle`, `cmd_at`, `cmd_setup`, `cmd_end_turn` and the
+  briefing split into small functions; segment tables in `phase.py`; dataclasses for the order context; status
+  markers as constants; `undo` lives in `history.py`. L255, L256, L304, L342, L343, L383-L385, L420-L448
+- Tests: 332 pass in a clean copy of the kit; 45 skip because they need the Normandy mission setups or game
+  states, which are not part of the kit (they run in the author's project: 376 pass). Regression games
+  (Normandy M1 357 commands, M4 98 commands) unchanged except one intended correction: a Fire Team that becomes a
+  casualty is now listed as Removed from Play. L350
+
 ## 2026-10-18 (fourth release)
 Engine updates from a rules audit against the rulebook examples and from Normandy Mission 5 play (night combat
 patrols, three platoons one after the other):

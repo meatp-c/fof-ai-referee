@@ -101,11 +101,17 @@ def test_grenade_response_is_offered_and_booked(board, quiet):
     board["einheiten"]["1/1"] = unit("22", vof="S", platoon="1", ziel="22")
     board["einheiten"]["Enemy 1"] = unit("22", side="Feind", vof="S", ziel="22")
     commands.cmd_order(board, ["1st PLT HQ", "1/1", "4.2.4d", "--success=ja", "--unit=Enemy 1"])
-    assert board["granate_antworten"] == [{"werfer": "Enemy 1", "angreifer": "1/1", "karte": "22"}]
+    rec = board["granate_antworten"]
+    assert len(rec) == 1 and {k: rec[0][k] for k in ("werfer", "angreifer", "karte")} == {
+        "werfer": "Enemy 1",
+        "angreifer": "1/1",
+        "karte": "22",
+    }
+    assert rec[0]["zug"] == 2  # L231 (review H9): records carry the turn
     with pytest.raises(rules.Violation, match="draw 2 Action cards"):
         commands.cmd_grenade(board, ["response", "Enemy 1"])
     commands.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
-    assert board["einheiten"]["1/1"]["grenade"] == [-3] and board["granate_antworten"] == []
+    assert board["einheiten"]["1/1"]["grenade"] == [rules.GRENADE_VOF_DEFAULT] and board["granate_antworten"] == []
     with pytest.raises(rules.Violation, match="no open free response"):
         commands.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
 

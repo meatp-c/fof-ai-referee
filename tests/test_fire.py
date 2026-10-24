@@ -91,3 +91,14 @@ def test_ncm_picks_the_strongest_effect_after_modifiers_at_night(board):
     board["einheiten"]["Enemy 1"].pop("grenade")
     rows = combat.ncm_rows(board, "Enemy 1")
     assert rows[0][0].startswith("VOF Heavy") and sum(v for _, v in rows) == -1
+
+
+def test_mortar_does_not_fire_from_strong_building(board):
+    """L203 [RULE 7.3.1 p.52]: no mortar fire from Building cover (Light/Strong Building, Upper Story, Church Tower)."""
+    from fof import fire
+
+    board["karten"]["22"]["cover"] = [{"id": "C1", "typ": "Strong Building", "wert": 3, "feld": False}]
+    board["einheiten"]["Mtr"] = unit(
+        "22", side="Feind", vof="G", rng="C-V", typ="Weapons Team", steps=1, moerser=True, bereich="C1"
+    )
+    assert fire.fire_position_forbidden(board, board["einheiten"]["Mtr"])

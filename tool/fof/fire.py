@@ -1,4 +1,9 @@
-"""Derived fire: VOF, PDF, Crossfire, Activity Level, opening and ceasing fire (6.1 to 6.3)."""
+"""Derived fire: VOF, PDF, Crossfire, Activity Level, opening and ceasing fire (6.1 to 6.3).
+
+Import cycle: fire imports geometry, rules and state at module level; vehicles imports fire, so fire imports vehicles
+inside the function that needs it (open_fire). state in turn imports fire inside marker_summary."""
+
+import contextlib
 
 from . import geometry, rules, state
 
@@ -6,9 +11,9 @@ from . import geometry, rules, state
 def can_fire(e):
     if e.get("deep_bunker") and e.get("bereich") == e["deep_bunker"]:
         return False  # [CSR 5 p.14] Deep Bunker: units inside place no VOF
-    if state.is_mortar(e) and ("Exposed" in e["status"] or e.get("indirekt")):
+    if state.is_mortar(e) and (rules.EXPOSED in e["status"] or e.get("indirekt")):
         return False  # [RULE 7.3.1 p.53] no fire with Exposed; [RULE 7.3.2 p.53] Indirect Lay replaces Direct Lay
-    if e.get("tripod") and "Exposed" in e["status"] and not state.fire_team_side(e):
+    if e.get("tripod") and rules.EXPOSED in e["status"] and not state.fire_team_side(e):
         return False  # [RULE 7.2.1 p.51] tripod MG does not fire with an Exposed marker
     if e.get("vof_rating") == "G" and not state.fire_team_side(e) and not e.get("out_of_ammo"):
         return False  # [RULE 7.3.2 p.53, 6.3.6 p.45] G! units fire only via Grenade Attack (Mortar Team: own PDF, 'nur_pdf')
@@ -71,7 +76,7 @@ def effective_fire_target(s, n):
     return z
 
 
-def grazing(s, e):
+def grazing(e):
     """[RULE 7.2.2 p.51] Grazing Fire: tripod-mounted MG firing at range (not Point Blank) on its Good Order side,
     not Pinned (BGG 3498699: the Pinned VOF has no Grazing Fire) and not Out of Ammo (7.18.2: VOF S). L128"""
     return bool(
@@ -91,7 +96,7 @@ def grazing_cards(s, n):
     (Smoke/Incoming, 6.1.2 p.44, example 4 p.41) is the last card; friendly cards on the line are hit too (note 7.2.2).
     No Grazing Fire at all when the elevation pattern breaks before the target (BGG 3535366, 3558804). L128"""
     e = s["einheiten"][n]
-    if not grazing(s, e) or e["karte"] not in s["karten"] or e["ziel"] not in s["karten"]:
+    if not grazing(e) or e["karte"] not in s["karten"] or e["ziel"] not in s["karten"]:
         return []
     ka, kz = state.card(s, e["karte"]), state.card(s, e["ziel"])
     dr, dc = kz["reihe"] - ka["reihe"], kz["spalte"] - ka["spalte"]
@@ -128,14 +133,63 @@ def grazing_cards(s, n):
     return out
 
 
+_FIRE_MAPS = {}  # id(state) -> fire_map (or None until first use) while a `cached(s)` block is open
+
+
+@contextlib.contextmanager
+def cached(s):
+    """Read-only section (review Effizienz): fire_map(s) is built once and reused by vof_entries and pdfs_to instead of
+    walking every unit (target along the PDF, Grazing Fire LOS per ray card) for every card. Only for code that changes
+    no unit, target, status or marker inside the block (marker summary, activity level, NCM rows and groups).
+    Nested blocks share the outer map."""
+    key = id(s)
+    if key in _FIRE_MAPS:
+        yield
+        return
+    _FIRE_MAPS[key] = None
+    try:
+        yield
+    finally:
+        _FIRE_MAPS.pop(key, None)
+
+
+def fire_map(s):
+    """{card: [names of firing units whose fire reaches the card]}, units in board order: the card along the PDF
+    (effective_fire_target) plus Grazing Fire cards. Includes nur_pdf units (PDF without VOF)."""
+    out = {}
+    for n, e in s["einheiten"].items():
+        if not is_firing(e):
+            continue
+        hit = effective_fire_target(s, n)
+        out.setdefault(hit, []).append(n)
+        for k in grazing_cards(s, n):
+            if k != hit:
+                out.setdefault(k, []).append(n)
+    return out
+
+
+def firing_at(s, kid, keep=None):
+    """(name, unit) of every firing unit whose fire reaches kid, in board order; from the map of an open cached(s)
+    block, otherwise computed. keep(e): cheap filter applied first (spares the PDF walk for units not wanted)."""
+    key = id(s)
+    if key not in _FIRE_MAPS:
+        return [
+            (n, e)
+            for n, e in s["einheiten"].items()
+            if is_firing(e)
+            and (keep is None or keep(e))
+            and (effective_fire_target(s, n) == kid or kid in grazing_cards(s, n))
+        ]
+    if _FIRE_MAPS[key] is None:
+        _FIRE_MAPS[key] = fire_map(s)
+    units = ((n, s["einheiten"][n]) for n in _FIRE_MAPS[key].get(kid, []))
+    return [(n, e) for n, e in units if keep is None or keep(e)]
+
+
 def vof_entries(s, kid):
     """Fire effects on card kid: (typ, wert, quelle, trifft_seite or None=both, von_karte)."""
     out = []
-    for n, e in s["einheiten"].items():
-        if not is_firing(e) or e.get("nur_pdf"):
-            continue
-        if effective_fire_target(s, n) != kid and kid not in grazing_cards(s, n):
-            continue
+    for n, e in firing_at(s, kid, keep=lambda e: not e.get("nur_pdf")):
         pb = e["karte"] == kid
         type_ = "Pinned" if state.pinned(e) else current_vof_rating(e, pb)
         out.append(
@@ -155,19 +209,13 @@ def vof_against(s, kid, side, ignore_mines=False):
     if not tr:
         return None
     best = min(x[1] for x in tr)
-    return [x for x in tr if x[1] == best][0][0], best, [x[2] for x in tr]
+    return next(x for x in tr if x[1] == best)[0], best, [x[2] for x in tr]  # best is the minimum of tr: never empty
 
 
 def pdfs_to(s, kid, target_side):
     """Cards from which fire of the opposing side affects kid from outside."""
-    return {
-        e["karte"]
-        for n, e in s["einheiten"].items()
-        if is_firing(e)
-        and e["karte"] != kid
-        and (effective_fire_target(s, n) == kid or kid in grazing_cards(s, n))
-        and e["seite"] == state.opponent_of_side(target_side)
-    }
+    side = state.opponent_of_side(target_side)
+    return {e["karte"] for _n, e in firing_at(s, kid, keep=lambda e: e["karte"] != kid and e["seite"] == side)}
 
 
 def crossfire(s, kid, target_side):
@@ -183,7 +231,8 @@ def crossfire(s, kid, target_side):
 
 def expected_activity(s):
     """8.1 / Charts 1: No Contact only without any VOF/PDF marker and without a spotted enemy."""
-    vk = [k for k in s["karten"] if vof_entries(s, k)]
+    with cached(s):
+        vk = [k for k in s["karten"] if vof_entries(s, k)]
     occupants = [k for k in vk if state.units_on(s, k)]
     spotted = any(e["seite"] == "Feind" and e.get("spotted") for e in s["einheiten"].values())
     pdf = any(is_firing(e) and e["ziel"] != e["karte"] for e in s["einheiten"].values())
@@ -212,7 +261,7 @@ def fire_position_forbidden(s, e):
         if "Woods" in c.get("terrain", "") or c.get("moerser_verbot"):
             return "Mortars do not fire from Woods [RULE 7.3.1 p.53, FM1 p.36]"
         cv = geometry.cover_marker(s, e)
-        if cv and cv["typ"] in rules.STRUCTURES + ("Building", "Cave"):
+        if cv and cv["typ"] in rules.NO_FIRE_FROM_COVER:  # L203: Light/Strong Building are the CSR 8 names
             return "Mortars do not fire from Building/Bunker/Cave/Pillbox [RULE 7.3.1 p.52]"
     return None
 
@@ -267,7 +316,15 @@ def fire_candidates(s, n):
                 continue
             if arc and geometry.direction(s, e["karte"], kid) != arc:
                 continue  # [RULE 5.3.2 p.37] only in the arrow direction
-        if state.valid_target(s, kid, e["seite"]):
+        targets = state.valid_target(s, kid, e["seite"])
+        if targets and e.get("vof_rating") in ("A", "H", "A/S"):
+            from . import (
+                vehicles,
+            )  # L187 [RULE 10.3 p.71] A/H-rated AT-capable units do not open fire on vehicle-only cards
+
+            if vehicles.at_capable(e) and all(vehicles.is_vehicle(s["einheiten"][m]) for m in targets):
+                continue
+        if targets:
             candidate.append(kid)
     return candidate
 
@@ -374,7 +431,7 @@ def open_fire(s, prot, only=None):
 
 def carried_markers(e):
     """Markers that travel with a moving counter: Pinned, ammo, Out of Ammo, assets, radios (L109)."""
-    out = [m for m in e.get("status", []) if m != "Exposed"]
+    out = [m for m in e.get("status", []) if m != rules.EXPOSED]
     m = e.get("munition")
     if m:
         out.append(f"{m.get('typ', '')} ammo marker {m.get('punkte')}")
@@ -387,16 +444,26 @@ def carried_markers(e):
     return out
 
 
-def fire_after_move(s, n, prot):
-    """6.1.2: movement to another card = Cease Fire, then 6.1.1 again; firing opponents on the new card shift to Point Blank."""
+def cease_fire(e):
+    """The one place a unit stops firing: clears the target and every fire-related working field (L225, review H6:
+    a stale _rauch_ziel used to hijack a later Point Blank target)."""
+    e["ziel"] = None
+    for k in ("konzentriert", "_rauch_ziel", "_vof_sperre", "_reichweite_vof", "ziel_offen", "nur_pdf"):
+        e.pop(k, None)
+
+
+def fire_after_move(s, n, prot, origin=None, open_all=True):
+    """6.1.2: movement to another card = Cease Fire, then 6.1.1 again; firing opponents on the new card shift to Point Blank.
+    origin: the card the unit came from; 6.3.4 'fire follows' only applies to opponents on that card (L226, review M34).
+    open_all=False: the caller moves several units together (Platoon Move) and runs the board-wide open_fire once after
+    the last one (L450)."""
     e = s["einheiten"][n]
     carried = carried_markers(e)
     if carried:
         prot.append(f"{n}: these markers move along: {', '.join(carried)}")  # L109
     if e.get("ziel") is not None:
         prot.append(f"{n} ceases fire due to the movement (adjust PDF/VOF) [6.1.2]")
-        e["ziel"] = None
-        e.pop("konzentriert", None)
+        cease_fire(e)
     # [RULE 8.5 p.65] "A card can never contain both Spotted and Unspotted enemy units" (L108)
     if e["seite"] == "Feind":
         group = state.units_on(s, e["karte"], "Feind")
@@ -415,6 +482,7 @@ def fire_after_move(s, n, prot):
                 f["seite"] != e["seite"]
                 and f.get("karte") in s["karten"]
                 and f["karte"] != e["karte"]
+                and (origin is None or f["karte"] == origin)
                 and is_firing(f)
                 and f["ziel"] == f["karte"]
                 and geometry.adjacent(s, f["karte"], e["karte"])
@@ -436,8 +504,7 @@ def fire_after_move(s, n, prot):
                         + " [6.3.4 p.44]"
                     )
                 else:
-                    f["ziel"] = None
-                    f.pop("konzentriert", None)
+                    cease_fire(f)
                     prot.append(
                         f"{m}: last Point Blank target left {f['karte']}, cannot follow: Cease Fire, opens fire anew per 6.1.1 [6.3.4, 6.3.3]"
                     )
@@ -453,97 +520,120 @@ def fire_after_move(s, n, prot):
             f["ziel"] = f["karte"]
             prot.append(f"{m} shifts fire to its own card (Point Blank) [6.1.2]")
     # [RULE 3.0 p.15, 6.1.1 p.39] after every board change all unengaged units with a valid target open fire
-    open_fire(s, prot)
+    if open_all:
+        open_fire(s, prot)
 
 
 def cover_of(s, e):
-    if e.get("bereich", "offen") == "offen":
+    """Old name kept for callers; review Struktur 9: one cover lookup, geometry.cover_marker (with the unknown-card
+    guard). A wrapper, not an alias: geometry may still be half-imported here (circular imports)."""
+    return geometry.cover_marker(s, e)
+
+
+def _los_from(s, e, target):
+    return geometry.los_detail(
+        s,
+        e["karte"],
+        target,
+        ha=geometry.height_bonus(s, e),
+        hb=geometry.card_height_bonus(s, target, geometry.opponent_of(e)),
+    )
+
+
+def classify_los_loss(s, n, e):
+    """What cease_fire_on_los_loss has to do for one unit (review Struktur): (kind, data) or None.
+    kinds: smoke_lifted (data: former target, still valid?), blocked_between (VOF card), out_of_range (VOF card,
+    own units there?), smoke_on_own_card, lost (LosResult), in_view (LosResult: LOS and range fine)."""
+    zk = e.get("ziel")
+    if zk and zk == e.get("karte") and e.get("_rauch_ziel") and e["karte"] in s["karten"]:
+        # L148: smoke/Incoming on the own card has lifted: back to the former target if still possible
+        if geometry.blocks_los(state.card(s, e["karte"]), False, s):
+            return None
+        old = e["_rauch_ziel"]
+        valid = (
+            old in s["karten"]
+            and _los_from(s, e, old).ok
+            and geometry.in_range(s, e, old)
+            and bool(state.valid_target(s, old, e["seite"]))
+        )
+        return "smoke_lifted", (old, valid)
+    if not zk or zk == e.get("karte") or zk not in s["karten"] or e.get("karte") not in s["karten"]:
         return None
-    for c in state.card(s, e["karte"]).get("cover", []):
-        if c["id"] == e["bereich"]:
-            return c
-    return None
+    r = _los_from(s, e, zk)
+    if r.code == "blocked_between":
+        # L96 [RULE 6.1.2 p.44]: a block on an intervening card is no Cease Fire; the VOF sits on the blocking card
+        return "blocked_between", effective_fire_target(s, n)
+    if r.ok and not geometry.in_range(s, e, zk):
+        # L147 [RULE 6.3.2 p.43 example]: out of range (Out of Ammo): the PDF stays, the VOF moves to the last card in range
+        fk = effective_fire_target(s, n)
+        own = fk != e["karte"] and bool(state.units_on(s, fk, e["seite"])) and not state.valid_target(s, fk, e["seite"])
+        return "out_of_range", (fk, own)
+    if r.code == "blocked_out":
+        return "smoke_on_own_card", r
+    if not r.ok:
+        return "lost", r
+    return "in_view", r
+
+
+def apply_los_loss(s, n, e, outcome, prot):
+    """Carry out one classify_los_loss outcome (markers and messages unchanged, L94-L96, L147, L148, L164)."""
+    kind, data = outcome
+    zk = e.get("ziel")
+    if kind == "smoke_lifted":
+        old, valid = data
+        e.pop("_rauch_ziel")
+        if valid:
+            e["ziel"] = old
+            prot.append(f"{n}: smoke on {e['karte']} lifted, fires again at {old} along the PDF [6.1.2]")
+        else:
+            cease_fire(e)
+            prot.append(
+                f"{n}: smoke on {e['karte']} lifted, former target {old} no longer valid: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
+            )
+        return
+    if kind == "blocked_between":
+        if e.get("_vof_sperre") != data:
+            e["_vof_sperre"] = data
+            prot.append(
+                f"{n}: move the VOF from {zk} back along the PDF to the blocking card {data} (PDF stays) [6.1.2 p.44, 5.4]"
+            )
+        return
+    if e.pop("_vof_sperre", None):
+        prot.append(f"{n}: block lifted, VOF back on {effective_fire_target(s, n)} [6.1.2]")
+    if kind == "out_of_range":
+        fk, own = data
+        if own:
+            # [RULE 6.1.1 p.40 example 2, K16] the VOF would lie on own units: no fire at all
+            cease_fire(e)
+            prot.append(f"{n} ceases fire on {zk}: out of range and own units on {fk} along the PDF [6.3.2, 6.1.1]")
+        elif e.get("_reichweite_vof") != fk:
+            e["_reichweite_vof"] = fk
+            prot.append(f"{n}: {zk} out of range, PDF stays, VOF marker moves to {fk} [6.3.2 p.43, 7.18.2]")
+        return
+    if e.pop("_reichweite_vof", None) and data.ok:
+        # L164: only when the target is really back in LOS and range (no message before a Cease Fire for lost LOS)
+        prot.append(f"{n}: target {zk} in range again, VOF back on {zk} [6.3.2]")
+    if kind == "smoke_on_own_card":
+        # L148 [RULE 6.1.2 p.40 example 1]: smoke on the firing card: "the PDF is removed and the ... VOF is placed on its
+        # card as a reminder that it is still firing and will use ammunition. (This VOF will affect any ... units which enter the card.)"
+        e["_rauch_ziel"] = zk
+        e["ziel"] = e["karte"]
+        e.pop("konzentriert", None)
+        prot.append(
+            f"{n}: no LOS out of {e['karte']} (smoke/Incoming): remove the PDF to {zk}, its VOF stays on {e['karte']} (hits opposing units entering the card) [6.1.2 p.40 example 1]"
+        )
+    elif kind == "lost":
+        cease_fire(e)
+        prot.append(f"{n} ceases fire on {zk}, remove the VOF marker from {zk}: {data.text} [6.1.2]")  # L94
 
 
 def cease_fire_on_los_loss(s, prot):
-    """[RULE 6.1.2, 9.1, 9.2.1] Target no longer in LOS/range (e.g. Illumination removed in Clean Up): cease fire."""
+    """[RULE 6.1.2, 9.1, 9.2.1] Target no longer in LOS/range (e.g. Illumination removed in Clean Up): cease fire.
+    Unit by unit: classify, then apply (a unit's outcome is decided on the board as left by the units before it)."""
     for n, e in s["einheiten"].items():
-        zk = e.get("ziel")
-        if zk and zk == e.get("karte") and e.get("_rauch_ziel") and e["karte"] in s["karten"]:
-            # L148: smoke/Incoming on the own card has lifted: back to the former target if still possible
-            if not geometry.blocks_los(state.card(s, e["karte"]), False, s):
-                old = e.pop("_rauch_ziel")
-                ok2, _r = (
-                    geometry.los(
-                        s,
-                        e["karte"],
-                        old,
-                        ha=geometry.height_bonus(s, e),
-                        hb=geometry.card_height_bonus(s, old, geometry.opponent_of(e)),
-                    )
-                    if old in s["karten"]
-                    else (False, "")
-                )
-                if ok2 and geometry.in_range(s, e, old) and state.valid_target(s, old, e["seite"]):
-                    e["ziel"] = old
-                    prot.append(f"{n}: smoke on {e['karte']} lifted, fires again at {old} along the PDF [6.1.2]")
-                else:
-                    e["ziel"] = None
-                    prot.append(
-                        f"{n}: smoke on {e['karte']} lifted, former target {old} no longer valid: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
-                    )
-            continue
-        if not zk or zk == e.get("karte") or zk not in s["karten"] or e.get("karte") not in s["karten"]:
-            continue
-        los_ok_, los_reason = geometry.los(
-            s,
-            e["karte"],
-            zk,
-            ha=geometry.height_bonus(s, e),
-            hb=geometry.card_height_bonus(s, zk, geometry.opponent_of(e)),
-        )
-        if not los_ok_ and los_reason.startswith("Incoming/Smoke on "):
-            # L96 [RULE 6.1.2 p.44]: a block on an intervening card is no Cease Fire; the VOF sits on the blocking card (feuerziel_effektiv)
-            fk = effective_fire_target(s, n)
-            if e.get("_vof_sperre") != fk:
-                e["_vof_sperre"] = fk
-                prot.append(
-                    f"{n}: move the VOF from {zk} back along the PDF to the blocking card {fk} (PDF stays) [6.1.2 p.44, 5.4]"
-                )
-            continue
-        if e.pop("_vof_sperre", None):
-            prot.append(f"{n}: block lifted, VOF back on {effective_fire_target(s, n)} [6.1.2]")
-        if los_ok_ and not geometry.in_range(s, e, zk):
-            # L147 [RULE 6.3.2 p.43 example]: out of range (Out of Ammo): the PDF stays, the VOF moves to the last card in range
-            fk = effective_fire_target(s, n)
-            if fk != e["karte"] and state.units_on(s, fk, e["seite"]) and not state.valid_target(s, fk, e["seite"]):
-                # [RULE 6.1.1 p.40 example 2, K16] the VOF would lie on own units: no fire at all
-                e["ziel"] = None
-                e.pop("konzentriert", None)
-                e.pop("_reichweite_vof", None)
-                prot.append(f"{n} ceases fire on {zk}: out of range and own units on {fk} along the PDF [6.3.2, 6.1.1]")
-                continue
-            if e.get("_reichweite_vof") != fk:
-                e["_reichweite_vof"] = fk
-                prot.append(f"{n}: {zk} out of range, PDF stays, VOF marker moves to {fk} [6.3.2 p.43, 7.18.2]")
-            continue
-        if e.pop("_reichweite_vof", None) and los_ok_:
-            # L164: only when the target is really back in LOS and range (no message before a Cease Fire for lost LOS)
-            prot.append(f"{n}: target {zk} in range again, VOF back on {zk} [6.3.2]")
-        if not los_ok_ and los_reason.startswith(f"{e['karte']} has Incoming/Smoke"):
-            # L148 [RULE 6.1.2 p.40 example 1]: smoke on the firing card: "the PDF is removed and the ... VOF is placed on its
-            # card as a reminder that it is still firing and will use ammunition. (This VOF will affect any ... units which enter the card.)"
-            e["_rauch_ziel"] = zk
-            e["ziel"] = e["karte"]
-            e.pop("konzentriert", None)
-            prot.append(
-                f"{n}: no LOS out of {e['karte']} (smoke/Incoming): remove the PDF to {zk}, its VOF stays on {e['karte']} (hits opposing units entering the card) [6.1.2 p.40 example 1]"
-            )
-            continue
-        if not los_ok_:
-            e["ziel"] = None
-            e.pop("konzentriert", None)
-            prot.append(f"{n} ceases fire on {zk}, remove the VOF marker from {zk}: {los_reason} [6.1.2]")  # L94
+        outcome = classify_los_loss(s, n, e)
+        if outcome is not None:
+            apply_los_loss(s, n, e, outcome, prot)
 
 
 def enemy_cease_fire(s, prot):
@@ -551,8 +641,10 @@ def enemy_cease_fire(s, prot):
     for n, e in s["einheiten"].items():
         if e["seite"] == "Feind" and is_firing(e):
             zk = effective_fire_target(s, n)
-            if not state.valid_target(s, zk, "Feind"):
-                e["ziel"] = None
-                e.pop("konzentriert", None)
-                prot.append(f"{n}: Cease Fire, no valid target left on {zk} [8.6.4]")
+            # L227 (review M33): while the VOF sits on a blocking card (_vof_sperre), the last card in range
+            # (_reichweite_vof) or the own card under smoke (_rauch_ziel), the PDF target decides, not the VOF card
+            check = e.get("_rauch_ziel") or (e["ziel"] if e.get("_vof_sperre") or e.get("_reichweite_vof") else zk)
+            if check not in s["karten"] or not state.valid_target(s, check, "Feind"):
+                cease_fire(e)
+                prot.append(f"{n}: Cease Fire, no valid target left on {check} [8.6.4]")
     open_fire(s, prot, only=[n for n, e in s["einheiten"].items() if e["seite"] == "Feind"])

@@ -1,6 +1,8 @@
 """Higher HQ events, friendly and enemy (3.1, 3.4.1)."""
 
-from . import briefing, campaign, combat, commands, comms, contact, enemy, fire, geometry, options, rules, state
+import copy
+
+from . import briefing, campaign, combat, commands, comms, enemy, fire, geometry, options, rules, state
 
 
 def r_matches(area, r):
@@ -28,13 +30,16 @@ def cmd_event(s, args):
     tab = s.get("ereignistabellen")
     if not tab:
         raise rules.Violation("This mission has no event tables")
-    if s["phase"] not in ("3.1", "3.4.1", "3.2.1") or s["zug"] < 2:
+    event_seg = enemy.enemy_segments(s)[0]  # L261 (review H2): 3.4.1 offensive, 3.2.1 defensive
+    if s["phase"] not in ("3.1", event_seg) or s["zug"] < 2:
         raise rules.Violation(
-            "Events only in 3.1 (Friendly) and 3.4.1 (Enemy), from turn 2 on [RULE 3.1 p.15, 3.4.1 p.16]"
+            f"Events only in 3.1 (Friendly) and {event_seg} (Enemy), from turn 2 on [RULE 3.1 p.15, 3.4.1 p.16]"
         )
     if s.get("ereignis_erledigt") == [s["zug"], s["phase"]]:
         raise rules.Violation("The event of this segment has already been resolved")
     friend = s["phase"] == "3.1"
+    if len(args) < 2:  # L192: short input ('event no') gave a traceback
+        raise rules.Violation("event <card no> yes <R#> [--who=..] | event <card no> no (card no unknown: ?)")
     nr, icon = args[0], args[1]
     o = options.parse_opts(args[2:])
     prot = []
@@ -47,7 +52,7 @@ def cmd_event(s, args):
             raise rules.Violation(
                 f"HQ symbol: draw a second Action card, give R# column {tab.get('spalte', 10)}: event {nr} yes <R#>"
             )
-        r = int(args[2])
+        r = rules.int_value(args[2], "R#")  # L269 (review H12)
         ev = find_event(s, tab["freund" if friend else "feind"], r)
         if ev is None:
             raise rules.Violation(f"R# {r} in turn {s['zug']} not in the table")
@@ -59,7 +64,7 @@ def cmd_event(s, args):
     ak = fire.update_activity(s)
     if ak:
         prot.append(ak)
-    state.save_state(s, "Event: " + "; ".join(prot), "3.1 p.15" if friend else "3.4.1 p.16")
+    state.save_state(s, "Event: " + "; ".join(prot), "3.1 p.15" if friend else f"{event_seg} p.16")
     briefing.print_board(prot, s)
 
 
@@ -77,7 +82,37 @@ def friendly_event(s, ev, o, prot):
             + state.open_reading(s, "U16_erste_commands_mit_gespart")
             + "; no penalty if Commands are short [Normandy M1 p.18]"
         )
-    elif i == "artillery_displacing":
+    elif i == "tank_support":
+        # L188 [Normandy M6 p.39] 'Enter a tank platoon (4 tanks + tank HQ) of M5s on to any cards of your choice on Row 1. Each has 5 ammo.'
+        pool = s.get("ereignis_vorrat", {}).get("tank_support", {})
+        if not pool:
+            prot.append("Tank Support: no tank platoon defined for this mission, event lapses")
+            return
+        cards = [x.strip() for x in (o.get("--platz") or "").split(",") if x.strip()]
+        row1 = geometry.first_card_row(s)
+        if len(cards) == 1:
+            cards = cards * len(pool)
+        if len(cards) != len(pool):
+            raise rules.Violation(
+                f"Tank Support: --place=<card>[,<card>..] on row {row1}, one card for all or one per vehicle in this order: {', '.join(pool)} [Normandy M6 p.39]"
+            )
+        for k in cards:
+            if state.card(s, k)["reihe"] != row1 or state.card(s, k).get("staging"):
+                raise rules.Violation(f"{k} is not on row {row1} [Normandy M6 p.39]")
+        for (n, d), k in zip(pool.items(), cards):
+            e = copy.deepcopy(d)
+            e.update(karte=k, bereich="offen", status=[], ziel=None)
+            s["einheiten"][n] = e
+            if state.is_hq(e):
+                s["kommandos"][n] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
+            prot.append(
+                f"Tank Support: {n} ({e.get('fahrzeug')}, ammo {(e.get('munition') or {}).get('punkte')}) enters on {k}"
+            )
+        s["ereignis_vorrat"]["tank_support"] = {}
+        fire.open_fire(s, prot)
+    elif i.endswith("_displacing"):
+        # artillery_displacing, cannon_displacing, mortar_displacing: the firing agency of the event is unavailable
+        # (L277: the Cannon Co and Mortar Plt events used to fall through silently)
         s["fm_gesperrt"] = {"zug": s["zug"], "gruppe": ev.get("gruppe", "15th FA")}
         prot.append(f"{ev.get('gruppe', '15th FA')} not available this turn (no Call for Fire)")
     elif i == "checking_up":
@@ -186,6 +221,8 @@ def friendly_event(s, ev, o, prot):
         prot.append(
             "Four ammo of one type onto a card of mission row 1 of your choice: fof.py ammo depot <card> MG|MTR|RKT 4 [Normandy M1 p.18]"
         )
+    else:
+        raise rules.Violation(f"Friendly event id '{i}' is not implemented; nothing booked (L277)")
 
 
 def enemy_event(s, ev, o, prot):
@@ -213,11 +250,10 @@ def enemy_event(s, ev, o, prot):
         for n, e in s["einheiten"].items():
             if e["seite"] != "Feind" or not (state.pinned(e) or state.is_lat(e) or state.fire_team_side(e)):
                 continue
-            s["ereignis_einheiten"].append(n)
-            e["check_offen"] = False
+            s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
             if fire.vof_against(s, e["karte"], "Feind") is None:
                 if state.pinned(e):
-                    e["status"].remove("Pinned")
+                    e["status"].remove(rules.PINNED)
                     prot.append(f"{n}: Pinned removed (no VOF, automatic) [6.5.1]")
                 elif state.is_lat(e) and e["typ"] in ("Paralyzed Team", "Litter Team", "Fire Team"):
                     nearest = {
@@ -229,18 +265,22 @@ def enemy_event(s, ev, o, prot):
                     combat.set_lat_values(e, nearest)
                     prot.append(f"{n} becomes {nearest} (no VOF, automatic) [6.5.1]")
                 elif state.fire_team_side(e):
-                    e["status"].remove("Fire Team side")
+                    e["status"].remove(rules.FIRE_TEAM_SIDE)
                     prot.append(f"{n}: back to the front side (no VOF) [4.2.3f]")
                 elif e["typ"] == "Assault Team":
-                    prot.append(f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]")
+                    prot.append(
+                        f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]"
+                    )
             elif e["typ"] == "Assault Team" and not state.pinned(e):
-                prot.append(f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]")
+                prot.append(
+                    f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]"
+                )
             else:
                 s.setdefault("rally_offen", []).append(n)
                 prot.append(
                     f'{n}: Rally under VOF: {comms.enemy_rally_cards(e)[0]} cards (base 2, experience {e.get("erfahrung")}), word Rally; fof.py enemyaction "{n}" Rally --success=yes|no'
                 )
-        prot.append("These units make no further Activity Check in 3.4.2 [3.4.1 p.16]")
+        prot.append(f"These units make no further Activity Check in {enemy.enemy_segments(s)[1]} [3.4.1 p.16]")
     elif i == "fall_back":
         for n, e in list(s["einheiten"].items()):
             if e["seite"] != "Feind" or state.pinned(e):
@@ -250,7 +290,7 @@ def enemy_event(s, ev, o, prot):
                 continue
             c = state.card(s, e["karte"])
             target = geometry.card_at(s, c["reihe"] + 1, c["spalte"])
-            s["ereignis_einheiten"].append(n)
+            s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
             if target is None:
                 if state.option(s, "U18_fall_back_rand_offmap"):
                     enemy.remove_enemy(
@@ -259,30 +299,15 @@ def enemy_event(s, ev, o, prot):
                         prot,
                         reason="Fall Back over the map edge" + state.open_reading(s, "U18_fall_back_rand_offmap"),
                     )
+                else:
+                    prot.append(f"{n}: no card behind {e['karte']}, stays (map edge) [8.6.3]")  # L278 (review M22)
                 continue
-            commands.grenade_expires(s, e, n, prot)
-            e["karte"], e["bereich"] = target, "offen"
-            commands.mark(e, "Exposed")
-            free = [
-                cv
-                for cv in state.card(s, target).get("cover", [])
-                if not any(
-                    s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == cv["id"]
-                    for m in state.units_on(s, target)
-                )
-            ]
-            if free:
-                e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
-            prot.append(
-                f"{n} falls straight back to {target}"
-                + (f" under {e['bereich']}" if e["bereich"] != "offen" else "")
-                + ", Exposed [8.6.1C, Normandy M1 p.18]"
-            )
-            fire.fire_after_move(s, n, prot)
-            contact.request_mine_check(s, [n], target, prot, "enemy enters a mined card")
-        for n in s["ereignis_einheiten"]:
-            if n in s["einheiten"]:
-                s["einheiten"][n]["check_offen"] = False
+            if enemy.restricted_mover(e) and fire.vof_against(s, target, "Feind") is not None:
+                # L278 (review M22) = L213/E90 [RULE 4.2.5 p.26]: Paralyzed/Litter Teams only onto a card without VOF
+                prot.append(f"{n} ({e['typ']}): VOF on {target}, no Fall Back possible, stays [RULE 4.2.5 p.26, E90]")
+                continue
+            # L264/L278: the one enemy move path (ammo surplus, Deep Bunker left, best free cover, Exposed, mine check)
+            enemy.move_enemy(s, n, target, prot, how="falls straight back", rule="8.6.1C, Normandy M1 p.18")
     elif i == "shifting_lines":
         top = state.top_row(s)
         ks = sorted(k for k, c in s["karten"].items() if c["reihe"] == top and c.get("pc") and not c.get("ausserhalb"))
@@ -305,15 +330,16 @@ def enemy_event(s, ev, o, prot):
         )
         if ga.get("modus") == "m4":
             # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
-            unrevealed = [
-                kk
-                for kk, cc in s["karten"].items()
-                if cc.get("pc") == "?" or (cc.get("pc") and not cc.get("pc_aufgedeckt"))
-            ]
+            # 'unrevealed PC' = a PC marker still on the board: its package is not drawn until a friendly unit resolves
+            # it [RULE 8.2.4]; the '?' side and the letter side both count (L279, review M24: the dead pc_aufgedeckt
+            # clause that nothing wrote is gone, the behaviour is unchanged)
+            unrevealed = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
             us_cards = [
                 kk
                 for kk in us_cards
-                if state.card(s, kk)["reihe"] == 4 or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
+                if state.card(s, kk)["reihe"]
+                == ga.get("reihe", 4)  # L189: last mission row from the setup (M6: card row 6)
+                or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
             ]
             replaced = []
             for kk in us_cards:
@@ -333,12 +359,7 @@ def enemy_event(s, ev, o, prot):
                 prot.append(
                     "two face-up PC markers: the lower one is removed on " + ", ".join(replaced) + " [RULE 8.2.3 p.62]"
                 )
-            until = s["zug"] + ga.get("zuege", 3) - 1
-            if not s.get("gegenangriff"):
-                s["gegenangriff"] = {"taktik_vorher": s.get("feind_taktik"), "bis_zug": until}
-            else:
-                s["gegenangriff"]["bis_zug"] = until
-            s["feind_taktik"] = ga.get("taktik", "Offensive Assault")
+            until = start_counter_attack(s, ga)
             prot.append(
                 f"PC marker A on {', '.join(us_cards) or 'no card'} (US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]"
             )
@@ -352,12 +373,7 @@ def enemy_event(s, ev, o, prot):
                 c["pc2"] = "?"
             else:
                 c["pc"] = "?"
-        until = s["zug"] + ga.get("zuege", 3) - 1
-        if not s.get("gegenangriff"):
-            s["gegenangriff"] = {"taktik_vorher": s.get("feind_taktik"), "bis_zug": until}
-        else:
-            s["gegenangriff"]["bis_zug"] = until
-        s["feind_taktik"] = ga.get("taktik", "Offensive Assault")
+        until = start_counter_attack(s, ga)
         prot.append(
             f"Draw PC markers randomly from all not yet placed, '?' side up, onto {', '.join(us_cards) or 'no card'}"
             + ("" if state.option(s, "U17_gegenangriff_staging") else state.open_reading(s, "U17_gegenangriff_staging"))
@@ -368,6 +384,20 @@ def enemy_event(s, ev, o, prot):
             + state.open_reading(s, "U28_gegenangriff_alle_pc_a")
             + " [Normandy M1 MSR 1 p.19]"
         )
+    else:
+        raise rules.Violation(f"Enemy event id '{i}' is not implemented; nothing booked (L277)")
+
+
+def start_counter_attack(s, ga):
+    """Counter-attack bookkeeping (L276, structure 9): the enemy tactic switches to the counter-attack tactic for
+    ga['zuege'] turns including this one; a running counter-attack is extended. Returns the last turn."""
+    until = s["zug"] + ga.get("zuege", 3) - 1
+    if not s.get("gegenangriff"):
+        s["gegenangriff"] = {"taktik_vorher": s.get("feind_taktik"), "bis_zug": until}
+    else:
+        s["gegenangriff"]["bis_zug"] = until
+    s["feind_taktik"] = ga.get("taktik", "Offensive Assault")
+    return until
 
 
 def event_pay_commands(s, hq, prot):

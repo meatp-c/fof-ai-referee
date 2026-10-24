@@ -1,5 +1,7 @@
 """Map geometry, LOS, range, visibility and illumination (5.2, 9.x)."""
 
+from typing import NamedTuple, Optional
+
 from . import rules, state
 
 
@@ -71,7 +73,11 @@ def see_through(c, from_d, to_d):
         return None
     if isinstance(r, str):
         return r == "weiss"
-    return edge(c, from_d) == "weiss" and edge(c, to_d) == "weiss"
+    sides = (edge(c, from_d), edge(c, to_d))
+    if any(x is not None and x != "weiss" for x in sides):
+        return False
+    # review LOW: a side missing from the recorded edges is 'not recorded' (note in los), not dark
+    return None if None in sides else True
 
 
 def light_weather(s):
@@ -131,50 +137,69 @@ def card_height_bonus(s, k, side):
     return max([height_bonus(s, s["einheiten"][m]) for m in state.units_on(s, k, side)] or [0])
 
 
-def los(s, a, b, radio=False, staging_frei=False, ha=0, hb=0):
-    """5.2.1/5.2.2/5.4: geometry, range, edge, Incoming/Smoke, elevation, staging. Returns (bool, reason).
-    funk=True: LOS for SCR536 [RULE 4.3.5 p.29] 'as if Daylight, and ignoring smoke' (range always up to Very Long)."""
+class LosResult(NamedTuple):
+    """Machine-readable LOS result (review LOW: callers matched the reason text by prefix).
+    code: same_card, not_straight, too_far, staging, blocked_out (smoke/Incoming on the origin a), blocked_between
+    (smoke/Incoming on an intervening card), too_high, slope, dark_edges, ok. card: the blocking card or None."""
+
+    ok: bool
+    code: str
+    card: Optional[str]
+    text: str
+
+
+def los_detail(s, a, b, radio=False, staging_frei=False, ha=0, hb=0):
+    """5.2.1/5.2.2/5.4: geometry, range, edge, Incoming/Smoke, elevation, staging. Returns a LosResult.
+    radio=True: LOS for SCR536 [RULE 4.3.5 p.29] 'as if Daylight, and ignoring smoke' (range always up to Very Long)."""
     if a == b:
-        return True, "same card"
+        return LosResult(True, "same_card", None, "same card")
     between = line_between(s, a, b)
     if between is None:
-        return False, "not on one of the eight straight lines [5.2.1]"
+        return LosResult(False, "not_straight", None, "not on one of the eight straight lines [5.2.1]")
     maxr = (
         3 if radio else (1 if s["sicht"] == "eingeschraenkt" and not is_illuminated(s, b) else 3)
     )  # [RULE 9.1, 9.2.1 p.70]
     if distance(s, a, b) > maxr:
-        return False, f"farther than {maxr} cards [5.2.1]"
+        return LosResult(False, "too_far", None, f"farther than {maxr} cards [5.2.1]")
     ka, kb = state.card(s, a), state.card(s, b)
     if (kb.get("staging") or ka.get("staging")) and not staging_frei:
-        return False, "Staging Area: no LOS in or out [2.5]"
+        return LosResult(False, "staging", None, "Staging Area: no LOS in or out [2.5]")
+    reading = state.open_reading(s, "U3_incoming_blockiert_funk") if radio else ""
     if blocks_los(ka, radio, s):
-        return False, f"{a} has Incoming/Smoke, no LOS out [5.4]" + (
-            state.open_reading(s, "U3_incoming_blockiert_funk") if radio else ""
-        )
+        return LosResult(False, "blocked_out", a, f"{a} has Incoming/Smoke, no LOS out [5.4]" + reading)
     ea, eb = ka.get("elevation", 1) + ha, kb.get("elevation", 1) + hb  # L79 Upper Story +1 [RULE 5.2.2 p.35]
     for z in between:
         c = state.card(s, z)
         if blocks_los(c, radio, s):
-            return False, f"Incoming/Smoke on {z} blocks [5.4]" + (
-                state.open_reading(s, "U3_incoming_blockiert_funk") if radio else ""
-            )
+            return LosResult(False, "blocked_between", z, f"Incoming/Smoke on {z} blocks [5.4]" + reading)
         ez = c.get("elevation", 1)
         if ez > max(ea, eb) or (ez == max(ea, eb) and ez > min(ea, eb)):
-            return False, f"{z} is higher than or as high as the lower point, blocks [5.2.2]"
+            return LosResult(False, "too_high", z, f"{z} is higher than or as high as the lower point, blocks [5.2.2]")
         ds = see_through(c, direction(s, z, a), direction(s, z, b))
         if max(ea, eb) > ez:
             # [RULE 5.2.2 p.35] higher sees over lower despite dark edges; but 'straight up or downhill'
             # (level 3 to 1 across a level-2 card with dark edges) is blocked
             if ez > min(ea, eb) and ds is False:
-                return False, f"{z} lies between the elevation levels and has dark edges (straight up/downhill) [5.2.2]"
+                return LosResult(
+                    False,
+                    "slope",
+                    z,
+                    f"{z} lies between the elevation levels and has dark edges (straight up/downhill) [5.2.2]",
+                )
             continue
         if ds is None:
             s.setdefault("_hinweise", []).append(
                 f"LOS {a} to {b} passes through {z}: edge colours of {z} not recorded, check on the board (entry and exit sides white?) [5.2.1]"
             )
         elif ds is False:
-            return False, f"{z} has dark edges [5.2.1]"
-    return True, "ok"
+            return LosResult(False, "dark_edges", z, f"{z} has dark edges [5.2.1]")
+    return LosResult(True, "ok", None, "ok")
+
+
+def los(s, a, b, radio=False, staging_frei=False, ha=0, hb=0):
+    """(bool, reason text) as before; see los_detail for the reason code."""
+    r = los_detail(s, a, b, radio=radio, staging_frei=staging_frei, ha=ha, hb=hb)
+    return r.ok, r.text
 
 
 def in_range(s, e, target):

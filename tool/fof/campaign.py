@@ -203,7 +203,7 @@ def patrol_reserve(s, prot):
     """[MSR 1, MSR 4] Units not set up are missing from this patrol; set aside until the next patrol."""
     res = s.setdefault("patrouille_reserve", {})
     gone = [n for n, e in s["einheiten"].items() if e["seite"] == "US" and not e.get("karte")]
-    for n in gone:
+    for n in gone:  # set aside, not removed from play: patrol_reserve_back returns them (no combat.remove_from_play)
         res[n] = {"einheit": s["einheiten"].pop(n), "kommando": s["kommandos"].pop(n, None)}
     if gone:
         prot.append("Not set up, missing from this patrol: " + ", ".join(gone) + " [MSR 1, MSR 4]")
@@ -256,8 +256,42 @@ def patrol_end(s, prot):
         )
     else:
         prot.append(
-            "All three patrols played: Mission 3 ended; Combat Patrols carry no penalty on failure (standard mode) [MSR 1]"
+            f"All three patrols played: Mission {s.get('kampagne', {}).get('mission_nr') or '?'} ended; Combat Patrols carry no penalty on failure (standard mode) [MSR 1]"  # L185
         )
+
+
+def _usage(command):
+    from . import cli  # lazy: the usage texts live in the command table (review Struktur 8)
+
+    return cli.usage(command)
+
+
+def check_patrol_choice(units, plt, with_):
+    """Platoon and --with of a patrol against the units {name: unit} [2.6.1, MSR 1]; returns the PLT HQs by platoon."""
+    hqs = {x.get("platoon"): m for m, x in units.items() if x.get("ebene") == "PLT" and x["seite"] == "US"}
+    if plt not in hqs:
+        raise rules.Violation(f"Platoon {plt} unknown; available: {', '.join(sorted(k for k in hqs if k))}")
+    for m in with_:
+        if m not in units:
+            raise rules.Violation(f"Unit '{m}' unknown. Known: {', '.join(units)}")
+        x = units[m]
+        if x.get("ebene") == "PLT" or (x["typ"] == "Squad" and x.get("platoon") != plt):
+            raise rules.Violation(f"{m}: only Weapons Teams, FOs and Company Staff may join the patrol [2.6.1]")
+    return hqs
+
+
+def units_after_reattempt(s):
+    """The units a 'patrol next' will see after the reattempt reset: BN units leave, enemy Paralyzed/Litter Teams are
+    removed, the units set aside for the last patrol come back (M6: checked before anything is saved)."""
+    units = {
+        n: e
+        for n, e in s["einheiten"].items()
+        if not (e.get("ebene") == "BN" and e["seite"] == "US")
+        and not (e["seite"] == "Feind" and e["typ"] in ("Paralyzed Team", "Litter Team"))
+    }
+    for n, x in (s.get("patrouille_reserve") or {}).items():
+        units[n] = x["einheit"]
+    return units
 
 
 def cmd_patrol(s, args):
@@ -277,37 +311,26 @@ def cmd_patrol(s, args):
         )
         print(f"Done: {', '.join(p.get('erledigt', [])) or 'none'}")
         return
+    if args[0] not in ("naechste", "start"):
+        raise rules.Violation(f"Usage: {_usage('patrol')}")
+    rules.need([a for a in args if not a.startswith("--")], 2, _usage("patrol"))  # L332
     o = options.parse_opts(args[2:])
+    plt = args[1]
+    with_ = options.list_option(o, "--mit")
     prot = []
     if args[0] == "naechste":
         if not s.get("missionsende"):
             raise rules.Violation("First finish the current patrol (10 turns) [MSR 1]")
-        if args[1] in p.get("erledigt", []):
-            raise rules.Violation(f"Platoon {args[1]} has already done its patrol [MSR 1]")
-        s["patrouille_wechsel"] = True
-        cmd_reattempt(s, [])
-        s = state.load_state()
-        s.pop("patrouille_wechsel", None)
-        patrol_reserve_back(s, prot)
-        s["licht"] = None
-        s.pop("konzentration_gesetzt", None)
-        prot.append(
-            "New visibility for this patrol: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light>; place units with setup on row 1 or in the COP, then fof.py reattempt done [Normandy M3 p.24, MSR 1]"
-        )
+        if plt in p.get("erledigt", []):
+            raise rules.Violation(f"Platoon {plt} has already done its patrol [MSR 1]")
+        # L336 (review M6): platoon and --with are checked before the reattempt reset is saved; a wrong platoon used
+        # to save the reset first and then block 'patrol next' for good
+        check_patrol_choice(units_after_reattempt(s), plt, with_)
+        s = next_patrol_reset(s, prot)
         p = s.setdefault("patrouille", {})
-    elif args[0] != "start":
-        raise rules.Violation("patrol | patrol start <platoon> [--with=..] | patrol next <platoon> [--with=..]")
     if not state.in_setup(s):
         raise rules.Violation("Set the patrol only before turn 1 [MSR 1]")
-    plt = args[1]
-    hqs = {x.get("platoon"): m for m, x in s["einheiten"].items() if x.get("ebene") == "PLT" and x["seite"] == "US"}
-    if plt not in hqs:
-        raise rules.Violation(f"Platoon {plt} unknown; available: {', '.join(sorted(k for k in hqs if k))}")
-    with_ = options.list_option(o, "--mit")
-    for m in with_:
-        x = state.unit(s, m)
-        if x.get("ebene") == "PLT" or (x["typ"] == "Squad" and x.get("platoon") != plt):
-            raise rules.Violation(f"{m}: only Weapons Teams, FOs and Company Staff may join the patrol [2.6.1]")
+    check_patrol_choice(s["einheiten"], plt, with_)
     members = [m for m, x in s["einheiten"].items() if x["seite"] == "US" and (x.get("platoon") == plt or m in with_)]
     for m, x in s["einheiten"].items():
         if x["seite"] != "US":
@@ -346,6 +369,22 @@ def cmd_patrol(s, args):
     briefing.print_board(prot, s)
 
 
+def next_patrol_reset(s, prot):
+    """'patrol next': the 3.9 reset (saved by cmd_reattempt), then the state reloaded with the reserve back and a new
+    visibility to draw [MSR 1, Normandy M3 p.24]. Returns the reloaded state."""
+    s["patrouille_wechsel"] = True
+    cmd_reattempt(s, [])
+    s = state.load_state()
+    s.pop("patrouille_wechsel", None)
+    patrol_reserve_back(s, prot)
+    s["licht"] = None
+    s.pop("konzentration_gesetzt", None)
+    prot.append(
+        "New visibility for this patrol: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light>; place units with setup on row 1 or in the COP, then fof.py reattempt done [Normandy M3 p.24, MSR 1]"
+    )
+    return s
+
+
 def _between_missions(s):
     return state.in_setup(s) or s.get("missionsende") or s.get("reattempt_setup")
 
@@ -363,13 +402,16 @@ def cmd_xp_promote(s, args):
     Line to Veteran, one level per mission, no attachments, Combat Patrol: only patrol members (12.3.1). L146"""
     if not _between_missions(s):
         raise rules.Violation("Promotions only between missions or patrols (12.2, 3.9)")
+    rules.need([a for a in args[:1] if not a.startswith("--")], 1, _usage("xp"))  # L332
     n = args[0]
     o = options.parse_opts(args[1:])
     e = state.unit(s, n)
     frm = o.get("--aus")
     if frm not in rules.PROMOTION_COST:
         raise rules.Violation("--from=Green|Line (a step rises one level per mission) [RULE 12.3 p.81]")
-    steps = int(o.get("--steps", 1))
+    steps = options.int_opt(o, "--steps", "xp promote --steps", 1)  # L332
+    if steps < 1:
+        raise rules.Violation(f"--steps={steps}: at least one step is promoted")
     if e.get("attachment"):
         raise rules.Violation(f"{n} is an attachment: no promotion with Experience Points [RULE 12.3 p.81]")
     # L166 [RULE 12.3 p.81] 'You may only increase a step by one Level': counted per step, not per unit
@@ -394,7 +436,7 @@ def cmd_xp_promote(s, args):
     cost = rules.PROMOTION_COST[frm] * steps
     if sum(x["punkte"] for x in s.get("xp", [])) < cost:
         raise rules.Violation(f"Not enough Experience Points ({cost} needed) [RULE 12.3 p.81]")
-    new = o.get("--ergebnis") or ("Line" if frm == "Green" else "Veteran")
+    new = options.text_opt(o, "--ergebnis", _usage("xp")) or ("Line" if frm == "Green" else "Veteran")
     prot = []
     book_xp(
         s,
@@ -430,6 +472,7 @@ def cmd_xp_skill(s, args):
     """xp skill <HQ> <skill>: buy a skill marker (12.7): cost from the Skills chart, at most three per HQ/Staff, counter mix. L146"""
     if not _between_missions(s):
         raise rules.Violation("Skills are bought between missions or patrols [RULE 12.7 p.82]")
+    rules.need([a for a in args if not a.startswith("--")], 2, _usage("xp"))  # L332
     n, skill = args[0], " ".join(args[1:]).split("--")[0].strip()
     o = options.parse_opts([a for a in args[1:] if a.startswith("--")])
     e = state.unit(s, n)
@@ -445,7 +488,7 @@ def cmd_xp_skill(s, args):
         raise rules.Violation(
             f"Skill {skill}: no free marker with this face (two-sided markers, in play: {', '.join(in_play) or 'none'}) [RULE 12.7 p.82, E67]"
         )
-    cost = int(o.get("--kosten", rules.SKILL_COST[skill]))
+    cost = options.int_opt(o, "--kosten", "xp skill --cost", rules.SKILL_COST[skill])  # L332
     if sum(x["punkte"] for x in s.get("xp", [])) < cost:
         raise rules.Violation(f"Not enough Experience Points ({cost} needed) [RULE 12.7 p.82]")
     prot = []
@@ -466,7 +509,10 @@ def cmd_xp(s, args):
     if args and args[0] in ("skill",):
         return cmd_xp_skill(s, args[1:])
     if args and args[0] in ("plus", "ausgeben"):
-        n = int(args[1]) * (1 if args[0] == "plus" else -1)
+        rules.need(args, 2, _usage("xp"))  # L332
+        n = rules.int_value(args[1], f"xp {'add' if args[0] == 'plus' else 'spend'} <n>") * (
+            1 if args[0] == "plus" else -1
+        )
         reason = " ".join(args[2:]) or ("manual" if n > 0 else "spent")
         prot = []
         if n < 0 and sum(x["punkte"] for x in s.get("xp", [])) + n < 0:
@@ -485,82 +531,95 @@ def cmd_xp(s, args):
 
 
 def cmd_reattempt(s, args):
-    """[RULE 3.9 p.17/18] Reattempt preparation, steps 1-14."""
-    k = s.get("kampagne", {})
+    """[RULE 3.9 p.17/18] Reattempt preparation, steps 1-14: 'reattempt' resets the board, 'reattempt done' starts it."""
     if args and args[0] == "fertig":
-        if not s.get("reattempt_setup"):
-            raise rules.Violation("No reattempt preparation pending")
-        prot = []
-        s.pop("befoerdert", None)  # L146: one promotion level per mission/patrol
-        for n, e in list(s["einheiten"].items()):
-            if e["seite"] == "US" and state.is_lat(e) and e["typ"] != "Fire Team":
-                e["typ"], e["erfahrung"] = "Fire Team", "Green"
-                combat.set_lat_values(e, "Fire Team")
-                prot.append(f"{n} becomes a Fire Team (step 4)")
-            if e["seite"] == "US":
-                e["status"] = []
-        wrong = [
-            n
-            for n, e in s["einheiten"].items()
-            if e["seite"] == "US"
-            and e.get("karte")
-            and not state.card(s, e["karte"]).get("staging")
-            and not is_secured(s, e["karte"])
-            and not (
-                s.get("patrouille_mission")
-                and (state.card(s, e["karte"])["reihe"] == 1 or e["karte"] == s.get("ziele", {}).get("cop"))
-            )
-        ]
-        if wrong:
-            raise rules.Violation(
-                "Friendly units only in the Staging Area or on secured cards (step 5): " + ", ".join(wrong)
-            )
-        if s.get("patrouille_mission"):
-            open_steps = [
-                n
-                for n, e in s["einheiten"].items()
-                if e["seite"] == "US"
-                and e.get("stationaer")
-                and e.get("karte")
-                and state.card(s, e["karte"]).get("cover")
-                and e.get("bereich", "offen") == "offen"
-            ]  # L55
-            if open_steps:
-                raise rules.Violation(
-                    "Place non-patrol units in the fortifications (setup <unit> <card> --area=C1|C2): "
-                    + ", ".join(open_steps)
-                    + " [Normandy M3 p.26 MSR 1]"
-                )
-            fa = [x for x in setup.check_setup_v4(s) if not x.startswith("Terrain")]
-            if (
-                s.get("assets_start")
-                and not any(e.get("assets") for e in s["einheiten"].values() if e["seite"] == "US")
-                and not s.get("assets_bewusst_leer")
-            ):  # L57: step 12 puts all assets into the pool
-                fa.append(
-                    "Distribute assets: setup <unit> --asset=<type> (pool: "
-                    + ", ".join(f"{a} {b}" for a, b in s.get("assets_pool", {}).items() if b)
-                    + ") [3.9 step 12, 2.3.4 p.10]"
-                )
-            if s.get("fm_werte") and not s.get("konzentration_gesetzt"):  # L56
-                fa.append(
-                    "Artillery Concentration: objective concentration <card> <firing agency> [Normandy M3 p.24, 7.16.5]"
-                )
-            if fa:
-                raise rules.Violation("Still open before turn 1 of the patrol: " + "; ".join(fa))
-            patrol_reserve(s, prot)
-        s["reattempt_setup"] = False
-        s["aufstellung_fertig"] = True
-        fire.open_fire(s, prot)
-        ak = fire.update_activity(s)
-        if ak:
-            prot.append(ak)
-        prot.append(
-            f"Attempt {k.get('versuch')} starts with turn 1 (steps 13/14); no new PC markers, Spotted status remains [3.9 p.18]"
+        return reattempt_done(s)
+    if args:
+        raise rules.Violation(f"Usage: {_usage('reattempt')}")
+    return reattempt_start(s)
+
+
+def reattempt_done(s):
+    """'reattempt done': LATs become Fire Teams (step 4), positions checked (step 5), turn 1 of the new attempt."""
+    k = s.get("kampagne", {})
+    if not s.get("reattempt_setup"):
+        raise rules.Violation("No reattempt preparation pending")
+    prot = []
+    s.pop("befoerdert", None)  # L146: one promotion level per mission/patrol
+    for n, e in list(s["einheiten"].items()):
+        if e["seite"] == "US" and state.is_lat(e) and e["typ"] != "Fire Team":
+            e["typ"], e["erfahrung"] = "Fire Team", "Green"
+            combat.set_lat_values(e, "Fire Team")
+            prot.append(f"{n} becomes a Fire Team (step 4)")
+        if e["seite"] == "US":
+            e["status"] = []
+    wrong = [
+        n
+        for n, e in s["einheiten"].items()
+        if e["seite"] == "US"
+        and e.get("karte")
+        and not state.card(s, e["karte"]).get("staging")
+        and not is_secured(s, e["karte"])
+        and not (
+            s.get("patrouille_mission")
+            and (state.card(s, e["karte"])["reihe"] == 1 or e["karte"] == s.get("ziele", {}).get("cop"))
         )
-        state.save_state(s, "Reattempt: " + "; ".join(prot), "3.9 p.18")
-        briefing.print_board(prot, s)
-        return
+    ]
+    if wrong:
+        raise rules.Violation(
+            "Friendly units only in the Staging Area or on secured cards (step 5): " + ", ".join(wrong)
+        )
+    if s.get("patrouille_mission"):
+        check_patrol_ready(s)
+        patrol_reserve(s, prot)
+    s["reattempt_setup"] = False
+    s["aufstellung_fertig"] = True
+    fire.open_fire(s, prot)
+    ak = fire.update_activity(s)
+    if ak:
+        prot.append(ak)
+    prot.append(
+        f"Attempt {k.get('versuch')} starts with turn 1 (steps 13/14); no new PC markers, Spotted status remains [3.9 p.18]"
+    )
+    state.save_state(s, "Reattempt: " + "; ".join(prot), "3.9 p.18")
+    briefing.print_board(prot, s)
+
+
+def check_patrol_ready(s):
+    """Before turn 1 of the next patrol: fortifications, setup choices, assets, Artillery Concentration [MSR 1]."""
+    open_steps = [
+        n
+        for n, e in s["einheiten"].items()
+        if e["seite"] == "US"
+        and e.get("stationaer")
+        and e.get("karte")
+        and state.card(s, e["karte"]).get("cover")
+        and e.get("bereich", "offen") == "offen"
+    ]  # L55
+    if open_steps:
+        raise rules.Violation(
+            "Place non-patrol units in the fortifications (setup <unit> <card> --area=C1|C2): "
+            + ", ".join(open_steps)
+            + " [Normandy M3 p.26 MSR 1]"
+        )
+    fa = [x for x in setup.check_setup_v4(s) if not x.startswith("Terrain")]
+    if (
+        s.get("assets_start")
+        and not any(e.get("assets") for e in s["einheiten"].values() if e["seite"] == "US")
+        and not s.get("assets_bewusst_leer")
+    ):  # L57: step 12 puts all assets into the pool
+        fa.append(
+            "Distribute assets: setup <unit> --asset=<type> (pool: "
+            + ", ".join(f"{a} {b}" for a, b in s.get("assets_pool", {}).items() if b)
+            + ") [3.9 step 12, 2.3.4 p.10]"
+        )
+    if s.get("fm_werte") and not s.get("konzentration_gesetzt"):  # L56
+        fa.append("Artillery Concentration: objective concentration <card> <firing agency> [Normandy M3 p.24, 7.16.5]")
+    if fa:
+        raise rules.Violation("Still open before turn 1 of the patrol: " + "; ".join(fa))
+
+
+def check_reattempt_allowed(s, k):
     if not s.get("missionsende"):
         raise rules.Violation(
             "Reattempt only after the last turn (Clean Up of turn {}) [3.9 p.17]".format(s.get("max_zuege"))
@@ -573,102 +632,26 @@ def cmd_reattempt(s, args):
             raise rules.Violation("No more reattempts allowed [3.9 p.17]")
     elif not s.get("patrouille_wechsel"):
         raise rules.Violation("Combat Patrol: next patrol with fof.py patrol next <platoon> [MSR 1]")
+
+
+def reattempt_start(s):
+    """'reattempt' after the last turn: the 3.9 reset of board and units (steps 1-12), then the preparation."""
+    k = s.get("kampagne", {})
+    check_reattempt_allowed(s, k)
     prot = [f"Experience so far {sum(x['punkte'] for x in s.get('xp', []))} (step 1; cards not counted twice)"]
     for n, e in s["einheiten"].items():
         if e["seite"] == "US" and state.fire_team_side(e):
-            e["status"] = [x for x in e["status"] if x != "Fire Team side"]
+            e["status"] = [x for x in e["status"] if x != rules.FIRE_TEAM_SIDE]
             prot.append(f"{n} to the Good Order side (step 2)")
-    for kid, c in s["karten"].items():
-        if c.get("casualties") or c.get("casualties_feind"):
-            prot.append(f"{kid}: casualties removed (step 6)")
-            c["casualties"] = c["casualties_feind"] = 0
-        c["extern"] = [x for x in c.get("extern", []) if x["typ"] == "Mines"]
-        for x in c["extern"]:
-            x["aktiv"] = False
-        c.pop("grenade_miss", None)
-        c["assets"] = []
-        c["munition"] = {}
-    for n, e in list(s["einheiten"].items()):
-        if e["seite"] == "Feind" and e["typ"] in ("Paralyzed Team", "Litter Team"):
-            del s["einheiten"][n]
-            prot.append(f"{n} removed (step 6)")
-        if e.get("ebene") == "BN" and e["seite"] == "US":
-            del s["einheiten"][n]
-            s["kommandos"].pop(n, None)
-            prot.append(f"{n} (Checking Up) leaves the board; events end with the attempt (turn counter restarts)")
-    for n, e in s["einheiten"].items():
-        if e["seite"] == "Feind" and e.get("bereich", "offen") == "offen":
-            free = [
-                cv
-                for cv in state.card(s, e["karte"]).get("cover", [])
-                if not any(
-                    s["einheiten"][m]["seite"] == "US" and s["einheiten"][m].get("bereich") == cv["id"]
-                    for m in state.units_on(s, e["karte"])
-                )
-            ]
-            if free:
-                e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
-                prot.append(f"{n} under {e['bereich']} (step 8; if there is too little cover, distribute randomly)")
-        e["status"] = [x for x in e["status"] if x not in ("Pinned", "Exposed")]
-        e["ziel"] = None
-        for f in (
-            "ziel_offen",
-            "konzentriert",
-            "cf",
-            "grenade",
-            "grenade_critical",
-            "cf_critical",
-            "mine_hit",
-            "nur_pdf",
-            "indirekt",
-            "munition_leer",
-            "kein_feuer_bis_clean_up",
-        ):
-            e.pop(f, None)
-        m = e.get("munition")
-        if m and m.get("start") is not None:
-            m["punkte"] = m["start"]
-            e.pop("out_of_ammo", None)
-        if e.get("spotter"):
-            e["missionen"] = 2
-        if e["seite"] == "US" and e.get("attachment") is None:
-            orig = s.get("aufbau_einheiten", {}).get(n, {})
-            if orig.get("funk") is not None:
-                e["funk"] = copy.deepcopy(orig["funk"])
-                if s.get("co_tac_mittel") == "telefon":
-                    for g in e["funk"]:
-                        if g["netz"] == "CO TAC":
-                            g["typ"] = "EE8"
-        e.pop("assets", None)
+    reset_cards(s, prot)
+    remove_leaving_units(s, prot)
+    reset_units(s, prot)
     prot.append(
         "Pinned, PDF and VOF removed, ammo and assets replenished, dropped assets off the board (steps 10-12); cover markers and mines remain (step 7)"
     )
-    for kk in s["kommandos"].values():
-        kk.update(verfuegbar=0, gespart=0, aktiviert=False, fertig=False)
-    s["feuermissionen"] = copy.deepcopy(s.get("fm_start", s.get("feuermissionen")))
-    s["target_marker"] = {}
-    s["assets_pool"] = copy.deepcopy(s.get("assets_start", s.get("assets_pool", {})))
-    # L58: turn-based event flags apply only in the attempt in which they were drawn (turn counter restarts, 3.9 step 13)
-    for _f in ("hold_up", "ereignis_pflicht", "ereignis_flanke", "ereignis_route", "fm_gesperrt", "ereignis_erledigt"):
-        s.pop(_f, None)
-    if s.get("gegenangriff"):
-        s["feind_taktik"] = s["gegenangriff"].get("taktik_vorher", s.get("feind_taktik"))
-        s.pop("gegenangriff")
-        prot.append("Counterattack ends with the last turn (BGG E16)")
+    reset_pools_and_events(s, prot)
     if s.get("patrouille_mission"):
-        new_pc = []
-        for kid, letter in s.get("pc_start", {}).items():
-            c = state.card(s, kid)
-            if not c.get("pc") and kid != s.get("ziele", {}).get("cop"):
-                c["pc"] = letter
-                new_pc.append(kid)
-        z = s.setdefault("ziele", {})
-        z["primaer"], z["route"] = None, {}
-        s["target_marker"] = {}
-        prot.append(
-            ("New PC markers on " + ", ".join(sorted(new_pc)) if new_pc else "No PC markers to replace")
-            + "; place Primary, Route Points and Artillery Concentration again (objective primary/route) [2.6.3, MSR 1, Normandy M3 p.24]"
-        )
+        replace_patrol_markers(s, prot)
     k["versuch"] = k.get("versuch", 1) + 1
     s["zug"], s["phase"] = 1, state.sop(s)[0][0]
     s["reattempt_setup"] = True
@@ -685,6 +668,110 @@ def cmd_reattempt(s, args):
     )
     state.save_state(s, "Reattempt preparation: " + "; ".join(prot), "3.9 p.17")
     briefing.print_board(prot, s)
+
+
+def reset_cards(s, prot):
+    """Step 6 casualties off, external markers except Mines (inactive again), dropped assets and ammo off the board."""
+    for kid, c in s["karten"].items():
+        if c.get("casualties") or c.get("casualties_feind"):
+            prot.append(f"{kid}: casualties removed (step 6)")
+            c["casualties"] = c["casualties_feind"] = 0
+        c["extern"] = [x for x in c.get("extern", []) if x["typ"] == "Mines"]
+        for x in c["extern"]:
+            x["aktiv"] = False
+        c.pop("grenade_miss", None)
+        c["assets"] = []
+        c["munition"] = {}
+
+
+def remove_leaving_units(s, prot):
+    """Step 6: enemy Paralyzed/Litter Teams removed; the BN HQ (Checking Up) leaves the board."""
+    for n, e in list(s["einheiten"].items()):
+        if e["seite"] == "Feind" and e["typ"] in ("Paralyzed Team", "Litter Team"):
+            del s["einheiten"][n]  # reattempt reset (3.9 step 6), not a removal from play
+            prot.append(f"{n} removed (step 6)")
+        if e.get("ebene") == "BN" and e["seite"] == "US":
+            del s["einheiten"][n]  # the visiting BN HQ goes back off-map (it can return), not a removal from play
+            s["kommandos"].pop(n, None)
+            prot.append(f"{n} (Checking Up) leaves the board; events end with the attempt (turn counter restarts)")
+
+
+# per-unit fields of the last attempt that end with it (3.9 steps 8-11)
+REATTEMPT_DROPPED_FIELDS = (
+    "ziel_offen",
+    "konzentriert",
+    "cf",
+    "grenade",
+    "grenade_critical",
+    "cf_critical",
+    "mine_hit",
+    "nur_pdf",
+    "indirekt",
+    "munition_leer",
+    "kein_feuer_bis_clean_up",
+)
+
+
+def reset_units(s, prot):
+    """Steps 8-12: enemies under cover, Pinned/Exposed and fire off, ammo, spotter missions and radios replenished."""
+    for n, e in s["einheiten"].items():
+        if e["seite"] == "Feind" and e.get("bereich", "offen") == "offen":
+            free = state.free_cover(s, e["karte"], "Feind")  # covers without US units under them
+            if free:
+                e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
+                prot.append(f"{n} under {e['bereich']} (step 8; if there is too little cover, distribute randomly)")
+        e["status"] = [x for x in e["status"] if x not in (rules.PINNED, rules.EXPOSED)]
+        e["ziel"] = None
+        for f in REATTEMPT_DROPPED_FIELDS:
+            e.pop(f, None)
+        m = e.get("munition")
+        if m and m.get("start") is not None:
+            m["punkte"] = m["start"]
+            e.pop("out_of_ammo", None)
+        if e.get("spotter"):
+            e["missionen"] = 2
+        if e["seite"] == "US" and e.get("attachment") is None:
+            orig = s.get("aufbau_einheiten", {}).get(n, {})
+            if orig.get("funk") is not None:
+                e["funk"] = copy.deepcopy(orig["funk"])
+                if s.get("co_tac_mittel") == "telefon":
+                    for g in e["funk"]:
+                        if g["netz"] == "CO TAC":
+                            g["typ"] = "EE8"
+        e.pop("assets", None)
+
+
+def reset_pools_and_events(s, prot):
+    """Commands, fire missions, Target markers and the asset pool from the start; turn-based events end (L58)."""
+    for kk in s["kommandos"].values():
+        kk.update(verfuegbar=0, gespart=0, aktiviert=False, fertig=False)
+    s["feuermissionen"] = copy.deepcopy(s.get("fm_start", s.get("feuermissionen")))
+    s["target_marker"] = {}
+    s["assets_pool"] = copy.deepcopy(s.get("assets_start", s.get("assets_pool", {})))
+    # L58: turn-based event flags apply only in the attempt in which they were drawn (turn counter restarts, 3.9 step 13)
+    for _f in ("hold_up", "ereignis_pflicht", "ereignis_flanke", "ereignis_route", "fm_gesperrt", "ereignis_erledigt"):
+        s.pop(_f, None)
+    if s.get("gegenangriff"):
+        s["feind_taktik"] = s["gegenangriff"].get("taktik_vorher", s.get("feind_taktik"))
+        s.pop("gegenangriff")
+        prot.append("Counterattack ends with the last turn (BGG E16)")
+
+
+def replace_patrol_markers(s, prot):
+    """Combat Patrol: new PC markers where they were taken (not on the COP); Primary and Route Points again [2.6.3, MSR 1]."""
+    new_pc = []
+    for kid, letter in s.get("pc_start", {}).items():
+        c = state.card(s, kid)
+        if not c.get("pc") and kid != s.get("ziele", {}).get("cop"):
+            c["pc"] = letter
+            new_pc.append(kid)
+    z = s.setdefault("ziele", {})
+    z["primaer"], z["route"] = None, {}
+    s["target_marker"] = {}
+    prot.append(
+        ("New PC markers on " + ", ".join(sorted(new_pc)) if new_pc else "No PC markers to replace")
+        + "; place Primary, Route Points and Artillery Concentration again (objective primary/route) [2.6.3, MSR 1, Normandy M3 p.24]"
+    )
 
 
 def experience_from_steps(levels):
@@ -725,8 +812,12 @@ def experience_from_steps(levels):
 
 def cmd_reconstitute(s, args):
     """[RULE 3.9 step 3 p.17] Squads, HQs and company weapons teams (no attachments) from LATs; each LAT = 1 Green step."""
-    if not s.get("reattempt_setup"):
-        raise rules.Violation("reconstitute only during reattempt preparation (3.9); during the turn use 4.2.3i/4.2.1d")
+    if not _between_missions(s):  # L186: also between missions (12.2), not only in the reattempt preparation
+        raise rules.Violation(
+            "reconstitute only between missions (12.2) or in the reattempt preparation (3.9); during the turn use 4.2.3i/4.2.1d"
+        )
+    if not args or args[0].startswith("--"):  # L220: usage instead of a traceback
+        raise rules.Violation(f"Usage: {_usage('reconstitute')} [RULE 3.9 p.17, 12.2 p.81]")
     n = args[0]
     o = options.parse_opts(args[1:])
     lats = options.list_option(o, "--aus")
@@ -766,9 +857,10 @@ def cmd_reconstitute(s, args):
             f"{n} with {len(lats)} step(s) on {e['karte']}"
             + (", Green (new HQs are always Green)" if state.is_hq(e) else "")
         )
-    if o.get("--erfahrung") and not state.is_hq(e):
-        e["erfahrung"] = o["--erfahrung"]
-        prot.append(f"Experience {o['--erfahrung']} (12.6 table, promotions via xp spend)")
+    level = options.text_opt(o, "--erfahrung", _usage("reconstitute"))
+    if level and not state.is_hq(e):
+        e["erfahrung"] = level
+        prot.append(f"Experience {level} (12.6 table, promotions via xp spend)")
     elif not state.is_hq(e):
         old_steps = state.steps(e) - len(lats)
         # L167 [RULE 3.9 step 3, 12.2 'Reduce all other LAT units to Green']: each LAT counts as one Green step
@@ -784,7 +876,7 @@ def cmd_reconstitute(s, args):
                 f"{n}: step mix {'+'.join(x[0] for x in levels)} is not in table 12.6; set the experience with --experience= or set"
             )
     for t in lats:
-        del s["einheiten"][t]
+        del s["einheiten"][t]  # merged into the reconstituted unit (3.9 step 3), not a removal from play
     prot.append(f"used up: {', '.join(lats)}")
     state.save_state(s, "Reconstitution: " + "; ".join(prot), "3.9 p.17, 12.6 p.82")
     briefing.print_board(prot, s)

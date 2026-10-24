@@ -31,10 +31,14 @@ def test_los_blocked_by_higher_card_between(board):
 
 
 def test_higher_observer_sees_over_lower_card(board):
+    """[RULE 5.2.2] dark edges block on the same level; a higher card sees over a lower one between, both ways."""
+    board["karten"]["12"]["raender"] = "gruen"
+    ok, reason = geometry.los(board, "11", "13")
+    assert not ok and "dark edges" in reason  # same level: the dark edges of 12 block
     board["karten"]["11"]["elevation"] = 2
-    board["karten"]["12"]["raender"] = "gruen"  # dark edges would block on the same level
-    assert geometry.los(board, "11", "13")[0]
-    assert not geometry.los(board, "31", "33")[0] or board["karten"]["32"]["raender"] == "weiss"
+    assert geometry.los(board, "11", "13")[0]  # higher observer sees over 12
+    assert geometry.los(board, "13", "11")[0]  # and is seen from 13 (reciprocal)
+    assert geometry.los(board, "31", "33")[0]  # control: white edges on 32, same level
 
 
 def test_incoming_blocks_los_out_and_through_but_not_into(board):

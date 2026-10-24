@@ -19,9 +19,3 @@ def rule(ref, page=None):
     if ref.startswith("[") or " " in ref and not ref[0].isdigit():
         return ref if ref.startswith("[") else f"[{ref}]"
     return f"[{RULE} {ref}]"
-
-
-def board(prot, text):
-    """Append a board instruction to a protocol list and return it (for chaining in handlers)."""
-    prot.append(text)
-    return prot

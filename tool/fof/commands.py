@@ -1,19 +1,108 @@
 """Friendly Command Phase: activation, impulses, orders of the action menu, late orders, corrections (4.x)."""
 
-import types
+from __future__ import annotations
+
+import dataclasses
+from typing import Any
 
 from . import briefing, campaign, combat, comms, contact, enemy, events, fire, geometry, messages, options, rules, state
 
 
-def pay_commands(s, hq_name, cost, rule):
+YES_WORDS = ("ja", "yes")
+NO_WORDS = ("nein", "no")
+
+# Working flags (review Struktur 10): plain dict keys on the game state s or on a unit e that live for one command,
+# one action or one phase. Who sets / reads / clears them:
+#   s["_befehl_opts"]      options of the running order; set by cmd_order, read by move_unit (comms.lay_line), popped
+#                          by book_order and state.save_state (never saved)
+#   s["_pionier_check"]    (unit, card, mine draws) of an Engineer move; set by _order_move, popped by move_unit
+#   s["_hinweise"]         hint lines for this command's output; appended anywhere, popped and printed by
+#                          state.save_state / briefing / setup (never saved)
+#   s["letzter_versuch"]   [unit, action, phase] of the last failed attempt; set by the order handlers on failure,
+#                          cleared on success, by Exhort (_order_4_2_1b) and by phase.cmd_end_turn (saved)
+#   e["check_offen"]       enemy unit still owes its Activity Check; set and cleared by enemy.prepare_enemy_check,
+#                          cleared by enemy.cmd_enemy_action (saved)
+#   e["crew_hit_offen"]    crew Fire Team of a Knocked Out vehicle still owes its HIT; set by vehicles (Knocked Out),
+#                          popped by combat.cmd_hit (saved)
+#   e["in_bewegung"]       vehicle has moved in its current action (moving-fire rows); set by vehicles.do_move,
+#                          popped by vehicles.end_action and vehicles.clean_up (saved)
+#   e["hat_gehandelt"]     vehicle has acted in 3.6; set by vehicles.end_action, read by vehicles.leave_3_6, popped by
+#                          vehicles.clean_up (saved)
+#   u["_gleiche_karte_ok"] package unit may be placed on a card that already holds enemies; only read by contact.py,
+#                          set neither by the code nor by the data in this repository
+# The fire working fields (_rauch_ziel, _vof_sperre, _reichweite_vof, konzentriert, ziel_offen, nur_pdf) belong to
+# fire.py and are all cleared by fire.cease_fire(e) (L225).
+
+
+def spotted_enemies(s, kid):
+    """Enemy units on card kid that are Spotted, in board order (review Struktur 9: one helper for the copies)."""
+    return [m for m in state.units_on(s, kid, "Feind") if s["einheiten"][m].get("spotted")]
+
+
+def unspotted_enemies(s, kid):
+    """Enemy units on card kid that are Unspotted, in board order (review Struktur 9)."""
+    return [m for m in state.units_on(s, kid, "Feind") if not s["einheiten"][m].get("spotted")]
+
+
+def text_opt(o, key):
+    """L232 (review H12): a value option as text; a bare --flag where a value is needed is a Violation, not a crash
+    on True.split(). Missing: None."""
+    v = o.get(key)
+    if v is True:
+        raise rules.Violation(f"Option {key} needs a value ({key}=..)")
+    return v
+
+
+def parse_per_unit(value):
+    """L230 (review H8): per-unit results '1/1:yes,2/1:no' (also ja/nein, any case) -> {'1/1': 'ja', '2/1': 'nein'}.
+    One parser for Platoon Move/Infiltrate, Platoon Fire and pyro signals; a bad result word is a Violation."""
+    result = {}
+    for item in (value if isinstance(value, str) else "").split(","):
+        if ":" not in item:
+            continue
+        unit_, word = item.rsplit(":", 1)
+        w = word.strip().lower()
+        if w in YES_WORDS:
+            result[unit_.strip()] = "ja"
+        elif w in NO_WORDS:
+            result[unit_.strip()] = "nein"
+        else:
+            raise rules.Violation(f"{unit_.strip()}: result must be yes or no, got '{word.strip()}'")
+    return result
+
+
+def team_option(o, default):
+    """L240 (review M13): --team=fire|assault in any spelling -> 'Fire' / 'Assault'; anything else is a Violation."""
+    v = o.get("--team")
+    if v is None or v is True:
+        return default
+    t = str(v).strip().capitalize()
+    if t not in ("Fire", "Assault"):
+        raise rules.Violation(f"--team=fire|assault expected, got '{v}'")
+    return t
+
+
+def check_impulse_budget(s, hq_name, cost, rule, free=False):
+    """L234 (review M7): the Commands and the per-impulse cap of pay_commands, checked before the draw prompt so the
+    player does not draw cards for an order that cannot be paid [RULE 4.1.3 p.20]."""
+    if free:
+        return
     k = s["kommandos"][hq_name]
     gi = hq_name == "GI"
     total_ = k["verfuegbar"] + (0 if gi else k["gespart"])
     if total_ < cost:
         raise rules.Violation(f"{hq_name} has {total_} Commands, action costs {cost} [RULE {rule}]")
-    spent = s.setdefault("impuls_ausgegeben", {}).get(hq_name, 0)
+    spent = s.get("impuls_ausgegeben", {}).get(hq_name, 0)
     if not gi and spent + cost > rules.MAX_PER_IMPULSE[s["sicht"]]:
-        raise rules.Violation(f"At most {rules.MAX_PER_IMPULSE[s['sicht']]} Commands per impulse [RULE 4.1.3 p.20]")
+        raise rules.Violation(
+            f"At most {rules.MAX_PER_IMPULSE[s['sicht']]} Commands per impulse ({spent} spent, action costs {cost}) [RULE 4.1.3 p.20]"
+        )
+
+
+def pay_commands(s, hq_name, cost, rule):
+    k = s["kommandos"][hq_name]
+    check_impulse_budget(s, hq_name, cost, rule)
+    spent = s.setdefault("impuls_ausgegeben", {}).get(hq_name, 0)
     remainder = cost
     if k["verfuegbar"] >= remainder:
         k["verfuegbar"] -= remainder
@@ -25,6 +114,7 @@ def pay_commands(s, hq_name, cost, rule):
 
 
 def cmd_activate(s, args):
+    rules.need(args, 1, "activate <hq>")
     hq = args[0]
     e = state.unit(s, hq)
     if not state.is_hq(e):
@@ -33,6 +123,7 @@ def cmd_activate(s, args):
         bn = s.get("aktiver_hq")
         if e.get("ebene") != "CO" or not bn:
             raise rules.Violation("In the BN HQ impulse the BN HQ only activates the CO HQ [RULE 4.2.1a p.22]")
+        activation_allowed(s, hq, e)  # L236 (review M9): same duplicate and Fire Team side checks as the other paths
         comms.communication(s, bn, hq)
         pay_commands(s, bn, 1, "4.2.1a p.22")
         s["kommandos"][hq]["aktiviert"] = True
@@ -80,13 +171,7 @@ def cmd_activate(s, args):
         return
     else:
         raise rules.Violation(f"Activation only in 3.3.1a/b, currently {s['phase']} [RULE 3.3.1 p.15]")
-    if state.fire_team_side(e):
-        raise rules.Violation(
-            f"{hq} is on its Fire Team side, cannot be activated, must draw Initiative [RULE 4.1.4 p.20]"
-        )
-    k = s["kommandos"][hq]
-    if k["aktiviert"]:
-        raise rules.Violation(f"{hq} is already activated")
+    k = activation_allowed(s, hq, e)
     co = s.get("co_hq")
     if co and co != "off-map" and s["phase"] == "3.3.1b":
         if s.get("aktiver_hq") != co:
@@ -111,10 +196,31 @@ def cmd_activate(s, args):
     briefing.print_board([], s)
 
 
+def activation_allowed(s, hq, e):
+    """[RULE 4.1.4 p.20] no activation on the Fire Team side; an HQ is activated once per turn. Returns the Command record."""
+    if state.fire_team_side(e):
+        raise rules.Violation(
+            f"{hq} is on its Fire Team side, cannot be activated, must draw Initiative [RULE 4.1.4 p.20]"
+        )
+    k = command_record(s, hq)
+    if k["aktiviert"]:
+        raise rules.Violation(f"{hq} is already activated")
+    return k
+
+
+def command_record(s, hq):
+    """L233 (review M14): the Command record of an HQ/Staff; a unit without one (not an HQ) is a Violation, not a KeyError."""
+    k = s["kommandos"].get(hq)
+    if k is None:
+        raise rules.Violation(f"{hq} is not an HQ/Staff with a Command marker [RULE 4.1 p.18]")
+    return k
+
+
 def cmd_hq(s, args):
+    rules.need(args, 1, "hq <hq>")
     hq = args[0]
     e = state.unit(s, hq)
-    k = s["kommandos"][hq]
+    k = command_record(s, hq)
     ph = s["phase"]
     if ph not in rules.IMPULSES - {"3.3.1a", "3.3.2d"}:
         raise rules.Violation(f"No HQ impulse in phase {ph}")
@@ -165,10 +271,12 @@ def cmd_card(s, args):
     k = s["kommandos"][hq]
     if k.get("gezogen") == [s["zug"], s["phase"]]:
         raise rules.Violation(f"{hq} has already drawn in this impulse [RULE 4.1 p.18]")
-    nr, raw = args[0], int(args[1])
+    rules.need(args, 2, "card <no|?> <helmet number> [--raw]")
+    nr, raw = args[0], rules.int_value(args[1], "helmet number")
+    o = options.parse_opts(args[2:])
     e = state.unit(s, hq)
     mods = []
-    if "--roh" not in args:
+    if not o.get("--roh"):
         ez = comms.experience(e)
         if ez == "Green":
             mods.append(("Green", -1))
@@ -216,7 +324,11 @@ def cmd_card(s, args):
 def cmd_gi(s, args):
     if s["phase"] != "3.3.2d":
         raise rules.Violation(f"General Initiative only in 3.3.2d, currently {s['phase']} [RULE 3.3.2d p.16]")
-    nr, small_number = args[0], int(args[1])
+    if len(args) < 2 or not args[1].lstrip("-").isdigit():  # L212: usage instead of a traceback
+        raise rules.Violation(
+            "General Initiative: fof.py gi <card no|?> <small number in the star (not the helmet), unmodified> [RULE 3.3.2d p.16]"
+        )
+    nr, small_number = args[0], rules.int_value(args[1], "small number")
     total = small_number // 2 if s.get("einzelzug") else small_number
     o = options.parse_opts(args[2:])
     gi_skill = ""
@@ -280,15 +392,23 @@ def cmd_done(s, args):
     print(briefing.check_stamp(s))
 
 
-def new_cover_marker(s, kid, type_, value):
+def add_cover_marker(s, kid, type_, value, field=None):
+    """New Cover marker on card kid with the lowest free id; returns the marker dict (L254). field: whether the marker
+    is printed on the card (does not count towards the Cover Potential); default: everything but Basic Cover."""
     c = state.card(s, kid)
     i = len(c.setdefault("cover", [])) + 1
     cid = f"C{i}"
     while any(x["id"] == cid for x in c["cover"]):
         i += 1
         cid = f"C{i}"
-    c["cover"].append({"id": cid, "typ": type_, "wert": value, "feld": type_ != "Basic Cover"})
-    return cid
+    marker = {"id": cid, "typ": type_, "wert": value, "feld": type_ != "Basic Cover" if field is None else field}
+    c["cover"].append(marker)
+    return marker
+
+
+def new_cover_marker(s, kid, type_, value):
+    """Id of a new Cover marker (callers in contact, enemy and setup use the id)."""
+    return add_cover_marker(s, kid, type_, value)["id"]
 
 
 def mark(e, m):
@@ -296,25 +416,29 @@ def mark(e, m):
         e["status"].append(m)
 
 
-def new_name(s, type_):
+def new_name(s, type_, reuse_removed=False):
+    """Lowest free counter number. reuse_removed: enemy counters Removed from Play return to the counter mix and are
+    reused (glossary 'Removed from Play', E88, L215); friendly ones stay blocked (only back via Reconstitution)."""
     i = 1
-    while f"{type_} {i}" in s["einheiten"] or f"{type_} {i}" in s.get("removed_from_play", []):
+    while f"{type_} {i}" in s["einheiten"] or (not reuse_removed and f"{type_} {i}" in s.get("removed_from_play", [])):
         i += 1
     return f"{type_} {i}"
 
 
-def set_area(s, z, name, b):
+def set_area(s, z, b):
+    """Put unit z under Cover marker b on its card ('offen' = out of cover) [5.3]. _name is unused; it stays in the
+    signature until the caller in setup.py stops passing it (review LOW)."""
     if b == "offen":
         z["bereich"] = "offen"
         return
-    if not [c for c in state.card(s, z["karte"]).get("cover", []) if c["id"] == b]:
+    if not any(c["id"] == b for c in state.card(s, z["karte"]).get("cover", [])):
         raise rules.Violation(f"Cover {b} does not exist on {z['karte']}")
     occupied = {
         s["einheiten"][m]["seite"] for m in state.units_on(s, z["karte"]) if s["einheiten"][m].get("bereich") == b
     }
     if occupied and occupied != {z["seite"]}:
         raise rules.Violation(f"Cover {b} is occupied by the opposing side [5.3]")
-    cv = [c for c in state.card(s, z["karte"])["cover"] if c["id"] == b][0]
+    cv = next(c for c in state.card(s, z["karte"])["cover"] if c["id"] == b)  # exists, checked above
     if cv.get("kapazitaet"):
         st = sum(
             state.steps(s["einheiten"][m])
@@ -329,7 +453,15 @@ def set_area(s, z, name, b):
 
 
 def check_move(s, e, n, target_card, akt):
-    if "Exposed" in e["status"]:
+    """Legality of one card move (read-only). The VOF on the destination is computed at most once (review Effizienz)."""
+    memo = {}
+
+    def vof_on(kid):
+        if kid not in memo:
+            memo[kid] = fire.vof_against(s, kid, e["seite"])
+        return memo[kid]
+
+    if rules.EXPOSED in e["status"]:
         raise rules.Violation(f"{n} is Exposed and may no longer change cards [RULE 5.1.2 p.31]")
     if not geometry.adjacent(s, e["karte"], target_card):
         raise rules.Violation(f"{target_card} is not adjacent to {e['karte']} (diagonal counts too) [RULE 5.1.2 p.31]")
@@ -347,12 +479,10 @@ def check_move(s, e, n, target_card, akt):
             f"{n} is under the Mine marker and may not move to an adjacent card this turn [RULE 7.9.1 p.54]"
         )
     if state.is_v4(s):
-        events.event_move(s, e, target_card, [])
+        event_move_check(s, e, target_card)
     if state.pinned(e) or e["typ"] in ("Fire Team", "Litter Team", "Paralyzed Team") or state.fire_team_side(e):
         friend = [m for m in state.units_on(s, target_card, e["seite"]) if m != n]
-        ok = (zk.get("staging") and akt in ("4.2.2a", "4.2.2b")) or (
-            friend and fire.vof_against(s, target_card, e["seite"]) is None
-        )
+        ok = (zk.get("staging") and akt in ("4.2.2a", "4.2.2b")) or (friend and vof_on(target_card) is None)
         if not ok:
             raise rules.Violation(
                 f"{n} (Pinned/LAT/Fire Team side) may only move to a Staging Area or to a card occupied by friendly units without VOF [RULE 4.2.5 p.26]"
@@ -365,8 +495,8 @@ def check_move(s, e, n, target_card, akt):
         )
     if akt in ("4.2.2c", "4.2.2d"):
         if (
-            fire.vof_against(s, e["karte"], e["seite"]) is None
-            and fire.vof_against(s, target_card, e["seite"]) is None
+            vof_on(e["karte"]) is None
+            and vof_on(target_card) is None
             and not state.card(s, e["karte"]).get("grenade_miss")
             and not zk.get("grenade_miss")
         ):
@@ -378,13 +508,31 @@ def check_move(s, e, n, target_card, akt):
     diagonal_pdf_check(s, e, target_card)
 
 
+_UNSET = object()
+
+
+def event_move_check(s, e, target_card):
+    """L241 (review M15): events.event_move for its Violations only (Trouble on the Flank). It also books the 'Event
+    fulfilled' flag; here that flag is restored, so the booking and its protocol line happen once, in move_unit."""
+    ev = s.get("ereignis_flanke")
+    before = ev.get("erfuellt", _UNSET) if ev else _UNSET
+    try:
+        events.event_move(s, e, target_card, [])
+    finally:
+        if ev:
+            if before is _UNSET:
+                ev.pop("erfuellt", None)
+            else:
+                ev["erfuellt"] = before
+
+
 def diagonal_pdf_check(s, e, target_card):
     """[RULE 5.1.2 p.32] a diagonal move may not cross a PDF between the two orthogonal neighbours (both sides, L131)."""
     ka, zk = state.card(s, e["karte"]), state.card(s, target_card)
     if abs(ka["reihe"] - zk["reihe"]) == 1 and abs(ka["spalte"] - zk["spalte"]) == 1:
         e1, e2 = geometry.card_at(s, ka["reihe"], zk["spalte"]), geometry.card_at(s, zk["reihe"], ka["spalte"])
         if e1 and e2:
-            for m, f in s["einheiten"].items():
+            for f in s["einheiten"].values():
                 if fire.is_firing(f) and f["ziel"] != f["karte"]:
                     path_cards = [f["karte"]] + (geometry.line_between(s, f["karte"], f["ziel"]) or []) + [f["ziel"]]
                     for i in range(len(path_cards) - 1):
@@ -434,28 +582,69 @@ def grenade_back_notes(s, thrower, names, success, prot, thrower_name=None):
         note = grenade_back_note(s, thrower, s["einheiten"][m], success, m)
         prot.append(note)
         if "free response throw" in note and tn:
-            s.setdefault("granate_antworten", []).append({"werfer": m, "angreifer": tn, "karte": thrower["karte"]})
+            s.setdefault("granate_antworten", []).append(
+                {"werfer": m, "angreifer": tn, "karte": thrower["karte"], "zug": s["zug"], "phase": s["phase"]}
+            )
             prot[-1] += f': fof.py grenade response "{m}" --success=yes|no'
+
+
+def open_grenade_response(s, name, e):
+    """L231 (review H9): the first response record of `name` whose attacker is still on the card; records of earlier
+    turns and records whose attacker left the card (or play) lapse silently, they no longer block newer ones."""
+    records = s.get("granate_antworten", [])
+    live = []
+    for x in records:
+        if x.get("zug", s["zug"]) != s["zug"]:
+            continue  # response throws are booked right after the attack, never in a later turn [7.10.5]
+        att = s["einheiten"].get(x["angreifer"])
+        if x["werfer"] == name and (not att or att["karte"] != e["karte"]):
+            continue
+        live.append(x)
+    records[:] = live
+    for x in records:
+        if x["werfer"] == name:
+            return x
+    raise rules.Violation(
+        f"{name} has no open free response throw (7.10.5); responses are offered right after a Point Blank Grenade Attack"
+    )
+
+
+def apply_grenade(s, ze, value, critical, prot, rule):
+    """[RULE 7.10.1 p.54, 7.10.3 p.55] Grenade VOF on one unit out of cover or on the whole stack under its Cover
+    marker; a Critical Hit under cover removes the cover benefit (combined marker, E61), out of cover it is a second
+    Grenade VOF marker. L252: one loop for the order and the free response. Returns (stack, under_cover)."""
+    f = state.unit(s, ze)
+    under = f.get("bereich", "offen") != "offen"
+    stack = grenade_stack(s, ze)
+    for m in stack:
+        g = s["einheiten"][m]
+        g.setdefault("grenade", []).append(value)
+        if critical and under:
+            g["grenade_critical"] = True
+        elif critical:
+            g["grenade"].append(value)
+    where = f" (stack under {f['bereich']})" if under else ""
+    prot.append(f"Grenade VOF {value} on {', '.join(stack)}{where} (cumulative) [{rule}]")
+    if critical:
+        prot.append(
+            f"Critical Hit: use the combined Grenade/Critical Hit marker instead of the plain Grenade VOF marker (E61); the stack loses the benefit of cover {f['bereich']} in Combat Effects [7.10.3 p.55]"
+            if under
+            else f"Critical Hit: a second Grenade VOF marker on {ze} (both count) [7.10.3 p.55]"
+        )
+    return stack, under
 
 
 def cmd_grenade(s, args):
     """grenade response <responder> --success=yes|no [--critical=yes] [--jam=yes]: 7.10.5 Free Grenade Attack Response, no
     Command, booked right after the attack (also in the Enemy Activity Phase). L144"""
+    usage = 'grenade response "<responder>" --success=yes|no [--critical=yes] [--jam=yes]'
     if not args or args[0] not in ("antwort", "response"):
-        raise rules.Violation('grenade response "<responder>" --success=yes|no [--critical=yes] [--jam=yes]')
+        raise rules.Violation(usage)
+    rules.need(args, 2, usage)
     name = args[1]
     o = options.parse_opts(args[2:])
     e = state.unit(s, name)
-    pending = [x for x in s.get("granate_antworten", []) if x["werfer"] == name]
-    if not pending:
-        raise rules.Violation(
-            f"{name} has no open free response throw (7.10.5); responses are offered right after a Point Blank Grenade Attack"
-        )
-    rec = pending[0]
-    att = s["einheiten"].get(rec["angreifer"])
-    if not att or att["karte"] != e["karte"]:
-        s["granate_antworten"].remove(rec)
-        raise rules.Violation(f"{rec['angreifer']} is no longer on {e['karte']}: response lapses [7.10.5]")
+    rec = open_grenade_response(s, name, e)
     if o.get("--erfolg") not in ("ja", "nein"):
         n_cards, who, base = comms.card_count(s, "4.2.4d", e, e)
         n_cards += 1 if e["seite"] == "Feind" and enemy.leader_present(s, e) else 0
@@ -471,24 +660,10 @@ def cmd_grenade(s, args):
         jam(s, name, prot)
         o["--erfolg"] = "nein"
     if o["--erfolg"] == "ja":
-        value = int(o.get("--wert", -4 if e["seite"] == "US" else s.get("granate_vof", -3)))
-        stack = grenade_stack(s, rec["angreifer"])
-        critical = o.get("--kritisch") == "ja"
-        under = att.get("bereich", "offen") != "offen"
-        for m in stack:
-            g = s["einheiten"][m]
-            g.setdefault("grenade", []).append(value)
-            if critical and under:
-                g["grenade_critical"] = True
-            elif critical:
-                g["grenade"].append(value)
-        prot.append(
-            f"Grenade VOF {value} on {', '.join(stack)}"
-            + (f" (stack under {att['bereich']})" if under else "")
-            + " [7.10.1, 7.10.5]"
-        )
-        if critical:
-            prot.append("Critical Hit: combined Grenade/Critical Hit marker (E61) [7.10.3 p.55]")
+        # L257 (review M27): one default for the enemy Grenade VOF (Normandy p.13: German Grenade Attacks are -4 too)
+        default = -4 if e["seite"] == "US" else s.get("granate_vof", rules.GRENADE_VOF_DEFAULT)
+        value = options.int_opt(o, "--wert", "Grenade VOF value", default)
+        apply_grenade(s, rec["angreifer"], value, o.get("--kritisch") == "ja", prot, "7.10.1, 7.10.5")
         if e["seite"] == "US" and state.is_v4(s) and e["typ"] not in ("Fire Team", "Assault Team"):
             campaign.book_xp(
                 s,
@@ -528,7 +703,7 @@ def grenade_expires(s, e, name, prot):
         )
 
 
-def move_unit(s, n, target_card, area, exposed, prot):
+def move_unit(s, n, target_card, area, exposed, prot, open_all=True):
     e = s["einheiten"][n]
     from_ = e["karte"]
     grenade_expires(s, e, n, prot)
@@ -540,7 +715,7 @@ def move_unit(s, n, target_card, area, exposed, prot):
     e["karte"] = target_card
     e["bereich"] = "offen"
     if area and area != "offen":
-        set_area(s, e, n, area)
+        set_area(s, e, area)
     new_cover = fire.cover_of(s, e)
     zk = state.card(s, target_card)
     if state.card(s, from_).get("staging") and zk.get("staging"):
@@ -553,28 +728,25 @@ def move_unit(s, n, target_card, area, exposed, prot):
     ):
         exposed = False  # 5.1.2
     if exposed:
-        mark(e, "Exposed")
+        mark(e, rules.EXPOSED)
     prot.append(
         f"{n} to {target_card}"
         + (f" under {area}" if area and area != "offen" else "")
-        + (", Exposed" if "Exposed" in e["status"] else ", not Exposed")
+        + (", Exposed" if rules.EXPOSED in e["status"] else ", not Exposed")
     )
-    if not (area and area != "offen") and e["seite"] == "US":
+    if (
+        not area and e["seite"] == "US" and not e.get("fahrzeug")
+    ):  # L180; L187 vehicles use no cover markers: no reminder when the player chose --area=open explicitly
         # L161 [RULE 5.1.2 p.31] 'When entering another card that has an unoccupied or friendly-occupied Cover marker,
         # the moving unit may move directly under the Cover marker.'
-        foe = state.opponent_of_side(e["seite"])
-        free = [
-            cv["id"]
-            for cv in zk.get("cover", [])
-            if not any(s["einheiten"][m].get("bereich") == cv["id"] for m in state.units_on(s, target_card, foe))
-        ]
+        free = [cv["id"] for cv in state.free_cover(s, target_card, e["seite"])]
         if free:
             prot.append(
                 f"{n} arrives out of cover; free or friendly Cover marker on {target_card}: {', '.join(free)} - "
                 "the unit may go directly under it when entering (repeat the order with --area=<id>) [5.1.2 p.31]"
             )
     campaign.patrol_move(s, n, from_, target_card, prot)
-    fire.fire_after_move(s, n, prot)
+    fire.fire_after_move(s, n, prot, origin=from_, open_all=open_all)
     if state.units_on(s, target_card, state.opponent_of_side(e["seite"])):
         prot.append(f"Point Blank on {target_card}: each side's VOF only hits the opposing side [6.2.1b]")
     if state.is_v4(s):
@@ -594,8 +766,10 @@ def move_unit(s, n, target_card, area, exposed, prot):
             contact.request_mine_check(s, [n], target_card, prot, "unit enters a mined card")
 
 
-def cff_precheck(s, z, name, orig_name, o):
-    """7.16.1 p.58: valid target (Spotted), eligible observer with LOS, connection to the firing unit; number of cards per observer."""
+def cff_precheck(s, z, name, o):
+    """L251: unused originator parameter removed (also from indirect_lay, order_bn, order_v4; set_area keeps its
+    signature, it has callers outside commands.py).
+    7.16.1 p.58: valid target (Spotted), eligible observer with LOS, connection to the firing unit; number of cards per observer."""
     fm = s.get("feuermissionen", 0)
     if not isinstance(fm, dict) and fm != "unbegrenzt" and (fm or 0) <= 0:
         raise rules.Violation("No Fire Mission available any more [7.16.1]")
@@ -611,12 +785,12 @@ def cff_precheck(s, z, name, orig_name, o):
     if not zt:
         raise rules.Violation("Specify --target=<card with Spotted enemy> [7.16.1]")
     state.card(s, zt)
-    wp = "WP" in (o.get("--agentur") or "")
-    illum = "Illum" in (o.get("--agentur") or "")
+    wp = "WP" in (text_opt(o, "--agentur") or "")
+    illum = "Illum" in (text_opt(o, "--agentur") or "")
     if illum:
         if state.card(s, zt).get("staging"):
             raise rules.Violation("Illumination only on terrain cards [7.16.2E]")
-    elif not wp and not [m for m in state.units_on(s, zt, "Feind") if s["einheiten"][m].get("spotted")]:
+    elif not wp and not spotted_enemies(s, zt):
         raise rules.Violation(
             f"No Spotted enemy on {zt} [7.16.1]"
             + (" (WP missions may hit empty/Unspotted cards, 7.16.2C)" if isinstance(fm, dict) else "")
@@ -630,7 +804,7 @@ def cff_precheck(s, z, name, orig_name, o):
     agency = None
     if s.get("fm_werte"):
         fw = s["fm_werte"]
-        agency = o.get("--agentur") or (list(fw)[0] if len(fw) == 1 else None)
+        agency = o.get("--agentur") or (next(iter(fw)) if len(fw) == 1 else None)
         if agency not in fw:
             raise rules.Violation(
                 f"Specify --agency={'|'.join(fw)} ({', '.join(f'{a} {w:+d}' for a, w in fw.items())}) [FM1 p.36, 7.16.1 p.58]"
@@ -680,7 +854,12 @@ def target_marker_key(s, agency):
 def jam_prone(e):
     """[RULE 7.12 p.56] A, G! and H weapons teams, AT guns, A squads with ammo tracking."""
     r = e.get("vof_rating")
+    if e.get("out_of_ammo"):
+        return False  # L176, K43 [RULE 7.18.2 p.61]: with an Out of Ammo marker the unit is S rated, whatever the counter shows
     if e["typ"] in ("Weapons Team", "AT Gun") and r in ("A", "G", "H"):
+        return True
+    # L174, K42: G! superscript (S G! rocket teams such as the Bazooka) is a G!-rated weapons team, also after the rockets ran out
+    if e["typ"] == "Weapons Team" and (e.get("grenade_ranged") or e.get("rkt_leer")):
         return True
     return e["typ"] == "Squad" and r == "A" and bool(e.get("munition"))
 
@@ -735,6 +914,7 @@ def jam(s, n, prot):
         successor=new_units[0] if new_units else None,
     )
     prot.append("Jam cancels any success of this attempt [7.12 p.56]")
+    fire.open_fire(s, prot, only=new_units)  # L178 [RULE 6.1.1 p.39]: the new Fire Teams open fire at once
 
 
 def short_place(s, z, zt, o):
@@ -751,10 +931,20 @@ def short_place(s, z, zt, o):
     return between[-1] if between else z["karte"]
 
 
-def indirect_lay(s, hq_name, orig_name, orig, mortar_name, m, o, prot, gi):
+def indirect_lay(s, orig_name, orig, mortar_name, m, o, prot, gi):
     """4.2.4j p.25, 7.3.2 p.53: HQ with LOS calls Indirect Lay of the multi-step mortar unit; VOF H without PDF, terrain like Incoming."""
     if not state.is_mortar(m):
         raise rules.Violation(f"{mortar_name} is not an on-map mortar unit [RULE 4.2.4j p.25]")
+    laid = [
+        kid
+        for kid, c in s["karten"].items()
+        if any(x.get("typ") == "Indirect" and x.get("quelle") == mortar_name for x in c.get("extern", []))
+    ]
+    if laid or m.get("indirekt"):
+        # L243 (review M17): one Indirect Lay per mortar and turn; the VOF stays until Clean Up [RULE 7.3.2 p.53]
+        raise rules.Violation(
+            f"{mortar_name} already fires an Indirect Lay this turn (VOF on {', '.join(laid) or '?'}); a second one is not stacked [RULE 7.3.2 p.53]"
+        )
     if gi and orig_name == mortar_name:
         raise rules.Violation(
             "Indirect Lay needs an HQ eligible to give orders as observer: --originator=<HQ> [RULE 7.3.2 p.53]"
@@ -774,7 +964,7 @@ def indirect_lay(s, hq_name, orig_name, orig, mortar_name, m, o, prot, gi):
         raise rules.Violation(
             f"{mortar_name} has {state.steps(m)} step; Indirect Lay only with at least two steps [RULE 4.2.4j p.25, 7.3.2 p.53]"
         )
-    if not state.good_order(m) or "Exposed" in m["status"]:
+    if not state.good_order(m) or rules.EXPOSED in m["status"]:
         raise rules.Violation(f"{mortar_name} must be Good Order and not Exposed [RULE 4.2.4j p.25, 7.3.1 p.53]")
     if state.card(s, m["karte"]).get("staging"):
         raise rules.Violation("No firing from the Staging Area [RULE 2.5 p.12]")
@@ -802,7 +992,7 @@ def indirect_lay(s, hq_name, orig_name, orig, mortar_name, m, o, prot, gi):
     if not zt:
         raise rules.Violation("Specify --target=<card with Spotted enemy> [RULE 4.2.4j p.25]")
     state.card(s, zt)
-    if not [x for x in state.units_on(s, zt, "Feind") if s["einheiten"][x].get("spotted")]:
+    if not spotted_enemies(s, zt):
         raise rules.Violation(f"No Spotted enemy on {zt} [RULE 4.2.4j p.25]")
     ok, reason = geometry.los(
         s, orig["karte"], zt, ha=geometry.height_bonus(s, orig), hb=geometry.card_height_bonus(s, zt, "Feind")
@@ -910,7 +1100,7 @@ def hand_over_step(s, n, prot, team):
         combat.remove_from_play(s, n, prot, "used for the reconstitution [6.5.2 p.49]")
 
 
-def order_bn(s, target_name, akt, o):
+def order_bn(s, target_name, akt):
     """[RULE 6.5.2 p.50] 'While off-map, the BN HQ can order the Reconstitution of the CO HQ from an eligible unit with a BN TAC
     radio/phone during the BN HQ Impulse.' Order: Any Platoon HQ, Arty FO, CO Staff."""
     if akt != "4.2.1e":
@@ -968,14 +1158,7 @@ def check_grenade(s, z, target_name, o):
         if rg:
             hi = rules.RANGE_CARDS.get(s.get("rifle_grenade_reichweite", "C"), 1)
             cv = geometry.cover_marker(s, z)
-            if cv and cv["typ"] in rules.STRUCTURES + (
-                "Building",
-                "Strong Building",
-                "Light Building",
-                "Cave",
-                "Upper Story",
-                "Church Tower",
-            ):
+            if cv and cv["typ"] in rules.NO_FIRE_FROM_COVER:  # L253: one constant instead of spelled-out tuples
                 raise rules.Violation(
                     "Rifle Grenades cannot be fired from Building/Bunker/Cave/Pillbox cover, nor from Upper Story/Church Tower (E55) [RULE 7.6 p.54, 5.2.2B p.36]"
                 )
@@ -997,14 +1180,7 @@ def check_grenade(s, z, target_name, o):
             raise rules.Violation("Ranged Grenade Attack: target must be in LOS and range [RULE 7.10.1 p.55]")
         if not rg and combat.ammo(z) and combat.ammo(z)["typ"] == "RKT":
             cv = geometry.cover_marker(s, z)  # L97 [RULE 7.4 p.54]
-            if cv and cv["typ"] in rules.STRUCTURES + (
-                "Building",
-                "Strong Building",
-                "Light Building",
-                "Cave",
-                "Upper Story",
-                "Church Tower",
-            ):
+            if cv and cv["typ"] in rules.NO_FIRE_FROM_COVER:
                 raise rules.Violation(
                     "Rocket launchers (Bazooka/Panzerschreck/RCL) cannot fire from Building/Bunker/Cave/Pillbox cover, nor from Upper Story/Church Tower (E55); Point Blank with hand grenades stays allowed [RULE 7.4 p.54, 7.10.1 p.54]"
                 )
@@ -1012,7 +1188,7 @@ def check_grenade(s, z, target_name, o):
             raise rules.Violation(f"{target_name} has no ammo left for ranged Grenade Attacks [RULE 7.18.2 p.61]")
         if state.is_mortar(z):
             vb = fire.fire_position_forbidden(s, z)
-            if vb or "Exposed" in z["status"]:
+            if vb or rules.EXPOSED in z["status"]:
                 raise rules.Violation(vb or "Mortar with Exposed marker does not fire [RULE 7.3.1 p.53]")
         pdf_targets = {
             fire.effective_fire_target(s, m)
@@ -1033,7 +1209,7 @@ def check_grenade(s, z, target_name, o):
             raise rules.Violation(
                 "Ranged Grenade Attack not through other units (mortar: over friendly units, 7.3.1) [RULE 7.10.1 p.55]"
             )
-    if not [m for m in state.units_on(s, zt, "Feind") if s["einheiten"][m].get("spotted")]:
+    if not spotted_enemies(s, zt):
         raise rules.Violation(f"No Spotted enemy on {zt} [7.10]")
     return zt
 
@@ -1095,17 +1271,12 @@ def cmd_late_order(s, args):
 def cmd_correct(s, args):
     """L80 (V22): the board is the master - fix a proven wrong booking instead of editing the JSON by hand.
     correct casualty <card> <+n|-n> [--side=Feind|US] --reason=<text>"""
-    if len(args) < 3 or args[0] not in (
-        "casualty",
-        "status",
-        "granate",
-        "munition",
-        "ziel",
-    ):  # subwords: grenade, ammo, target
-        raise rules.Violation(
-            "correct casualty <card> <+n|-n> [--side=Feind|US] --reason=.. | correct status <unit> <marker> remove|add --reason=.. | correct grenade <unit> expired <origin card> --reason=.. | correct ammo <unit> <+n|-n> --reason=.. | correct target <unit> <card> --reason=.."
-        )
-    o = options.parse_opts(args[3:] if args[0] in ("casualty", "munition", "ziel") else args[4:])
+    usage = "correct casualty <card> <+n|-n> [--side=Feind|US] --reason=.. | correct status <unit> <marker> remove|add --reason=.. | correct grenade <unit> expired <origin card> --reason=.. | correct ammo <unit> <+n|-n> --reason=.. | correct target <unit> <card> --reason=.."
+    positional = {"casualty": 3, "munition": 3, "ziel": 3, "status": 4, "granate": 4}  # subwords: grenade, ammo, target
+    if not args or args[0] not in positional:
+        raise rules.Violation(usage)
+    rules.need(args, positional[args[0]], usage)  # L232 (review H12): Violation instead of IndexError
+    o = options.parse_opts(args[positional[args[0]] :])
     if not o.get("--grund"):
         raise rules.Violation("give --reason=<text> (source of the correction, e.g. counter photo, player decision)")
     if args[0] == "ziel":
@@ -1126,7 +1297,7 @@ def cmd_correct(s, args):
         m = e.get("munition")
         if not m:
             raise rules.Violation(f"{n} carries no ammo")
-        d = int(args[2])
+        d = rules.int_value(args[2], "ammo correction")
         old = m["punkte"]
         m["punkte"] = max(0, min(m.get("start", old + d), old + d))
         txt = f"Correction {n}: {m.get('typ', '')} ammo {old} to {m['punkte']} ({o['--grund']})"
@@ -1173,7 +1344,7 @@ def cmd_correct(s, args):
         print(f"Board: {marker} marker on {n}: " + ("remove" if how == "weg" else "place"))
         print(briefing.check_stamp(s))
         return
-    kid, n = args[1], int(args[2])
+    kid, n = args[1], rules.int_value(args[2], "casualty correction")
     c = state.card(s, kid)
     key = "casualties_feind" if o.get("--seite", "Feind") == "Feind" else "casualties"
     old = c.get(key, 0)
@@ -1203,43 +1374,51 @@ def _order_move(s, ctx):
     ctx.moved = [ctx.target_name]
 
 
+def platoon_move_members(s, orig_name, orig, akt):
+    """[RULE 4.2.2b/d p.23] the units a Platoon Move/Infiltrate takes along: Good Order, not Exposed, in the chain of
+    command and in communication with the originator, on its card; no tripod/H units for an infiltration. L249: one
+    member set for the stacking pre-check and the handler."""
+    candidate = []
+    for n, e in s["einheiten"].items():
+        if e["seite"] != "US" or e["karte"] != orig["karte"]:
+            continue
+        try:
+            comms.chain_of_command(s, orig_name, n)
+            comms.communication(s, orig_name, n)
+        except rules.Violation:
+            continue
+        if not state.good_order(e) or rules.EXPOSED in e["status"]:
+            continue
+        if akt == "4.2.2d" and (e.get("tripod") or e.get("vof_rating") == "H"):
+            continue
+        candidate.append(n)
+    return candidate
+
+
 def _order_move_platoon(s, ctx):
     """Order handler for: akt in ('4.2.2b', '4.2.2d')"""
     target_card = ctx.o.get("--ziel")
     if not target_card:
         raise rules.Violation("--target=<card> missing")
     state.card(s, target_card)
-    result = {}
-    for t in (ctx.success or "").split(","):
-        if ":" in t:
-            a, b = t.split(":")
-            result[a] = b
-    candidate = []
-    for n, e in s["einheiten"].items():
-        if e["seite"] != "US" or e["karte"] != ctx.orig["karte"]:
-            continue
-        try:
-            comms.chain_of_command(s, ctx.orig_name, n)
-            comms.communication(s, ctx.orig_name, n)
-        except rules.Violation:
-            continue
-        if not state.good_order(e) or "Exposed" in e["status"]:
-            continue
-        if ctx.akt == "4.2.2d" and (e.get("tripod") or e.get("vof_rating") == "H"):
-            continue
-        candidate.append(n)
+    result = parse_per_unit(ctx.success)  # L230 (review H8): yes/no and ja/nein per unit
+    candidate = (
+        ctx.candidates if ctx.candidates is not None else platoon_move_members(s, ctx.orig_name, ctx.orig, ctx.akt)
+    )
     if not candidate:
         raise rules.Violation(
             "No Good Order unit of the platoon without Exposed in communication on the HQ's card [RULE 4.2.2b p.23]"
         )
+    with fire.cached(s):  # read-only checks of the same move: one fire map for all members (L450)
+        for n in candidate:
+            # L235 (review M8): legality of every member before the draw prompt, as 4.2.2c does (L120)
+            check_move(s, s["einheiten"][n], n, target_card, ctx.akt)
     if ctx.akt == "4.2.2d" and any(n not in result for n in candidate):
         raise rules.Violation(
             "Platoon Infiltrate: each unit draws itself (2 cards, own experience, Infiltrate symbol): --success="
             + ",".join(f"{n}:yes|no" for n in candidate)
             + " [RULE 4.2 Notes p.21]"
         )
-    for n in candidate:
-        check_move(s, s["einheiten"][n], n, target_card, ctx.akt)
     for n in candidate:
         move_unit(
             s,
@@ -1248,7 +1427,11 @@ def _order_move_platoon(s, ctx):
             ctx.o.get("--bereich"),
             exposed=(ctx.akt == "4.2.2b" or result.get(n) == "nein"),
             prot=ctx.prot,
+            open_all=False,
         )
+    # the platoon moves together: the board-wide 6.1.1 check once after the last member (L450), so members still on the
+    # origin card no longer open fire there only to cease fire again when they move
+    fire.open_fire(s, ctx.prot)
     ctx.moved = candidate
 
 
@@ -1271,15 +1454,12 @@ def _order_seek_cover(s, ctx):
             gt, gw, upper_ = contact.building_cover(
                 s, ctx.z["karte"], ctx.z, ctx.o["--gebaeude"], ctx.o.get("--gebaeude_wert")
             )
-            cid = new_cover_marker(s, ctx.z["karte"], gt, gw)
-            if gt != "Basic Cover":
-                [c_ for c_ in ctx.zk["cover"] if c_["id"] == cid][0]["feld"] = False
-            if gt != "Basic Cover" and (ctx.zk.get("mehrstoeckig") or ctx.zk.get("terrain") == "Church"):
+            cover = add_cover_marker(s, ctx.z["karte"], gt, gw, field=False)
+            us = upper_story_type(ctx.zk)
+            if gt != "Basic Cover" and us:
                 # L73 [RULE 5.3.3 p.38, 5.2.2B p.36] Multi-Story/Church symbol on the card: add Upper Story or Church Tower,
                 # same value, does not count towards the Cover Potential (the star of the CSR 8 table applies to snipers/spotters only)
-                us = "Church Tower" if ctx.zk.get("terrain") == "Church" else "Upper Story"
-                uid = new_cover_marker(s, ctx.z["karte"], us, gw)
-                [c_ for c_ in ctx.zk["cover"] if c_["id"] == uid][0]["feld"] = True
+                uid = add_cover_marker(s, ctx.z["karte"], us, gw, field=True)["id"]
                 ctx.prot.append(
                     f"additionally {us} marker {uid} (+{gw}) on {ctx.z['karte']}; does not count towards the Cover Potential"
                     + (", 1 step only" if us == "Church Tower" else "")
@@ -1290,11 +1470,14 @@ def _order_seek_cover(s, ctx):
                     "card without Multi-Story symbol: no Upper Story marker (star only for snipers/spotters) [CSR 8 p.15, 5.3.3 p.38]"
                 )
         else:
-            cid = new_cover_marker(s, ctx.z["karte"], "Basic Cover", int(ctx.o.get("--wert", 1)))
-        ctx.z["bereich"] = cid
-        mark(ctx.z, "Exposed")
+            cover = add_cover_marker(
+                s, ctx.z["karte"], "Basic Cover", options.int_opt(ctx.o, "--wert", "cover value", 1)
+            )
+        grenade_expires(s, ctx.z, ctx.target_name, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
+        ctx.z["bereich"] = cover["id"]
+        mark(ctx.z, rules.EXPOSED)
         ctx.prot.append(
-            f"new cover marker {cid} ({[c_ for c_ in ctx.zk['cover'] if c_['id'] == cid][0]['typ']}) on {ctx.z['karte']}, {ctx.target_name} beneath it, Exposed"
+            f"new cover marker {cover['id']} ({cover['typ']}) on {ctx.z['karte']}, {ctx.target_name} beneath it, Exposed"
         )
         if state.is_v4(s) and state.option(s, "U20_mine_bei_seek_cover"):
             contact.request_mine_check(
@@ -1322,7 +1505,7 @@ def _order_move_within_card(s, ctx):
         raise rules.Violation(
             f"{ctx.target_name} (tripod/H VOF) may not infiltrate, also not within the card [RULE 5.1.4 p.32]"
         )  # L139
-    if ctx.akt == "4.2.2g" and "Exposed" in ctx.z["status"]:
+    if ctx.akt == "4.2.2g" and rules.EXPOSED in ctx.z["status"]:
         raise rules.Violation(f"{ctx.target_name} is Exposed and may not infiltrate [RULE 5.1.4 p.32]")  # L139
     if ctx.z.get("mine_hit"):
         raise rules.Violation(
@@ -1330,17 +1513,17 @@ def _order_move_within_card(s, ctx):
         )
     old_cv = fire.cover_of(s, ctx.z)
     grenade_expires(s, ctx.z, ctx.target_name, ctx.prot)
-    set_area(s, ctx.z, ctx.target_name, b)
+    set_area(s, ctx.z, b)
     new_cv = fire.cover_of(s, ctx.z)
     fixed = bool(old_cv and new_cv and old_cv["typ"] in rules.FIXED_COVER and new_cv["typ"] in rules.FIXED_COVER)
     engineer = ctx.akt == "4.2.2g" and contact.engineers_clear(s, ctx.z) and bool(contact.mines_on(s, ctx.z["karte"]))
     if (ctx.akt == "4.2.2f" or ctx.success == "nein") and not fixed and not engineer:
-        mark(ctx.z, "Exposed")
+        mark(ctx.z, rules.EXPOSED)
     if fixed:
         ctx.prot.append("between Trench/Bunker/Pillbox markers of the same card without Exposed [RULE 5.1.1 p.31]")
     ctx.prot.append(
         f"{ctx.target_name} to {'open' if b == 'offen' else b} on {ctx.z['karte']}"
-        + (", Exposed" if "Exposed" in ctx.z["status"] else ", not Exposed")
+        + (", Exposed" if rules.EXPOSED in ctx.z["status"] else ", not Exposed")
     )
     if state.is_mortar(ctx.z) and fire.is_firing(ctx.z) is False and ctx.z.get("ziel"):
         ctx.prot.append(
@@ -1368,31 +1551,51 @@ def _order_move_within_card(s, ctx):
 
 def _order_pick_up(s, ctx):
     """Order handler for: akt == '4.2.2h'"""
-    what = ctx.o.get("--was")
-    if what and ":" in what and what.split(":")[0] in rules.AMMO_CAPACITY:
-        combat.ammo_pick_up(s, ctx.z, ctx.target_name, what, ctx.prot)
-    elif what and what.startswith("Leitung"):
-        nz = int(what.split(":")[1]) if ":" in what else 1
+    what = text_opt(ctx.o, "--was")
+    if not what:
+        # L211: without --what nothing was picked up, but the Command was booked; name what lies on the card
+        c = ctx.zk
+        items = list(c.get("assets_boden", []))
+        items += [f"{g['typ']} {g['netz']}" if g.get("netz") else g["typ"] for g in c.get("assets", [])]
+        if c.get("casualties"):
+            items.append(f"Casualty:{c['casualties']}")
+        items += [f"{k}:{v}" for k, v in (c.get("munition") or {}).items() if v]
+        if c.get("leitung_assets"):
+            items.append(f"Leitung:{c['leitung_assets']}")
+        raise rules.Violation(
+            f"Pick Up: specify --what=<item>[,<item>]; on {ctx.z['karte']}: {', '.join(items) if items else 'nothing to pick up'} [RULE 5.1.6 p.32]"
+        )
+    # L71 [RULE 5.1.6 p.32] 'One Command to have a unit pick up any ammo, assets and casualties in their card area':
+    # several items in one order, comma separated. L239 (review M12): split first, then dispatch every part
+    # ('MG:2' ammo, 'Casualty:<n>', 'Leitung:<n>', assets and radios)
+    for part in [x.strip() for x in what.split(",") if x.strip()]:
+        pick_up_item(s, ctx, part)
+    if ctx.z.get("traegt_casualties", 0) > state.steps(ctx.z):
+        raise rules.Violation(
+            f"{ctx.target_name} can carry at most {state.steps(ctx.z)} casualties (1 per step) [RULE 5.1.6A p.32]"
+        )
+    mark(ctx.z, rules.EXPOSED)
+    ctx.prot.append(f"{ctx.target_name}: pick up/load, Exposed [5.1.6]")
+
+
+def pick_up_item(s, ctx, part):
+    """One item of a Pick Up order (L239)."""
+    head, _, count = part.partition(":")
+    if count and head in rules.AMMO_CAPACITY:
+        n = rules.int_value(count, f"{head} ammo count")
+        combat.ammo_pick_up(s, ctx.z, ctx.target_name, f"{head}:{n}", ctx.prot)
+    elif head == "Leitung":
+        nz = rules.int_value(count, "Phone Line count") if count else 1
         if ctx.zk.get("leitung_assets", 0) < nz:
             raise rules.Violation(f"On {ctx.z['karte']} there are not {nz} Phone Line(s)")
         ctx.zk["leitung_assets"] -= nz
         ctx.z["leitungen"] = ctx.z.get("leitungen", 0) + nz
         ctx.prot.append(f"{ctx.target_name} picks up {nz} Phone Line(s) [4.3.4, 5.1.6]")
-    elif what:
-        # L71 [RULE 5.1.6 p.32] 'One Command to have a unit pick up any ammo, assets and casualties in their card area':
-        # several items in one order, comma separated; 'Casualty:<n>' for several casualties
-        for part in [x.strip() for x in what.split(",") if x.strip()]:
-            if part.lower().startswith("casualty:"):
-                for _ in range(int(part.split(":")[1])):
-                    pick_up(s, ctx.z, ctx.target_name, "Casualty", ctx.prot)
-            else:
-                pick_up(s, ctx.z, ctx.target_name, part, ctx.prot)
-        if ctx.z.get("traegt_casualties", 0) > state.steps(ctx.z):
-            raise rules.Violation(
-                f"{ctx.target_name} can carry at most {state.steps(ctx.z)} casualties (1 per step) [RULE 5.1.6A p.32]"
-            )
-    mark(ctx.z, "Exposed")
-    ctx.prot.append(f"{ctx.target_name}: pick up/load, Exposed [5.1.6]")
+    elif head.lower() == "casualty" and count:
+        for _ in range(rules.int_value(count, "casualty count")):
+            pick_up(s, ctx.z, ctx.target_name, "Casualty", ctx.prot)
+    else:
+        pick_up(s, ctx.z, ctx.target_name, part, ctx.prot)
 
 
 def _order_rally(s, ctx):
@@ -1400,7 +1603,7 @@ def _order_rally(s, ctx):
     if not state.pinned(ctx.z):
         raise rules.Violation(f"{ctx.target_name} is not Pinned [RULE 4.2.3a p.24]")
     if fire.vof_against(s, ctx.z["karte"], ctx.z["seite"]) is None or ctx.success == "ja":
-        ctx.z["status"].remove("Pinned")
+        ctx.z["status"].remove(rules.PINNED)
         ctx.prot.append(
             f"{ctx.target_name}: remove Pinned marker"
             + ("" if ctx.success == "ja" else " (automatic, no VOF)")
@@ -1447,13 +1650,24 @@ def _order_flip_to_front(s, ctx):
     if not state.fire_team_side(ctx.z) or state.pinned(ctx.z):
         raise rules.Violation(f"{ctx.target_name} must be Unpinned on its Fire Team side [RULE 4.2.3f p.24]")
     if fire.vof_against(s, ctx.z["karte"], ctx.z["seite"]) is None or ctx.success == "ja":
-        ctx.z["status"].remove("Fire Team side")
+        ctx.z["status"].remove(rules.FIRE_TEAM_SIDE)
         ctx.prot.append(
             f"Flip {ctx.target_name} to its front side (experience back to {ctx.z.get('erfahrung', 'Line')}) [6.5.1]"
         )
     else:
         ctx.prot.append(f"{ctx.target_name}: Flip failed")
         s["letzter_versuch"] = [ctx.target_name, ctx.akt, s["phase"]]
+
+
+def upper_story_type(zk):
+    """L195 [RULE 5.2.2B p.36]: 'Church Tower' on a Church card (also 'Church on 1 Hill', OP icon), 'Upper Story' on a
+    Multi-Story card, otherwise None."""
+    base = (zk.get("terrain") or "").split(" on ")[0].split(" auf ")[0]
+    if base == "Church" or zk.get("op"):
+        return "Church Tower"
+    if zk.get("mehrstoeckig"):
+        return "Upper Story"
+    return None
 
 
 def _order_detach_team(s, ctx):
@@ -1463,7 +1677,7 @@ def _order_detach_team(s, ctx):
         or (ctx.z["typ"] == "Weapons Team" and state.steps(ctx.z) == 2)
     ):
         raise rules.Violation("Detach Team: Good Order squad with 3-4 steps or 2-step Weapons Team [RULE 4.2.3g p.24]")
-    team = ctx.o.get("--team", "Assault") + " Team"
+    team = team_option(ctx.o, "Assault") + " Team"  # L240 (review M13)
     ctx.z["steps"] = state.steps(ctx.z) - 1
     new = new_name(s, team)
     s["einheiten"][new] = combat.new_lat(ctx.z, team, ctx.target_name)
@@ -1489,10 +1703,9 @@ def _order_supplement_squad(s, ctx):
             "Supplement: Unpinned Fire/Assault Team plus Good Order squad with 2-3 steps on the same card [RULE 4.2.3h p.24]"
         )
     q["steps"] = state.steps(q) + 1
-    del s["einheiten"][ctx.target_name]
-    ctx.prot.append(
-        f"{ctx.target_name} out of play, {sq} up to {q['steps']} steps (check experience on the Multi-Step Chart)"
-    )
+    # L237 (review M10): the team leaves play through remove_from_play (radio to the squad, Casualties/Assets onto the card)
+    combat.remove_from_play(s, ctx.target_name, ctx.prot, f"joins {sq} [4.2.3h p.24]", successor=sq)
+    ctx.prot.append(f"{sq} up to {q['steps']} steps (check experience on the Multi-Step Chart)")
 
 
 def _order_reconstitute_squad(s, ctx):
@@ -1510,8 +1723,6 @@ def _order_reconstitute_squad(s, ctx):
     if not 2 <= len(teams) <= 4:
         raise rules.Violation("2 to 4 teams [RULE 4.2.3i p.24]")
     if ctx.success == "ja":
-        for t in teams:
-            del s["einheiten"][t]
         s["removed_from_play"].remove(sq)
         s["einheiten"][sq] = {
             "typ": "Squad",
@@ -1527,6 +1738,10 @@ def _order_reconstitute_squad(s, ctx):
             "reichweite": "L",
             "letzter_step": "Fire Team",
         }
+        for (
+            t
+        ) in teams:  # L237 (review M10): the teams leave play through remove_from_play, the squad is their successor
+            combat.remove_from_play(s, t, ctx.prot, f"reconstituted into {sq} [4.2.3i p.24]", successor=sq)
         ctx.prot.append(
             f"{sq} back in play with {len(teams)} steps; experience per Multi-Step Unit Experience Chart from the teams (Assault Line, others Green), here {ctx.o.get('--erfahrung', 'Green')} [6.5.2]"
         )
@@ -1540,7 +1755,7 @@ def _order_4_2_3j(s, ctx):
     """Order handler for: akt == '4.2.3j'"""
     if not ctx.z.get("fire_team_seite") or state.fire_team_side(ctx.z):
         raise rules.Violation("Only units with a named Fire Team side [RULE 4.2.3j p.24]")
-    mark(ctx.z, "Fire Team side")
+    mark(ctx.z, rules.FIRE_TEAM_SIDE)
     ctx.prot.append(f"Flip {ctx.target_name} to its Fire Team side")
 
 
@@ -1563,7 +1778,7 @@ def _order_concentrate_fire(s, ctx):
     if not fire.is_firing(ctx.z):
         raise rules.Violation(f"{ctx.target_name} is not firing [RULE 4.2.4b p.25]")
     zt = fire.effective_fire_target(s, ctx.target_name)
-    if not [m for m in state.units_on(s, zt, "Feind") if s["einheiten"][m].get("spotted")]:
+    if not spotted_enemies(s, zt):
         raise rules.Violation(f"No Spotted enemy on {zt} [RULE 4.2.4b p.25]")
     if ctx.o.get("--jam") == "ja" and jam_prone(ctx.z):
         jam(s, ctx.target_name, ctx.prot)
@@ -1577,11 +1792,11 @@ def _order_concentrate_fire(s, ctx):
         cf_target_check(s, zt, ze, ctx.z)  # L140 [RULE 7.11.1 p.56], L150 LOS to the unit
         for _m in enemy.cf_stack(s, ze):
             s["einheiten"][_m]["cf"] = s["einheiten"][_m].get("cf", 0) + 1
-        ctx.prot.append(
-            f"Concentrated Fire marker on {ze} (stack: {', '.join(enemy.cf_stack(s, ze))}; -1 NCM, cumulative; 2 ammo with ammo tracking) [7.11]"
+        ctx.prot.append(  # L245: the text names the 1 ammo that is booked below
+            f"Concentrated Fire marker on {ze} (stack: {', '.join(enemy.cf_stack(s, ze))}; -1 NCM, cumulative; 1 ammo with ammo tracking) [7.11]"
         )
         cf_critical(s, ze, ctx.o, ctx.prot)  # L154 [RULE 7.11.4 p.56]
-        if combat.ammo(ctx.z):
+        if combat.fire_ammo(ctx.z):  # L173: no rockets for Concentrate Fire
             combat.ammo_use(s, ctx.target_name, ctx.z, 1, "successful Concentrate Fire", ctx.prot)  # [RULE 7.11.3 p.56]
     else:
         ctx.prot.append("Concentrate Fire failed")
@@ -1605,15 +1820,22 @@ def cf_critical(s, ze, o, prot):
         prot.append(f"Critical Hit: a second Concentrated Fire marker on {ze} (both count) [7.11.4 p.56]")
 
 
+def target_unit_check(s, zt, ze, what, rule, side="Feind"):
+    """L238 (review M11): the named target unit is an opposing, Spotted unit on the target card (Concentrate Fire and
+    Grenade Attack alike). Returns the unit."""
+    f = state.unit(s, ze)
+    if f["seite"] != side or f["karte"] != zt:
+        raise rules.Violation(f"{ze} is not an opposing unit on the target card {zt} [RULE {rule}]")
+    if not state.is_visible(f):
+        raise rules.Violation(f"{ze} is Unspotted: {what} only on Spotted units [RULE {rule}]")
+    return f
+
+
 def cf_target_check(s, zt, ze, firer=None, side="Feind"):
     """L140 [RULE 7.11.1 p.56] Concentrate Fire target: a stack of Spotted units under a Cover marker on the target card or
     a random Spotted unit out of cover (R# among the units out of cover). L150 [RULE 5.2.2 p.35 Fig 3]: the firing unit
     needs LOS to that unit (Upper Story counts for the target), not only to the card."""
-    f = state.unit(s, ze)
-    if f["seite"] != side or f["karte"] != zt:
-        raise rules.Violation(f"{ze} is not an opposing unit on the target card {zt} [RULE 7.11.1 p.56]")
-    if not state.is_visible(f):
-        raise rules.Violation(f"{ze} is Unspotted: Concentrate Fire only on Spotted units [RULE 7.11.1 p.56]")
+    f = target_unit_check(s, zt, ze, "Concentrate Fire", "7.11.1 p.56", side)
     if firer is not None and firer["karte"] != zt:
         ok, why = geometry.los(
             s, firer["karte"], zt, ha=geometry.height_bonus(s, firer), hb=geometry.height_bonus(s, f)
@@ -1623,11 +1845,7 @@ def cf_target_check(s, zt, ze, firer=None, side="Feind"):
                 f"No LOS to {ze} itself ({why}); only units in LOS can be targeted (e.g. in the Upper Story) [RULE 5.2.2 p.35 Fig 3]"
             )
     if f.get("bereich", "offen") == "offen":
-        open_ = [
-            m
-            for m in state.units_on(s, zt, "Feind")
-            if s["einheiten"][m].get("bereich", "offen") == "offen" and s["einheiten"][m].get("spotted")
-        ]
+        open_ = [m for m in spotted_enemies(s, zt) if s["einheiten"][m].get("bereich", "offen") == "offen"]
         if len(open_) > 1:
             s.setdefault("_hinweise", []).append(
                 f"Concentrate Fire out of cover on {zt}: random target among {', '.join(open_)} (R# column {len(open_)}); {ze} booked [7.11.1]"
@@ -1637,12 +1855,21 @@ def cf_target_check(s, zt, ze, firer=None, side="Feind"):
 def _order_grenade_attack(s, ctx):
     """Order handler for: akt == '4.2.4d'"""
     zt = check_grenade(s, ctx.z, ctx.target_name, ctx.o)
+    ze = ctx.o.get("--einheit")
+    if ze:
+        # L238 (review M11): like Concentrate Fire, the named target must be a Spotted enemy on the target card;
+        # checked before ammo or a Rifle Grenade is spent
+        target_unit_check(s, zt, ze, "a Grenade Attack", "7.10.1 p.54")
     if zt != ctx.z["karte"] and state.is_v4(s):
-        if (
-            "Rifle Grenade" in ctx.z.get("assets", [])
-            and ctx.z.get("vof_rating") != "G"
-            and not ctx.z.get("grenade_ranged")
-        ):
+        has_rifle = "Rifle Grenade" in ctx.z.get("assets", []) and ctx.z.get("vof_rating") != "G"
+        own_ranged = bool(ctx.z.get("grenade_ranged")) and (combat.ammo(ctx.z) or {}).get("punkte", 0) > 0
+        w = (text_opt(ctx.o, "--waffe") or "").lower()
+        if has_rifle and own_ranged and w not in ("rifle", "own"):
+            # L216 [RULE 7.6 p.54]: a unit with its own ranged G! weapon (e.g. Bazooka) and a picked-up Rifle Grenade chooses
+            raise rules.Violation(
+                f"{ctx.target_name} has its own ranged G! weapon ({(combat.ammo(ctx.z) or {}).get('punkte', 0)} ammo) and a Rifle Grenade: --weapon=rifle|own [RULE 7.6 p.54, 7.10]"
+            )
+        if has_rifle and (w == "rifle" or not ctx.z.get("grenade_ranged")):
             ctx.z["assets"].remove("Rifle Grenade")
             ctx.prot.append(f"{ctx.target_name}: Rifle Grenade used up (1 shot, hit or not) [7.6 p.54]")
         elif combat.ammo(ctx.z):
@@ -1655,6 +1882,9 @@ def _order_grenade_attack(s, ctx):
         if ctx.o.get("--jam") == "ja" and jam_prone(ctx.z):
             jam(s, ctx.target_name, ctx.prot)
             ctx.success = "nein"
+            # L246: like the Concentrate Fire path, a Jam ends the attempt: no Grenade Miss marker, no Exhort for a
+            # unit that left play [7.12 p.56]
+            return
     if ctx.success == "ja" and zt == ctx.z["karte"] and state.is_v4(s):
         campaign.book_xp(
             s,
@@ -1663,35 +1893,15 @@ def _order_grenade_attack(s, ctx):
             ctx.prot,
         )
     if ctx.success == "ja":
-        ze = ctx.o.get("--einheit")
         if not ze:
             raise rules.Violation("--unit=<target enemy or cover stack>")
-        f = state.unit(s, ze)
-        value = int(ctx.o.get("--wert", -4))
-        under = f.get("bereich", "offen") != "offen"
         # [RULE 7.10.1 p.54] "Direct a Grenade Attack at one specific unit out of cover or a stack of units under a Cover marker" (L112)
-        stack = grenade_stack(s, ze)
-        critical = ctx.o.get("--kritisch") == "ja"
-        for m in stack:
-            g = s["einheiten"][m]
-            g.setdefault("grenade", []).append(value)
-            if critical and under:
-                g["grenade_critical"] = True
-            elif critical:
-                g["grenade"].append(value)
-        where = f" (stack under {f['bereich']})" if under else ""
-        ctx.prot.append(f"Grenade VOF {value} on {', '.join(stack)}{where} (cumulative) [7.10.1, 7.10.6]")
-        if critical:
-            ctx.prot.append(
-                f"Critical Hit: use the combined Grenade/Critical Hit marker instead of the plain Grenade VOF marker (E61); the stack loses the benefit of cover {f['bereich']} in Combat Effects [7.10.3 p.55]"
-                if under
-                else f"Critical Hit: a second Grenade VOF marker on {ze} (both count) [7.10.3 p.55]"
-            )
+        value = options.int_opt(ctx.o, "--wert", "Grenade VOF value", rules.GRENADE_VOF_DEFAULT)
+        stack, _under = apply_grenade(s, ze, value, ctx.o.get("--kritisch") == "ja", ctx.prot, "7.10.1, 7.10.6")
         grenade_back_notes(s, ctx.z, stack, True, ctx.prot)
     else:
         state.card(s, zt)["grenade_miss"] = True
         ctx.prot.append(f"Grenade Miss Modifier (-1) on {zt} [7.10.4]")
-        ze = ctx.o.get("--einheit")
         grenade_back_notes(s, ctx.z, grenade_stack(s, ze) if ze else state.units_on(s, zt, "Feind"), False, ctx.prot)
         s["letzter_versuch"] = [ctx.target_name, ctx.akt, s["phase"]]
 
@@ -1703,13 +1913,10 @@ def _order_platoon_fire(s, ctx):
     (7.11.1 note: new random target per attempt out of cover); --success=<attacker>:yes|no,..; grenade: --critical=<attackers>,
     --jam=<attackers>, --target=<card> for G! units. L136"""
     single = "4.2.4b" if ctx.akt == "4.2.4c" else "4.2.4d"
-    result = {}
-    for t in (ctx.success or "").split(","):
-        if ":" in t:
-            a, b = t.split(":", 1)
-            result[a.strip()] = b.strip()
+    ctx.also_book = single  # L244 (review M18): every attacker is booked with the single action too
+    result = parse_per_unit(ctx.success)  # L230 (review H8)
     targets, common = {}, None
-    for t in (ctx.o.get("--einheit") or "").split(","):
+    for t in (text_opt(ctx.o, "--einheit") or "").split(","):
         if ":" in t:
             a, b = t.split(":", 1)
             targets[a.strip()] = b.strip()
@@ -1718,6 +1925,9 @@ def _order_platoon_fire(s, ctx):
     candidate, skipped = [], []
     for n, e in s["einheiten"].items():
         if e["seite"] != "US" or e["karte"] != ctx.orig["karte"] or state.pinned(e):
+            continue
+        if not ctx.late_order and single in s["impuls_aktionen"].get(n, []):
+            skipped.append(f"{n}: already made its {rules.ACTIONS[single][0]} in this impulse [4.2 p.21]")  # L244
             continue
         if n != ctx.orig_name:
             try:
@@ -1733,7 +1943,7 @@ def _order_platoon_fire(s, ctx):
             if not fire.is_firing(e) or fire.current_vof_rating(e, False) not in ("S", "A", "A/S", "H"):
                 continue
             zt = fire.effective_fire_target(s, n)
-            if not [m for m in state.units_on(s, zt, "Feind") if s["einheiten"][m].get("spotted")]:
+            if not spotted_enemies(s, zt):
                 continue
         else:
             try:
@@ -1760,8 +1970,8 @@ def _order_platoon_fire(s, ctx):
         ranged_any = single == "4.2.4d" and ctx.o.get("--ziel", ctx.orig["karte"]) != ctx.orig["karte"]
         watches = []
         for n in candidate:
-            wn = draw_watch(s, "cf" if single == "4.2.4b" else "grenade", s["einheiten"][n], ranged_any)
-            if "malfunction" in wn:
+            # L172 [RULE 7.12 p.56]: only jam-prone units (the old text check also matched "no malfunction")
+            if jam_prone(s["einheiten"][n]) and (single == "4.2.4b" or ranged_any):
                 watches.append(n)
         raise rules.Violation(
             f"{rules.ACTIONS[ctx.akt][0]}: each unit draws itself, success on {word}: "
@@ -1778,8 +1988,8 @@ def _order_platoon_fire(s, ctx):
             + ("; skipped: " + "; ".join(skipped) if skipped else "")
             + f" [RULE 4.2 p.21, {ctx.rule}]"
         )
-    crit = [x.strip() for x in (ctx.o.get("--kritisch") or "").split(",") if x.strip()]
-    jammed = [x.strip() for x in (ctx.o.get("--jam") or "").split(",") if x.strip()]
+    crit = [x.strip() for x in (text_opt(ctx.o, "--kritisch") or "").split(",") if x.strip()]
+    jammed = [x.strip() for x in (text_opt(ctx.o, "--jam") or "").split(",") if x.strip()]
     for n in candidate:
         e = s["einheiten"][n]
         o2 = dict(ctx.o)
@@ -1791,9 +2001,8 @@ def _order_platoon_fire(s, ctx):
             o2.pop("--einheit", None)
         o2["--kritisch"] = "ja" if n in crit else "nein"
         o2["--jam"] = "ja" if n in jammed else "nein"
-        ctx2 = types.SimpleNamespace(**vars(ctx))
-        ctx2.akt, ctx2.target_name, ctx2.z, ctx2.o = single, n, e, o2
-        ctx2.success = "ja" if result[n] in ("ja", "yes") else "nein"
+        # shallow copy: prot (and the other lists) stay shared with ctx, so the handler's lines land in this order
+        ctx2 = dataclasses.replace(ctx, akt=single, target_name=n, z=e, o=o2, success=result[n])
         ctx.prot.append(f"{n} ({'success' if ctx2.success == 'ja' else 'no success'}):")
         if single == "4.2.4b":
             _order_concentrate_fire(s, ctx2)
@@ -1805,116 +2014,129 @@ def _order_platoon_fire(s, ctx):
 
 
 def _order_call_for_fire(s, ctx):
-    """Order handler for: akt == '4.2.4i'"""
+    """Order handler for: akt == '4.2.4i' (L256: split into Illumination, Pending marker with agency, legacy Pending)."""
     zt = ctx.o["--ziel"]
-    if ctx.success == "ja":
-        place = ctx.o.get("--platz", zt)
-        if ctx.o.get("--short") == "ja":
-            place = short_place(s, ctx.z, zt, ctx.o)
-        if s.get("fm_werte") and "Illum" in ctx.agency:
-            # [RULE 7.16.2E p.58, 9.2 p.70] Illumination: on any terrain card, without LOS, immediately, no Pending
-            iv = (s.get("illum_werte") or {}).get(ctx.agency)
-            if ctx.o.get("--illum"):
-                top_value, _, un = ctx.o["--illum"].partition("/")
-                iv = {"oben": int(top_value), "unten": int(un) if un else None}
-            if not iv:
-                raise rules.Violation(
-                    f"Illumination values for {ctx.agency} not recorded: read them off the marker, --illum=<top>/<bottom> [9.2]"
-                )
-            state.card(s, place).setdefault("illum", []).append(
-                {"oben": iv["oben"], "unten": iv.get("unten"), "quelle": ctx.agency}
-            )
-            if isinstance(s.get("feuermissionen"), dict):
-                s["feuermissionen"][ctx.agency] -= 1
-            ctx.prot.append(
-                f"Illumination marker {iv['oben']:+d}"
-                + (f"/{iv['unten']:+d}" if iv.get("unten") is not None else "")
-                + f" ({ctx.agency}) immediately on {place}"
-                + (f" (Short instead of {zt})" if place != zt else "")
-                + f"; Fire Missions: {s['feuermissionen']}; removed in Clean Up [RULE 7.16.2E p.58, 9.2 p.70]"
-            )
-            if place == zt and ctx.o.get("--target") != "nein":
-                # [RULE 7.16.5 p.59 "after a successful Fire Mission"; BGG Shonai_Dweller 3520262: Illumination also moves the Target marker]
-                old = s.setdefault("target_marker", {}).get(target_marker_key(s, ctx.agency))
-                s["target_marker"][target_marker_key(s, ctx.agency)] = place
-                ctx.prot.append(
-                    f"Target marker ({ctx.agency} Concentration) on {place}"
-                    + (f", moved from {old}" if old and old != place else "")
-                    + " [RULE 7.16.5 p.59, BGG 3520262]"
-                )
-            fire.open_fire(s, ctx.prot)
-        elif s.get("fm_werte"):
-            value = int(ctx.o.get("--wert", s["fm_werte"][ctx.agency]))
-            state.card(s, place).setdefault("extern", []).append(
-                {"typ": "Pending", "wert": value, "quelle": ctx.target_name, "agentur": ctx.agency, "seite": "US"}
-            )
-            if isinstance(s.get("feuermissionen"), dict):
-                s["feuermissionen"][ctx.agency] -= 1
-            elif s.get("feuermissionen") != "unbegrenzt":
-                s["feuermissionen"] -= 1
-            bat = options.list_option(ctx.o, "--bataillon")
-            if bat:
-                gr = s.get("fm_gruppe", {}).get(ctx.agency, ctx.agency)
-                if gr not in s.get("bataillon_fm", []):
-                    raise rules.Violation(
-                        f"Battalion Fire Mission for {gr} not available per mission [RULE 7.16.2B p.58]"
-                    )
-                if ctx.o.get("--short") == "ja" or len(bat) != 2 or len(set(bat)) != 2:
-                    raise rules.Violation(
-                        "Battalion Fire Mission: 3 Bursts symbol, two different cards adjacent to the target card: --battalion=K1,K2 [RULE 7.16.2B p.58]"
-                    )
-                for bk in bat:
-                    if geometry.distance(s, zt, bk) != 1 or state.card(s, bk).get("staging"):
-                        raise rules.Violation(
-                            f"{bk} is not adjacent to {zt} (terrain card required) [RULE 7.16.2B p.58]"
-                        )
-                    state.card(s, bk).setdefault("extern", []).append(
-                        {
-                            "typ": "Pending",
-                            "wert": value,
-                            "quelle": ctx.target_name,
-                            "agentur": ctx.agency,
-                            "seite": "US",
-                        }
-                    )
-                ctx.prot.append(
-                    f"Battalion Fire Mission: additional Pending markers {ctx.agency} ({value:+d}) on {', '.join(bat)}, without observer LOS [RULE 7.16.2B p.58]"
-                )
-            ctx.prot.append(
-                f"Pending Fire Mission Marker {ctx.agency} (value {value:+d}) on {place}"
-                + (f" (Short, one card closer to the observer instead of {zt})" if place != zt else "")
-                + f"; Fire Missions: {s['feuermissionen']}; becomes active in 3.7.1 (Incoming!), takes effect in 3.7.4, is removed in 3.7.1 of the following turn [RULE 7.16.3 p.59, 3.7.1 p.17]"
-            )
-            if place == zt or state.option(s, "U13_target_marker_bei_short"):
-                if ctx.o.get("--target") != "nein":
-                    old = s.setdefault("target_marker", {}).get(target_marker_key(s, ctx.agency))
-                    s["target_marker"][target_marker_key(s, ctx.agency)] = place
-                    ctx.prot.append(
-                        f"Target marker ({ctx.agency} Concentration) on {place}"
-                        + (f", moved from {old}" if old and old != place else "")
-                        + "; later calls of this firing unit on this card +1 card [RULE 7.16.5 p.59, FM1 p.42]"
-                    )
-            else:
-                ctx.prot.append(
-                    "Short: Target marker not moved automatically (7.16.5 does not cover this case)"
-                    + state.open_reading(s, "U13_target_marker_bei_short")
-                )
-        else:
-            state.card(s, place).setdefault("extern", []).append(
-                {"typ": "Pending", "wert": int(ctx.o.get("--wert", s.get("fm_wert", -3))), "quelle": ctx.target_name}
-            )
-            s["feuermissionen"] -= 1
-            ctx.prot.append(
-                f"Pending Fire Mission Marker on {place} (value {ctx.o.get('--wert', s.get('fm_wert', -3))}), Fire Mission crossed off ({s['feuermissionen']} left); active from 3.7.1 of this turn [RULE 3.7.1 p.17, FM1 p.44]. On 'Short!': one card closer to the observer (--place) [7.16.3, 7.16.4]"
-            )
-    else:
+    if ctx.success != "ja":
         ctx.prot.append("Call for Fire failed, no Fire Mission used")
         s["letzter_versuch"] = [ctx.target_name, ctx.akt, s["phase"]]
+        return
+    place = ctx.o.get("--platz", zt)
+    if ctx.o.get("--short") == "ja":
+        place = short_place(s, ctx.z, zt, ctx.o)
+    if s.get("fm_werte") and "Illum" in ctx.agency:
+        _cff_illumination(s, ctx, zt, place)
+    elif s.get("fm_werte"):
+        _cff_pending(s, ctx, zt, place)
+    else:
+        _cff_pending_legacy(s, ctx, place)
+
+
+def use_fire_mission(s, agency=None):
+    """One Fire Mission crossed off: per agency (dict), as a count, or unlimited in legacy games (L247)."""
+    fm = s.get("feuermissionen")
+    if isinstance(fm, dict):
+        fm[agency] -= 1
+    elif fm != "unbegrenzt":
+        s["feuermissionen"] = fm - 1
+
+
+def move_target_marker(s, ctx, place, note):
+    """[RULE 7.16.5 p.59] after a successful Fire Mission the Target marker of the firing unit goes to the target card
+    (unless --move-target-marker=no)."""
+    if ctx.o.get("--target_marker") == "nein":
+        return
+    key = target_marker_key(s, ctx.agency)
+    old = s.setdefault("target_marker", {}).get(key)
+    s["target_marker"][key] = place
+    ctx.prot.append(
+        f"Target marker ({ctx.agency} Concentration) on {place}"
+        + (f", moved from {old}" if old and old != place else "")
+        + note
+    )
+
+
+def _cff_illumination(s, ctx, zt, place):
+    """[RULE 7.16.2E p.58, 9.2 p.70] Illumination: on any terrain card, without LOS, immediately, no Pending marker."""
+    iv = (s.get("illum_werte") or {}).get(ctx.agency)
+    if ctx.o.get("--illum"):
+        top_value, _, un = str(ctx.o["--illum"]).partition("/")
+        iv = {
+            "oben": rules.int_value(top_value, "Illumination top value"),
+            "unten": rules.int_value(un, "Illumination bottom value") if un else None,
+        }
+    if not iv:
+        raise rules.Violation(
+            f"Illumination values for {ctx.agency} not recorded: read them off the marker, --illum=<top>/<bottom> [9.2]"
+        )
+    state.card(s, place).setdefault("illum", []).append(
+        {"oben": iv["oben"], "unten": iv.get("unten"), "quelle": ctx.agency}
+    )
+    if isinstance(s.get("feuermissionen"), dict):  # Illumination is only counted per agency
+        s["feuermissionen"][ctx.agency] -= 1
+    ctx.prot.append(
+        f"Illumination marker {iv['oben']:+d}"
+        + (f"/{iv['unten']:+d}" if iv.get("unten") is not None else "")
+        + f" ({ctx.agency}) immediately on {place}"
+        + (f" (Short instead of {zt})" if place != zt else "")
+        + f"; Fire Missions: {s['feuermissionen']}; removed in Clean Up [RULE 7.16.2E p.58, 9.2 p.70]"
+    )
+    if place == zt:
+        # [RULE 7.16.5 p.59 "after a successful Fire Mission"; BGG Shonai_Dweller 3520262: Illumination also moves the Target marker]
+        move_target_marker(s, ctx, place, " [RULE 7.16.5 p.59, BGG 3520262]")
+    fire.open_fire(s, ctx.prot)
+
+
+def _cff_pending(s, ctx, zt, place):
+    """[RULE 7.16.3 p.59] Pending Fire Mission marker of an agency with a value table; Battalion Fire Mission 7.16.2B."""
+    value = options.int_opt(ctx.o, "--wert", "Fire Mission value", s["fm_werte"][ctx.agency])
+    pending = {"typ": "Pending", "wert": value, "quelle": ctx.target_name, "agentur": ctx.agency, "seite": "US"}
+    state.card(s, place).setdefault("extern", []).append(pending)
+    use_fire_mission(s, ctx.agency)
+    bat = options.list_option(ctx.o, "--bataillon")
+    if bat:
+        gr = s.get("fm_gruppe", {}).get(ctx.agency, ctx.agency)
+        if gr not in s.get("bataillon_fm", []):
+            raise rules.Violation(f"Battalion Fire Mission for {gr} not available per mission [RULE 7.16.2B p.58]")
+        if ctx.o.get("--short") == "ja" or len(bat) != 2 or len(set(bat)) != 2:
+            raise rules.Violation(
+                "Battalion Fire Mission: 3 Bursts symbol, two different cards adjacent to the target card: --battalion=K1,K2 [RULE 7.16.2B p.58]"
+            )
+        for bk in bat:
+            if geometry.distance(s, zt, bk) != 1 or state.card(s, bk).get("staging"):
+                raise rules.Violation(f"{bk} is not adjacent to {zt} (terrain card required) [RULE 7.16.2B p.58]")
+            state.card(s, bk).setdefault("extern", []).append(dict(pending))
+        ctx.prot.append(
+            f"Battalion Fire Mission: additional Pending markers {ctx.agency} ({value:+d}) on {', '.join(bat)}, without observer LOS [RULE 7.16.2B p.58]"
+        )
+    ctx.prot.append(
+        f"Pending Fire Mission Marker {ctx.agency} (value {value:+d}) on {place}"
+        + (f" (Short, one card closer to the observer instead of {zt})" if place != zt else "")
+        + f"; Fire Missions: {s['feuermissionen']}; becomes active in 3.7.1 (Incoming!), takes effect in 3.7.4, is removed in 3.7.1 of the following turn [RULE 7.16.3 p.59, 3.7.1 p.17]"
+    )
+    if place == zt or state.option(s, "U13_target_marker_bei_short"):
+        move_target_marker(
+            s, ctx, place, "; later calls of this firing unit on this card +1 card [RULE 7.16.5 p.59, FM1 p.42]"
+        )
+    else:
+        ctx.prot.append(
+            "Short: Target marker not moved automatically (7.16.5 does not cover this case)"
+            + state.open_reading(s, "U13_target_marker_bei_short")
+        )
+
+
+def _cff_pending_legacy(s, ctx, place):
+    """Games before the agency tables (no fm_werte): one Pending marker with the mission's value."""
+    value = options.int_opt(ctx.o, "--wert", "Fire Mission value", s.get("fm_wert", -3))
+    state.card(s, place).setdefault("extern", []).append({"typ": "Pending", "wert": value, "quelle": ctx.target_name})
+    use_fire_mission(s)  # L247: legacy games without a Fire Mission count
+    ctx.prot.append(
+        f"Pending Fire Mission Marker on {place} (value {value}), Fire Mission crossed off ({s['feuermissionen']} left); active from 3.7.1 of this turn [RULE 3.7.1 p.17, FM1 p.44]. On 'Short!': one card closer to the observer (--place) [7.16.3, 7.16.4]"
+    )
 
 
 def _order_indirect_lay(s, ctx):
     """Order handler for: akt == '4.2.4j'"""
-    indirect_lay(s, ctx.hq_name, ctx.orig_name, ctx.orig, ctx.target_name, ctx.z, ctx.o, ctx.prot, ctx.gi)
+    indirect_lay(s, ctx.orig_name, ctx.orig, ctx.target_name, ctx.z, ctx.o, ctx.prot, ctx.gi)
 
 
 def _order_4_2_1l(s, ctx):
@@ -1930,16 +2152,17 @@ def _order_4_2_1l(s, ctx):
 
 def _order_cease_fire(s, ctx):
     """Order handler for: akt == '4.2.4k'"""
-    if not fire.is_firing(ctx.z):
-        raise rules.Violation(f"{ctx.target_name} is not firing [RULE 4.2.4k p.26]")
     kk = ctx.z["karte"]
+    # L217 [RULE 4.2.4k Action Menu: 'Remove the VOF/PDF generated by all occupants of the card ... passed on and carried
+    # out by all units on the card whether they are in communication or not']: the Recipient itself need not be firing
+    if not any(e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e) for e in s["einheiten"].values()):
+        raise rules.Violation(f"No friendly unit on {kk} is firing [RULE 4.2.4k p.26]")
     # [RULE 4.3.1 p.27 note] "the order will be passed on to all occupants of a card (including Pinned units)" (L114, K21)
     stopped = []
     for n, e in s["einheiten"].items():
         if e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e):
             stopped.append(f"{n} (at {fire.effective_fire_target(s, n)})")
-            e["ziel"] = None
-            e.pop("konzentriert", None)
+            fire.cease_fire(e)
     ctx.prot.append(
         f"Cease Fire: all firing units on {kk} cease fire: {', '.join(stopped)}; they reopen fire immediately when a Spotted enemy is in LOS and range [4.3.1 p.27, 6.3.3]"
     )
@@ -1949,19 +2172,22 @@ def _order_cease_fire(s, ctx):
 def _order_shift_fire(s, ctx):
     """Order handler for: akt == '4.2.4l'"""
     zt = ctx.o.get("--ziel")
-    if not zt or not fire.is_firing(ctx.z):
-        raise rules.Violation("Shift Fire: --target=<card in LOS>, unit must be firing [RULE 4.2.4l p.26]")
-    state.card(s, zt)
-    if [m for m in state.units_on(s, zt, "Feind") if not s["einheiten"][m].get("spotted")] and not state.units_on(
-        s, zt, "US"
+    kk = ctx.z["karte"]
+    # L248: like Cease Fire (L217) the order is passed on to all occupants of the card; the Recipient itself need not fire
+    if not zt or not any(
+        e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e) for e in s["einheiten"].values()
     ):
+        raise rules.Violation(
+            f"Shift Fire: --target=<card in LOS>, a friendly unit on {kk} must be firing [RULE 4.2.4l p.26]"
+        )
+    state.card(s, zt)
+    if unspotted_enemies(s, zt) and not state.units_on(s, zt, "US"):
         raise rules.Violation("Cards with Unspotted enemies may not be fired at [6.3.3]")
     ok, reason = geometry.los(
         s, ctx.orig["karte"], zt, ha=geometry.height_bonus(s, ctx.orig), hb=geometry.card_height_bonus(s, zt, "Feind")
     )
     if not ok:
         raise rules.Violation(f"Originator has no LOS to {zt}: {reason}")
-    kk = ctx.z["karte"]
     for n, e in s["einheiten"].items():
         if (
             e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e)
@@ -1971,8 +2197,7 @@ def _order_shift_fire(s, ctx):
             )
             if not geometry.in_range(s, e, zt) or not los_ok:
                 # L132 [RULE 6.1.2 p.39] the firing unit itself needs LOS and range to the new card; otherwise it ceases fire
-                e["ziel"] = None
-                e.pop("konzentriert", None)
+                fire.cease_fire(e)
                 ctx.prot.append(
                     f"{n}: no {'range' if los_ok else 'LOS'} to {zt} ({'out of range' if los_ok else los_reason}), ceases fire instead [6.1.2]"
                 )
@@ -2028,7 +2253,7 @@ def _order_4_2_1d(s, ctx):
     ):
         raise rules.Violation(f"Recipient: CO Staff or a Good Order step of platoon {target_platoon} [RULE 6.5.2 p.49]")
     hq_back(s, hq_n, ctx.z, ctx.prot)
-    hand_over_step(s, ctx.target_name, ctx.prot, (ctx.o.get("--team") or "Fire").capitalize())
+    hand_over_step(s, ctx.target_name, ctx.prot, team_option(ctx.o, "Fire"))  # L240 (review M13)
 
 
 def _order_4_2_1e(s, ctx):
@@ -2036,6 +2261,13 @@ def _order_4_2_1e(s, ctx):
     raise rules.Violation(
         "Reconstitute the CO HQ is given by the BN HQ in the BN HQ Impulse: fof.py order BN <unit> 4.2.1e [RULE 6.5.2 p.50]"
     )
+
+
+def _order_4_2_1i(s, ctx):
+    """L187 [RULE 4.2.1i p.22, 10.4 p.72] Activate for AT Combat & Vehicle Movement."""
+    from . import vehicles
+
+    vehicles.order_4_2_1i(s, ctx)
 
 
 ORDER_HANDLERS = {
@@ -2065,6 +2297,7 @@ ORDER_HANDLERS = {
     "4.2.4i": _order_call_for_fire,
     "4.2.4j": _order_indirect_lay,
     "4.2.1l": _order_4_2_1l,
+    "4.2.1i": _order_4_2_1i,  # L187
     "4.2.4k": _order_cease_fire,
     "4.2.4l": _order_shift_fire,
     "4.2.1b": _order_4_2_1b,
@@ -2074,125 +2307,231 @@ ORDER_HANDLERS = {
 }
 
 
+ATTEMPT_WORD = {"ja": "successful", "nein": "failed"}  # L182: internal ja/nein, English output
+ORIGINATOR_WORD = {"PLT": "a PLT HQ", "CO_BN": "the CO HQ or BN HQ", "CO_ONLY": "the CO HQ"}
+
+
+def originator_eligible(orig, originator_kind):
+    """[RULE 4.2 Action Menu] originator column: PLT (a PLT HQ), CO_BN (CO HQ or BN HQ), CO_ONLY (the CO HQ)."""
+    if originator_kind == "PLT":
+        return orig["typ"] == "HQ" and orig.get("ebene") == "PLT"
+    if originator_kind == "CO_BN":
+        return orig.get("ebene") in ("CO", "BN")
+    if originator_kind == "CO_ONLY":
+        return orig.get("ebene") == "CO" and orig["typ"] == "HQ"
+    return True
+
+
+def check_stacking(s, z, akt, o, orig_name, orig):
+    """L193 [RULE 5.1.5 p.32]: 16 steps of infantry per card; vehicles count separately (at most 4), their crews are no
+    steps here. Returns the members of a Platoon Move (None for other actions) so the handler uses the same set (L249)."""
+    candidates = None
+    if akt in ("4.2.2b", "4.2.2d"):
+        candidates = platoon_move_members(s, orig_name, orig, akt)
+    target = o.get("--ziel")
+    if akt not in ("4.2.2a", "4.2.2b", "4.2.2c", "4.2.2d") or not target or target not in s["karten"]:
+        return candidates
+    if s["karten"][target].get("staging"):
+        return candidates
+    members = [z] if candidates is None else [s["einheiten"][n] for n in candidates]
+    st = sum(
+        state.steps(e)
+        for e in s["einheiten"].values()
+        if e["seite"] == "US" and e["karte"] == target and e["typ"] != "Casualty" and not e.get("fahrzeug")
+    ) + sum(state.steps(e) for e in members if not e.get("fahrzeug"))
+    if st > 16:
+        raise rules.Violation(f"Stacking: {target} would have {st} US steps, at most 16 per card [RULE 5.1.5 p.32]")
+    return candidates
+
+
+def attempt_text(success):
+    """L197: English attempt text, also for per-unit lists 'A:ja,B:nein' (Platoon Infiltrate)."""
+    if ":" not in success:
+        return ATTEMPT_WORD.get(success, success)
+    return ", ".join(f"{a} {ATTEMPT_WORD[b]}" for a, b in parse_per_unit(success).items())  # L230: also yes/no
+
+
 def cmd_order(s, args, late_order=None):
-    """4.2: one order. nachtrag=<HQ>: late order for an HQ whose impulse already ended this turn (L78)."""
+    """4.2: one order. nachtrag=<HQ>: late order for an HQ whose impulse already ended this turn (L78).
+    Contract (L255): everything that can refuse the order runs before the draw prompt (resolve_originator,
+    check_stacking, check_repeat_and_budget, apply_skill, pre_draw_checks); the prompt is the last Violation before
+    the handler, so the player never draws cards for an order that is refused afterwards (review M7, M8)."""
+    rules.need(args, 3, "order <hq|GI|BN> <unit> <action id> [--target=K] [--success=yes|no] ...")
     hq_name, target_name, akt = args[0], args[1], args[2]
     o = options.parse_opts(args[3:])
-    agency = None
     if hq_name == "BN":
-        return order_bn(s, target_name, akt, o)
+        return order_bn(s, target_name, akt)
     s["_befehl_opts"] = o
     if state.is_v4(s):
         contact.mine_lock(s)
         if akt in ("4.2.1g", "4.2.1h") and target_name in s.get("runner_box", []):
             return order_runner_box(s, hq_name, target_name, akt, o)
+    ctx = order_context(s, hq_name, target_name, akt, o, late_order)
+    resolve_originator(s, ctx)
+    ctx.candidates = check_stacking(s, ctx.z, akt, o, ctx.orig_name, ctx.orig)
+    check_recipient(s, ctx)
+    check_repeat_and_budget(s, ctx)
+    apply_skill(s, ctx)
+    pre_draw_checks(s, ctx)
+    handler = ORDER_HANDLERS.get(akt)
+    if handler:
+        handler(s, ctx)
+    elif not order_v4(s, target_name, akt, o, ctx.orig, ctx.prot):
+        raise rules.order_not_implemented(akt)  # L449
+    book_order(s, ctx)
+
+
+@dataclasses.dataclass
+class OrderCtx:
+    """The working record of one order (review Struktur 10: a dataclass instead of a SimpleNamespace). Built by
+    order_context; resolve_originator, check_stacking, apply_skill, the handlers and book_order fill the rest.
+    Platoon Fire copies it per firing unit with dataclasses.replace (shallow: prot, moved and mods stay shared)."""
+
+    # the order as given
+    akt: str  # action id, e.g. "4.2.4b"
+    hq_name: str  # active HQ, "GI" or "BN"
+    target_name: str  # recipient
+    z: dict  # recipient unit
+    zk: dict  # recipient's card
+    o: dict  # parsed options
+    # the action's row of rules.ACTIONS
+    name: str
+    cost: int
+    draw_kind: str  # e.g. "auto"
+    originator_kind: str  # e.g. "HQ", "CO_BN"
+    rule: str
+    late_order: str | None = None  # the HQ of a late order (cmd_late_order), else None
+    gi: bool = False  # under General Initiative
+    success: str | None = None  # --success: "ja"/"nein" or per unit "1/1:ja,.."
+    skill: str | None = None  # --skill
+    # filled during the order
+    orig_name: str | None = None  # originator (resolve_originator)
+    orig: dict | None = None
+    candidates: list | None = None  # stacking candidates (check_stacking)
+    skill_text: str | None = None  # apply_skill
+    k: dict | None = None  # Command record of the ordering HQ (command_record)
+    mods: list = dataclasses.field(default_factory=list)  # draw modifiers
+    extra: int = 0
+    base_cff: Any = None
+    agency: str | None = None  # fire-support agency of Call for Fire
+    also_book: str | None = None  # second action booked with this one
+    after_exhort: bool = False
+    moved: list = dataclasses.field(default_factory=list)  # units moved by the order
+    prot: list = dataclasses.field(default_factory=list)  # protocol lines
+
+
+def order_context(s, hq_name, target_name, akt, o, late_order):
+    """The working record of one order (ctx): the action's table row, the recipient and the fields the handlers fill."""
     if s["phase"] not in rules.IMPULSES:
         raise rules.Violation(f"Orders only in the Friendly Command Phase 3.3, currently {s['phase']} [RULE 3.3 p.15]")
     if s.get("aktiver_hq") != hq_name and not late_order:
         raise rules.Violation(f"Active HQ is {s.get('aktiver_hq')}, not {hq_name}")
     if akt not in rules.ACTIONS:
         raise rules.Violation(f"Action {akt} not in the table. Known: {', '.join(rules.ACTIONS)}")
-    if (
-        akt in ("4.2.2a", "4.2.2b", "4.2.2c", "4.2.2d")
-        and o.get("--ziel")
-        and o["--ziel"] in s["karten"]
-        and not s["karten"][o["--ziel"]].get("staging")
-    ):
-        _z = state.unit(s, target_name)
-        _mit = (
-            [_z]
-            if akt in ("4.2.2a", "4.2.2c")
-            else [
-                e
-                for e in s["einheiten"].values()
-                if e["seite"] == "US"
-                and e["karte"] == _z["karte"]
-                and e.get("platoon") == _z.get("platoon")
-                and "Exposed" not in e["status"]
-                and e["typ"] not in ("Litter Team", "Paralyzed Team")
-            ]
-        )
-        _st = sum(
-            e["steps"]
-            for e in s["einheiten"].values()
-            if e["seite"] == "US" and e["karte"] == o["--ziel"] and e["typ"] != "Casualty"
-        ) + sum(e["steps"] for e in _mit)
-        if _st > 16:
-            raise rules.Violation(
-                f"Stacking: {o['--ziel']} would have {_st} US steps, at most 16 per card [RULE 5.1.5 p.32]"
-            )
     name, cost, draw_kind, originator_kind, rule = rules.ACTIONS[akt]
-    gi = hq_name == "GI"
     z = state.unit(s, target_name)
     if z["seite"] != "US":
         raise rules.Violation("Orders only to friendly units")
-    if gi:
-        orig_name = o.get("--originator", target_name)
-        if akt in rules.HQ_REQUIRED_UNDER_GI and orig_name == target_name and not state.is_hq(z):
+    return OrderCtx(
+        akt=akt,
+        hq_name=hq_name,
+        target_name=target_name,
+        z=z,
+        zk=state.card(s, z["karte"]),
+        o=o,
+        name=name,
+        cost=cost,
+        draw_kind=draw_kind,
+        originator_kind=originator_kind,
+        rule=rule,
+        late_order=late_order,
+        gi=hq_name == "GI",
+        success=o.get("--erfolg"),
+        skill=o.get("--skill"),
+    )
+
+
+def resolve_originator(s, ctx):
+    """Originator of the order: the active HQ, or under General Initiative the recipient itself or --originator
+    [RULE 4.1.1 p.19, 4.2 Action Menu originator column, 4.1.4 p.20]."""
+    kind, name, rule, z = ctx.originator_kind, ctx.name, ctx.rule, ctx.z
+    if ctx.gi:
+        ctx.orig_name = ctx.o.get("--originator", ctx.target_name)
+        if ctx.akt in rules.HQ_REQUIRED_UNDER_GI and ctx.orig_name == ctx.target_name and not state.is_hq(z):
             raise rules.Violation(
                 f"{name} needs an HQ/Staff even under General Initiative: --originator=<HQ> [RULE 4.1.1 p.19, Clarification 3]"
             )
-        if originator_kind in ("PLT", "CO_BN", "CO_ONLY") and orig_name == target_name:
-            raise rules.Violation(f"{name} needs the responsible HQ as originator (--originator=<HQ>) [RULE {rule}]")
-        orig = state.unit(s, orig_name)
-        if originator_kind == "CO_ONLY" and not (orig.get("ebene") == "CO" and orig["typ"] == "HQ"):
-            raise rules.Violation(f"{name}: originator only the CO HQ [RULE {rule}]")
+        ctx.orig = state.unit(s, ctx.orig_name)
+        if kind in ("PLT", "CO_BN", "CO_ONLY") and not originator_eligible(ctx.orig, kind):
+            # L242 (review M16): a PLT HQ may name itself as originator of its own platoon action under GI
+            raise rules.Violation(
+                f"{name} needs the responsible HQ as originator (--originator=<{ORIGINATOR_WORD[kind]}>) [RULE {rule}]"
+            )
     else:
-        orig_name, orig = hq_name, state.unit(s, hq_name)
-        if originator_kind == "PLT" and not (orig["typ"] == "HQ" and orig.get("ebene") == "PLT"):
-            raise rules.Violation(f"{name} may only be ordered by a PLT HQ [RULE {rule}]")
-        if originator_kind == "CO_BN" and orig.get("ebene") not in ("CO", "BN"):
-            raise rules.Violation(f"{name} may only be ordered by the CO HQ or BN HQ [RULE {rule}]")
-        if originator_kind == "CO_ONLY" and not (orig.get("ebene") == "CO" and orig["typ"] == "HQ"):
-            raise rules.Violation(f"{name}: originator only the CO HQ [RULE {rule}]")
-        if state.fire_team_side(orig) and target_name != hq_name:
-            raise rules.Violation(f"{hq_name} on its Fire Team side may only order itself [RULE 4.1.4 p.20]")
-    if originator_kind == "CO":
+        ctx.orig_name, ctx.orig = ctx.hq_name, state.unit(s, ctx.hq_name)
+        if kind in ("PLT", "CO_BN", "CO_ONLY") and not originator_eligible(ctx.orig, kind):
+            raise rules.Violation(f"{name} may only be ordered by {ORIGINATOR_WORD[kind]} [RULE {rule}]")
+        if state.fire_team_side(ctx.orig) and ctx.target_name != ctx.hq_name:
+            raise rules.Violation(f"{ctx.hq_name} on its Fire Team side may only order itself [RULE 4.1.4 p.20]")
+
+
+def check_recipient(s, ctx):
+    """Recipient of a CO-level action is the HQ itself; otherwise chain of command and communication [RULE 4.0, 4.3]."""
+    orig, orig_name, target_name, akt = ctx.orig, ctx.orig_name, ctx.target_name, ctx.akt
+    if ctx.originator_kind == "CO":
         # [RULE 4.2.1l p.22] Originator 'CO HQ or CO Staff (or PLT HQ in a single-platoon mission)', Recipient 'The HQ itself'
         if not (
             orig.get("ebene") == "CO" or orig["typ"] == "Staff" or (s.get("einzelzug") and orig.get("ebene") == "PLT")
         ):
             raise rules.Violation(
-                f"{name}: only CO HQ or CO Staff (PLT HQ only in single-platoon missions) [RULE {rule}]"
+                f"{ctx.name}: only CO HQ or CO Staff (PLT HQ only in single-platoon missions) [RULE {ctx.rule}]"
             )
         if target_name != orig_name:
-            raise rules.Violation(f"{name}: recipient is the HQ itself [RULE {rule}]")
+            raise rules.Violation(f"{ctx.name}: recipient is the HQ itself [RULE {ctx.rule}]")
     if orig_name != target_name:
         if akt not in ("4.2.4k", "4.2.4l", "4.2.4j"):
             comms.chain_of_command(s, orig_name, target_name)
         if akt != "4.2.4j":
             comms.communication(s, orig_name, target_name, akt)
+
+
+def check_repeat_and_budget(s, ctx):
+    """Exhort follow-up (--free), one action per unit and impulse [RULE 4.2 p.21], 4.2.5 restrictions, Commands and
+    the per-impulse cap [RULE 4.1.3 p.20]."""
+    o, akt, target_name = ctx.o, ctx.akt, ctx.target_name
     ex = s.get("exhort_frei")
-    after_exhort = bool(
+    ctx.after_exhort = bool(
         ex and ex[0] == target_name and ex[1] == akt and ex[2] == s["phase"] and o.get("--gratis") == "ja"
     )
-    if o.get("--gratis") == "ja" and not after_exhort:
+    if o.get("--gratis") == "ja" and not ctx.after_exhort:
         raise rules.Violation(
             "--free=yes only for the effect of a successful Exhort (4.2.1b) with the same unit and action [RULE 4.2.1b p.22]"
         )
-    already = [] if late_order else s["impuls_aktionen"].setdefault(target_name, [])
-    if akt in already and akt != "4.2.2f" and not after_exhort:
+    already = [] if ctx.late_order else s["impuls_aktionen"].setdefault(target_name, [])
+    if akt in already and akt != "4.2.2f" and not ctx.after_exhort:
         raise rules.Violation(
-            f"{target_name} has already carried out '{name}' in this impulse; only Move within a Card may be repeated [RULE 4.2 p.21]"
+            f"{target_name} has already carried out '{ctx.name}' in this impulse; only Move within a Card may be repeated [RULE 4.2 p.21]"
         )
-    comms.action_allowed(z, target_name, akt)
-    k = s["kommandos"][hq_name]
-    if k["verfuegbar"] + (0 if gi else k["gespart"]) < cost and not after_exhort:
-        raise rules.Violation(
-            f"{hq_name} has {k['verfuegbar'] + (0 if gi else k['gespart'])} Commands, action costs {cost} [RULE {rule}]"
-        )
-    success = o.get("--erfolg")
-    skill = o.get("--skill")
-    skill_text = None
+    comms.action_allowed(ctx.z, target_name, akt)
+    ctx.k = command_record(s, ctx.hq_name)
+    check_impulse_budget(
+        s, ctx.hq_name, ctx.cost, ctx.rule, free=ctx.after_exhort or o.get("--gratis") == "ja"
+    )  # L234 (review M7)
+
+
+def apply_skill(s, ctx):
+    """[RULE 12.7 p.82, Player Aid 2] --skill=<Auto ...|Extra Draw>: the holder hands in the marker; Auto skills make
+    the attempt succeed (cards still drawn for Critical Hit/Jam, L153); --short only for a Call for Fire (L250)."""
+    skill, akt, o, z = ctx.skill, ctx.akt, ctx.o, ctx.z
     if skill:
         if skill not in SKILL_AUTO and skill != "Extra Draw":
             raise rules.Violation(f"Skill in an order: {', '.join(list(SKILL_AUTO) + ['Extra Draw'])} [RULE 12.7 p.82]")
         if skill in SKILL_AUTO and akt not in SKILL_AUTO[skill]:
             raise rules.Violation(f"{skill} only applies to {', '.join(SKILL_AUTO[skill])} [Player Aid 2, Skills]")
-        holder = skill_holder(s, target_name, skill)
+        holder = skill_holder(s, ctx.target_name, skill)
         if skill in SKILL_AUTO and akt in ("4.2.4b", "4.2.4d") and "--kritisch" not in o:
             # L153 [RULE 12.7 p.82] 'the cards still need to be drawn to determine if a critical hit or jam takes place'
-            n_cards, who, base = comms.card_count(s, akt, orig if akt.startswith("4.2.3") else z, z)
+            n_cards, _who, _base = comms.card_count(s, akt, ctx.orig if akt.startswith("4.2.3") else z, z)
             ranged = akt == "4.2.4d" and o.get("--ziel", z["karte"]) != z["karte"]
             raise rules.Violation(
                 f"Skill {skill}: success is certain, but draw {n_cards} Action cards for Critical Hit/Jam; then repeat with --critical=yes|no"
@@ -2201,163 +2540,174 @@ def cmd_order(s, args, late_order=None):
                 + draw_watch(s, "cf" if akt == "4.2.4b" else "grenade", z, ranged)
             )
         if skill in SKILL_AUTO:
-            success = "ja"
-            skill_text = (
+            ctx.success = "ja"
+            ctx.skill_text = (
                 f"Skill {skill} of {holder}: attempt automatically successful; Commands are spent anyway"
                 + (", draw cards only for Critical Hit/Jam" if akt in ("4.2.4b", "4.2.4d") else ", no cards needed")
                 + " [RULE 12.7 p.82]"
             )
         s["einheiten"][holder]["skills"].remove(skill)
-        skill_text = (
-            skill_text or f"Skill Extra Draw from {holder}: one more card [Player Aid 2]"
+        ctx.skill_text = (
+            ctx.skill_text or f"Skill Extra Draw from {holder}: one more card [Player Aid 2]"
         ) + "; hand in the Skill marker"
-    if after_exhort and success != "ja":
+    if ctx.after_exhort and ctx.success != "ja":
         raise rules.Violation("After a successful Exhort enter the effect with --success=yes --free=yes")
-    if o.get("--short") == "ja":
-        success = "ja"  # [RULE 7.16.4 p.59] 'Short' takes precedence; the Pending marker is placed anyway
-    prot, moved = [], []
-    if skill_text:
-        prot.append(skill_text)
-    zk = state.card(s, z["karte"])
-    mods = []
-    base_cff = None
+    if o.get("--short") == "ja" and akt == "4.2.4i":  # L250: only a Call for Fire knows 'Short'
+        ctx.success = "ja"  # [RULE 7.16.4 p.59] 'Short' takes precedence; the Pending marker is placed anyway
+    if ctx.skill_text:
+        ctx.prot.append(ctx.skill_text)
+
+
+def pre_draw_checks(s, ctx):
+    """Legality of an attempt before the card draw (Spot LOS, Grenade Attack, Concentrate Fire target, Infiltrate 5.1.4)
+    and the draw modifiers; without --success the draw prompt is raised (draw_prompt)."""
+    akt, o, z, success = ctx.akt, ctx.o, ctx.z, ctx.success
+    extra_cff = 0
     if akt == "4.2.4i":
-        base_cff, extra_cff, agency = cff_precheck(s, z, target_name, orig_name, o)
-    if draw_kind in ("attempt", "cover", "cff") or (
-        draw_kind == "attempt_vof" and fire.vof_against(s, z["karte"], z["seite"]) is not None
+        ctx.base_cff, extra_cff, ctx.agency = cff_precheck(s, z, ctx.target_name, o)
+    if not (
+        ctx.draw_kind in ("attempt", "cover", "cff")
+        or (ctx.draw_kind == "attempt_vof" and fire.vof_against(s, z["karte"], z["seite"]) is not None)
     ):
-        extra = 0
-        if akt == "4.2.4i":
-            extra = extra_cff
-            if extra:
-                mods = [(f"Target marker {agency} on {o['--ziel']}", extra)]
-        if akt == "4.2.4a":
-            target_k = o.get("--ziel")
-            if not target_k:
-                raise rules.Violation("Spot: specify --target=<card with Unspotted enemies> [4.2.4a]")
-            state.card(s, target_k)
-            if not [m for m in state.units_on(s, target_k, "Feind") if not s["einheiten"][m].get("spotted")]:
-                raise rules.Violation(f"There is no Unspotted enemy on {target_k} [8.5]")
-            if zk.get("staging"):
-                raise rules.Violation("No spotting from the Staging Area [8.5 Note]")
-            ok, reason = geometry.los(
-                s,
-                z["karte"],
-                target_k,
-                ha=geometry.height_bonus(s, z),
-                hb=geometry.card_height_bonus(s, target_k, "Feind"),
-            )
-            if not ok:
-                raise rules.Violation(f"No LOS from {z['karte']} to {target_k}: {reason}")
-            mods = comms.spot_modifiers(s, z, target_k)
-            extra = sum(m for _, m in mods)
-        if akt == "4.2.4d":
-            check_grenade(s, z, target_name, o)
-        if akt in ("4.2.4c", "4.2.4h") and success and ":" not in success:
-            raise rules.Violation(f"{name}: --success=<unit>:yes|no,.. per unit [RULE {rule}]")
-        if skill == "Extra Draw":
-            extra += 1
-            mods = list(mods) + [("Skill Extra Draw", 1)]
-        if akt == "4.2.2c" and o.get("--ziel") and success not in ("ja", "nein"):
-            check_move(
-                s, z, target_name, o["--ziel"], akt
-            )  # L120: legality (5.1.4 VOF on origin or destination) before the draw
-        if akt not in ("4.2.2d", "4.2.4c", "4.2.4h") and success not in ("ja", "nein"):
-            n_cards, who, base = comms.card_count(s, akt, orig, z, extra, base_cff)
-            word = {
-                "4.2.2c": "Infiltrate symbol",
-                "4.2.2g": "Infiltrate symbol",
-                "4.2.2e": "word Cover",
-                "4.2.4a": "Crosshairs",
-                "4.2.4b": "Crosshairs",
-                "4.2.4d": "Grenade symbol (2 or more: Critical Hit, --critical=yes)",
-                "4.2.4i": "Burst symbol (also 3 Bursts; 'Short!' takes precedence)",
-            }.get(akt, "word Rally")
-            msg = f"{name}: draw {n_cards} Action cards (base {base}" + (
-                ""
-                if akt == "4.2.4a"
-                else f", experience {comms.experience(who)} of the {'originator' if akt.startswith('4.2.3') else 'recipient'}"
-            )
-            if mods:
-                msg += ", " + ", ".join(f"{t} {m:+d}" for t, m in mods) + (", minimum 1" if akt == "4.2.4a" else "")
-            msg += (
-                f"); success on {word}. Then --success=yes|no"
-                + (" (on 'Short' --short=yes)" if akt == "4.2.4i" and s.get("fm_werte") else "")
-                + f" [RULE 4.2 p.21, {rule}]"
-            )
-            kind = {"4.2.4b": "cf", "4.2.4d": "grenade", "4.2.4i": "cff", "4.2.4a": "spot"}.get(akt, "other")
-            ranged = akt == "4.2.4d" and o.get("--ziel", z["karte"]) != z["karte"]
-            watch = draw_watch(s, kind, z, ranged, skill=bool(skill_text))
-            if watch:
-                msg += " " + watch
-            raise rules.Violation(msg)
-    # ---------------- Movement
-    ctx = types.SimpleNamespace(
-        agency=agency,
-        akt=akt,
-        moved=moved,
-        success=success,
-        after_exhort=after_exhort,
-        gi=gi,
-        hq_name=hq_name,
-        k=k,
-        cost=cost,
-        late_order=late_order,
-        name=name,
-        o=o,
-        orig=orig,
-        orig_name=orig_name,
-        prot=prot,
-        rule=rule,
-        z=z,
-        target_name=target_name,
-        zk=zk,
+        return
+    if akt == "4.2.4i":
+        ctx.extra = extra_cff
+        if extra_cff:
+            ctx.mods = [(f"Target marker {ctx.agency} on {o['--ziel']}", extra_cff)]
+    if akt == "4.2.4a":
+        target_k = o.get("--ziel")
+        if not target_k:
+            raise rules.Violation("Spot: specify --target=<card with Unspotted enemies> [4.2.4a]")
+        state.card(s, target_k)
+        if not unspotted_enemies(s, target_k):
+            raise rules.Violation(f"There is no Unspotted enemy on {target_k} [8.5]")
+        if ctx.zk.get("staging"):
+            raise rules.Violation("No spotting from the Staging Area [8.5 Note]")
+        ok, reason = geometry.los(
+            s, z["karte"], target_k, ha=geometry.height_bonus(s, z), hb=geometry.card_height_bonus(s, target_k, "Feind")
+        )
+        if not ok:
+            raise rules.Violation(f"No LOS from {z['karte']} to {target_k}: {reason}")
+        ctx.mods = comms.spot_modifiers(s, z, target_k)
+        ctx.extra = sum(m for _, m in ctx.mods)
+    if akt == "4.2.4d":
+        check_grenade(s, z, ctx.target_name, o)
+    if akt == "4.2.4b" and success not in ("ja", "nein"):  # L184: legality before the draw
+        if not fire.is_firing(z):
+            raise rules.Violation(f"{ctx.target_name} is not firing (no target, no VOF) [RULE 4.2.4b p.25]")
+        zt_ = fire.effective_fire_target(s, ctx.target_name)
+        if not spotted_enemies(s, zt_):
+            raise rules.Violation(f"No Spotted enemy on {zt_} [RULE 4.2.4b p.25]")
+    if akt in ("4.2.4c", "4.2.4h") and success and ":" not in success:
+        raise rules.Violation(f"{ctx.name}: --success=<unit>:yes|no,.. per unit [RULE {ctx.rule}]")
+    if ctx.skill == "Extra Draw":
+        ctx.extra += 1
+        ctx.mods = list(ctx.mods) + [("Skill Extra Draw", 1)]
+    if akt == "4.2.2c" and o.get("--ziel") and success not in ("ja", "nein"):
+        # L120: legality (5.1.4 VOF on origin or destination) before the draw
+        check_move(s, z, ctx.target_name, o["--ziel"], akt)
+    if akt not in ("4.2.2d", "4.2.4c", "4.2.4h") and success not in ("ja", "nein"):
+        raise rules.Violation(draw_prompt(s, ctx))
+
+
+def draw_prompt(s, ctx):
+    """Text only: how many Action cards to draw for the attempt, which symbol counts, and what to watch for (L153)."""
+    akt, o, z = ctx.akt, ctx.o, ctx.z
+    n_cards, who, base = comms.card_count(s, akt, ctx.orig, z, ctx.extra, ctx.base_cff)
+    word = {
+        "4.2.2c": "Infiltrate symbol",
+        "4.2.2g": "Infiltrate symbol",
+        "4.2.2e": "word Cover",
+        "4.2.4a": "Crosshairs",
+        "4.2.4b": "Crosshairs",
+        "4.2.4d": "Grenade symbol (2 or more: Critical Hit, --critical=yes)",
+        "4.2.4i": "Burst symbol (also 3 Bursts; 'Short!' takes precedence)",
+    }.get(akt, "word Rally")
+    msg = f"{ctx.name}: draw {n_cards} Action cards (base {base}" + (
+        ""
+        if akt == "4.2.4a"
+        else f", experience {comms.experience(who)} of the {'originator' if akt.startswith('4.2.3') else 'recipient'}"
     )
-    handler = ORDER_HANDLERS.get(akt)
-    if handler:
-        handler(s, ctx)
-    elif order_v4(s, hq_name, target_name, akt, o, orig, prot):
-        pass
-    else:
-        raise rules.Violation(f"Action {akt} not implemented yet")
-    moved, success = ctx.moved, ctx.success
-    if after_exhort:
+    if ctx.mods:
+        msg += ", " + ", ".join(f"{t} {m:+d}" for t, m in ctx.mods) + (", minimum 1" if akt == "4.2.4a" else "")
+    agency = ctx.agency
+    msg += (
+        f"); success on {word}. Then --success=yes|no"
+        + (" (on 'Short' --short=yes)" if akt == "4.2.4i" and s.get("fm_werte") else "")
+        + (
+            " WATCH: 3 Bursts icon = Battalion Fire Mission possible: --battalion=K1,K2 (two cards adjacent to the target) [RULE 7.16.2B p.58]"
+            if akt == "4.2.4i"
+            and agency
+            and (s.get("fm_gruppe") or {}).get(agency, agency) in (s.get("bataillon_fm") or [])
+            else ""
+        )  # L207
+        + f" [RULE 4.2 p.21, {ctx.rule}]"
+    )
+    kind = {"4.2.4b": "cf", "4.2.4d": "grenade", "4.2.4i": "cff", "4.2.4a": "spot"}.get(akt, "other")
+    ranged = akt == "4.2.4d" and o.get("--ziel", z["karte"]) != z["karte"]
+    watch = draw_watch(s, kind, z, ranged, skill=bool(ctx.skill_text))
+    return msg + (" " + watch if watch else "")
+
+
+def book_order(s, ctx):
+    """After the handler: pay the Commands, note the action per unit for the repeat check, activity level, save, print."""
+    o, k, cost, moved, success = ctx.o, ctx.k, ctx.cost, ctx.moved, ctx.success
+    if ctx.after_exhort:
         s["exhort_frei"] = None
     elif o.get("--gratis") != "ja":
-        pay_commands(s, hq_name, cost, rule)
-    for n in moved or [target_name]:
-        if not after_exhort and not late_order:
-            s["impuls_aktionen"].setdefault(n, []).append(akt)
+        pay_commands(s, ctx.hq_name, cost, ctx.rule)
+    for n in moved or [ctx.target_name]:
+        if not ctx.after_exhort and not ctx.late_order:
+            s["impuls_aktionen"].setdefault(n, []).append(ctx.akt)
+            if ctx.also_book:  # L244 (review M18): Platoon Fire also counts as the single action of every attacker
+                s["impuls_aktionen"][n].append(ctx.also_book)
     ak = fire.update_activity(s)
     if ak:
-        prot.append(ak)
+        ctx.prot.append(ak)
     s.pop("_befehl_opts", None)
-    txt = ("Late order for the impulse of " + late_order + ": " if late_order else "") + (
-        f"{hq_name} orders {target_name}: {name}"
+    txt = ("Late order for the impulse of " + ctx.late_order + ": " if ctx.late_order else "") + (
+        f"{ctx.hq_name} orders {ctx.target_name}: {ctx.name}"
         + (f" to {o['--ziel']}" if o.get("--ziel") else "")
-        + (f", attempt {success}" if success else "")
+        + (f", attempt {attempt_text(success)}" if success else "")  # L182/L197 English output
         + (f" (with {', '.join(moved)})" if len(moved) > 1 else "")
         + f"; cost {0 if o.get('--gratis') == 'ja' else cost}, remaining {k['verfuegbar']}+{k['gespart']}"
     )
-    state.save_state(s, txt + "; " + "; ".join(prot), rule)
-    print(f"{messages.ALLOWED} {messages.rule(rule)}")
+    state.save_state(s, txt + "; " + "; ".join(ctx.prot), ctx.rule)
+    print(f"{messages.ALLOWED} {messages.rule(ctx.rule)}")
     print(txt)
-    briefing.print_board(prot, s)
+    briefing.print_board(ctx.prot, s)
 
 
 def cmd_fire(s, args):
+    rules.need(args, 2, "fire <unit> <card|off>")
     n, target = args[0], args[1]
     e = state.unit(s, n)
     prot = []
     if target == "aus":
-        e["ziel"] = None
-        e.pop("ziel_offen", None)
-        e.pop("konzentriert", None)
+        fire.cease_fire(e)
         prot.append(f"{n} no longer fires (correction)")
     else:
         state.card(s, target)
         if e.get("ziel_offen") and target not in e["ziel_offen"]:
             raise rules.Violation(f"{target} not among the candidates {', '.join(e['ziel_offen'])}")
+        if e.get("ziel_offen"):
+            # L218 [RULE 6.3.5 p.43 'Units will never place an extra PDF if they are able to fire along the card's
+            # current PDF', 6.1.1 L122]: a second pending unit on the card joins a PDF chosen meanwhile
+            joined = sorted(
+                {
+                    x["ziel"]
+                    for m, x in s["einheiten"].items()
+                    if m != n
+                    and x["seite"] == e["seite"]
+                    and x.get("karte") == e["karte"]
+                    and fire.is_firing(x)
+                    and x["ziel"] in e["ziel_offen"]
+                }
+            )
+            if joined and target not in joined:
+                raise rules.Violation(
+                    f"{n} can fire along the existing PDF from {e['karte']} to {', '.join(joined)}: no extra PDF [RULE 6.3.5 p.43]"
+                )
         e["ziel"] = target
         e.pop("ziel_offen", None)
         prot.append(
@@ -2369,6 +2719,20 @@ def cmd_fire(s, args):
             )
             + fire.grazing_note(s, n)
         )
+        if target != e["karte"]:
+            # L218 [RULE 6.3.5 p.43]: other pending units of this card that can fire along the new PDF join it
+            for m, x in s["einheiten"].items():
+                if (
+                    m != n
+                    and x["seite"] == e["seite"]
+                    and x.get("karte") == e["karte"]
+                    and target in (x.get("ziel_offen") or [])
+                ):
+                    x["ziel"] = target
+                    x.pop("ziel_offen", None)
+                    prot.append(
+                        f"{m} joins the fire along the PDF from {e['karte']} to {target} (no extra PDF) [6.3.5 p.43]"
+                    )
     ak = fire.update_activity(s)
     if ak:
         prot.append(ak)
@@ -2377,6 +2741,21 @@ def cmd_fire(s, args):
 
 
 def execute_pyro(s, z, name, o, prot):
+    """[RULE 4.2.1c p.22, 4.4 p.30] Fire a pyrotechnic asset: Hand Held Illumination, HC/WP smoke or a signal (L256:
+    split into the parts below)."""
+    type_, zk = pyro_target(s, z, name, o)
+    z["assets"].remove(type_)
+    if type_ == "Handheld Illumination":
+        _pyro_illumination(s, type_, zk, prot)
+    elif type_ in ("HC Smoke", "WP Smoke"):
+        _pyro_smoke(s, type_, zk, o, prot)
+    else:
+        _pyro_signal(s, type_, zk, name, o, prot)
+
+
+def pyro_target(s, z, name, o):
+    """Legality of a pyro order: the recipient carries the asset and may use it; aerial pyrotechnics on the own or an
+    adjacent card, smoke on the own card, no colored smoke at night. Returns (asset type, card)."""
     type_ = o.get("--asset")
     if not type_ or type_ not in z.get("assets", []):
         raise rules.Violation(
@@ -2396,34 +2775,38 @@ def execute_pyro(s, z, name, o, prot):
         raise rules.Violation(
             f"{type_}: colored smoke cannot be used for signaling at night (light {s.get('licht'):+d}, Moon +2 or higher); aerial pyrotechnics only [RULE 4.4.1 p.30]"
         )
-    z["assets"].remove(type_)
-    if type_ == "Handheld Illumination":
-        iv = (s.get("illum_werte") or {}).get(type_) or {"oben": -1, "unten": None}
-        state.card(s, zk).setdefault("illum", []).append(
-            {"oben": iv["oben"], "unten": iv.get("unten"), "quelle": type_}
+    return type_, zk
+
+
+def _pyro_illumination(s, type_, zk, prot):
+    """[RULE 4.4, 9.2 p.70, Marker E34] Hand Held Illumination: this card only, immediately."""
+    iv = (s.get("illum_werte") or {}).get(type_) or {"oben": -1, "unten": None}
+    state.card(s, zk).setdefault("illum", []).append({"oben": iv["oben"], "unten": iv.get("unten"), "quelle": type_})
+    prot.append(
+        f"Hand Held Illumination {iv['oben']:+d} on {zk} (this card only), immediately; removed in Clean Up [4.4, 9.2 p.70, Marker E34]"
+    )
+    fire.open_fire(s, prot)
+
+
+def _pyro_smoke(s, type_, zk, o, prot):
+    """[RULE 4.4.3 p.31, 5.4 p.38] HC/WP smoke on the own card: cover value from the marker, blocks LOS out of the card."""
+    w = options.int_opt(o, "--wert", "smoke cover value")
+    if w is None:
+        raise rules.Violation(
+            f"{type_}: read the cover value from the marker (UNVERIFIED) and specify --value=<n> [4.4.3 p.31]"
         )
-        prot.append(
-            f"Hand Held Illumination {iv['oben']:+d} on {zk} (this card only), immediately; removed in Clean Up [4.4, 9.2 p.70, Marker E34]"
-        )
-        fire.open_fire(s, prot)
-        return
-    if type_ in ("HC Smoke", "WP Smoke"):
-        w = o.get("--wert")
-        if w is None:
-            raise rules.Violation(
-                f"{type_}: read the cover value from the marker (UNVERIFIED) and specify --value=<n> [4.4.3 p.31]"
-            )
-        state.card(s, zk).setdefault("extern", []).append(
-            {"typ": "Smoke", "wert": int(w), "quelle": type_, "seite": "US"}
-        )
-        prot.append(
-            f"{type_} on {zk} (cover +{w} against everything except Incoming/Air Strike/Mines/Grenade; blocks LOS out of and through {zk}; removed in Clean Up) [4.4.3 p.31, 5.4 p.38]"
-        )
-        for n, e in s["einheiten"].items():
-            if e["karte"] == zk and fire.is_firing(e) and e["ziel"] != zk:
-                e["ziel"] = None
-                prot.append(f"{n} loses LOS out of the card, remove PDF [5.4]")
-        return
+    state.card(s, zk).setdefault("extern", []).append({"typ": "Smoke", "wert": w, "quelle": type_, "seite": "US"})
+    prot.append(
+        f"{type_} on {zk} (cover +{w} against everything except Incoming/Air Strike/Mines/Grenade; blocks LOS out of and through {zk}; removed in Clean Up) [4.4.3 p.31, 5.4 p.38]"
+    )
+    for n, e in s["einheiten"].items():
+        if e["karte"] == zk and fire.is_firing(e) and e["ziel"] != zk:
+            fire.cease_fire(e)
+            prot.append(f"{n} loses LOS out of the card, remove PDF [5.4]")
+
+
+def _pyro_signal(s, type_, zk, name, o, prot):
+    """[RULE 4.4.1 p.30] Signal per the Mission Log assignment: Cease Fire, move or infiltrate to a card."""
     code = s.get("pyro_belegung", {}).get(type_)
     prot.append(
         f"{type_} on {zk} fired"
@@ -2433,7 +2816,25 @@ def execute_pyro(s, z, name, o, prot):
     if not code:
         return
     state.card(s, zk).setdefault("pyro", []).append(type_)  # display only; removed in Clean Up (3.8), no VOF
-    # [RULE 4.4.1 p.30] Colored flares visible everywhere; colored smoke only with normal LOS to the card
+    consequences = signal_recipients(s, type_, zk, name)
+    if code == "CF":
+        for n in consequences:
+            e = s["einheiten"][n]
+            if fire.is_firing(e):
+                fire.cease_fire(e)
+                prot.append(f"{n} ceases fire [4.2.4k]")
+        fire.open_fire(s, prot)
+        prot.append(
+            "Cease Fire by signal: units with a Spotted enemy in LOS open fire again immediately per 6.1.1 [4.4.1 footnote]"
+        )
+        return
+    targets_of = signal_targets(s, code, zk, consequences)
+    follow_signal(s, code, targets_of, o, prot)
+
+
+def signal_recipients(s, type_, zk, name):
+    """[RULE 4.4.1 p.30] The US units that see the signal: colored flares everywhere, colored smoke only with normal LOS
+    to the card; HQs of higher rank than the firing unit ignore it (unless option U21)."""
     consequences = []
     for n, e in s["einheiten"].items():
         if e["seite"] != "US":
@@ -2448,19 +2849,12 @@ def execute_pyro(s, z, name, o, prot):
         ):
             continue
         consequences.append(n)
+    return consequences
+
+
+def signal_targets(s, code, zk, consequences):
+    """The card each recipient moves to for a movement signal (M2S, M2PO/M2SO, M2RP<n>, XPL<n>, InfAP2PO/SO)."""
     zi = s.get("ziele", {})
-    if code == "CF":
-        for n in consequences:
-            e = s["einheiten"][n]
-            if fire.is_firing(e):
-                e["ziel"] = None
-                e.pop("konzentriert", None)
-                prot.append(f"{n} ceases fire [4.2.4k]")
-        fire.open_fire(s, prot)
-        prot.append(
-            "Cease Fire by signal: units with a Spotted enemy in LOS open fire again immediately per 6.1.1 [4.4.1 footnote]"
-        )
-        return
     targets_of = {}
     for n in consequences:
         e = s["einheiten"][n]
@@ -2484,11 +2878,12 @@ def execute_pyro(s, z, name, o, prot):
             obj = zi.get("primaer" if code == "InfAP2PO" else "sekundaer")
             if obj and e["karte"] == zi.get("ap"):
                 targets_of[n] = obj
-    result = {}
-    for t in (o.get("--erfolg") or "").split(","):
-        if ":" in t:
-            a, b = t.split(":")
-            result[a] = b
+    return targets_of
+
+
+def follow_signal(s, code, targets_of, o, prot):
+    """Every recipient with a target card moves (Exposed) or infiltrates (own draw per unit, Exposed on failure)."""
+    result = parse_per_unit(o.get("--erfolg"))  # L230 (review H8)
     for n, zk2 in targets_of.items():
         e = s["einheiten"][n]
         akt = "4.2.2c" if code.startswith("Inf") else "4.2.2a"
@@ -2512,7 +2907,7 @@ def hq_rank(e):
     return {"BN": 0, "CO": 1}.get(e.get("ebene"), e.get("rang", 9) if e["typ"] == "Staff" else 5)
 
 
-def order_v4(s, hq_name, target_name, akt, o, orig, prot):
+def order_v4(s, target_name, akt, o, orig, prot):
     """Runner, net change, phone line repair. Returns True if the action was handled here."""
     if akt == "4.2.1f":
         z = state.unit(s, target_name)
@@ -2574,9 +2969,8 @@ def order_runner_box(s, hq_name, target_name, akt, o):
     if s["phase"] not in rules.IMPULSES or s.get("aktiver_hq") != hq_name:
         raise rules.Violation(f"Active HQ is {s.get('aktiver_hq')}, not {hq_name}")
     name, cost, _, _, rule = rules.ACTIONS[akt]
-    k = s["kommandos"][hq_name]
-    if k["verfuegbar"] + (0 if hq_name == "GI" else k["gespart"]) < cost:
-        raise rules.Violation(f"{hq_name} has too few Commands [RULE {rule}]")
+    k = command_record(s, hq_name)
+    check_impulse_budget(s, hq_name, cost, rule)  # L234 (review M7): Commands and per-impulse cap before anything else
     ce = state.unit(s, co)
     prot = []
     if akt == "4.2.1g":
@@ -2591,7 +2985,7 @@ def order_runner_box(s, hq_name, target_name, akt, o):
             "erfahrung": "Line",
             "karte": h["karte"],
             "bereich": h.get("bereich", "offen"),
-            "status": ["Exposed"],
+            "status": [rules.EXPOSED],
             "steps": 1,
             "vof_rating": None,
             "reichweite": "C",

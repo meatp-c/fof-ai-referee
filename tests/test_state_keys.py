@@ -4,46 +4,29 @@ must not use English names (the identifier rename of 2026-10-12 once turned punk
 import ast
 import pathlib
 
-GERMAN_KEYS = {
-    "karte",
-    "bereich",
-    "ziel",
-    "seite",
-    "erfahrung",
-    "typname",
-    "paket",
-    "pc_herkunft",
-    "punkte",
-    "reichweite",
-    "verfuegbar",
-    "gespart",
-    "aktiviert",
-    "fertig",
-    "mitglieder",
-    "erfolg",
-    "primaer_besucht",
-    "einheit",
+# English name the 2026-10-12 rename produced -> German JSON key the state uses
+RENAMED = {
+    "card": "karte",
+    "area": "bereich",
+    "target": "ziel",
+    "side": "seite",
+    "experience": "erfahrung",
+    "type_name": "typname",
+    "package": "paket",
+    "pc_origin": "pc_herkunft",
+    "points": "punkte",
+    "range_": "reichweite",
+    "available": "verfuegbar",
+    "saved": "gespart",
+    "done": "fertig",
+    "activated": "aktiviert",
+    "members": "mitglieder",
+    "success": "erfolg",
+    "primary_visited": "primaer_besucht",
+    "unit": "einheit",
 }
-ENGLISH = {
-    "card",
-    "area",
-    "target",
-    "side",
-    "experience",
-    "type_name",
-    "package",
-    "pc_origin",
-    "points",
-    "range_",
-    "available",
-    "saved",
-    "done",
-    "activated",
-    "members",
-    "success",
-    "primary_visited",
-    "unit",
-}
+GERMAN_KEYS = set(RENAMED.values())
+ENGLISH = set(RENAMED)
 
 
 def package_dir():
@@ -55,7 +38,7 @@ def package_dir():
 
 
 def test_no_english_keyword_keys_in_state_writes():
-    offenders = []
+    offenders, german_seen = [], set()
     for path in sorted(package_dir().glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -65,5 +48,9 @@ def test_no_english_keyword_keys_in_state_writes():
                 if name in ("dict", "update", "setdefault", "get", "pop"):
                     for kw in node.keywords:
                         if kw.arg in ENGLISH:
-                            offenders.append(f"{path.name}:{node.lineno} {name}({kw.arg}=...)")
+                            offenders.append(f"{path.name}:{node.lineno} {name}({kw.arg}=...), use {RENAMED[kw.arg]}=")
+                        elif kw.arg in GERMAN_KEYS:
+                            german_seen.add(kw.arg)
     assert not offenders, offenders
+    # the walk must actually see such calls, otherwise the guard passes vacuously (e.g. after a refactoring to dicts)
+    assert len(german_seen) >= 3, sorted(german_seen)

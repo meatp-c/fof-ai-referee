@@ -57,6 +57,7 @@ ACTIONS = {
     "4.2.1j": ("Switch Radio/Phone to a Different Network", 1, "auto", "HQ", "4.2.1j p.22, 4.3.3 p.27"),
     "4.2.1k": ("Repair a Cut Phone Line", 1, "auto", "HQ", "4.2.1k p.22, 4.3.4 p.29"),
     "4.2.1l": ("Designate a New Tactical Control", 1, "auto", "CO", "4.2.1l p.22, 5.1.7 p.33"),
+    "4.2.1i": ("Activate for AT Combat & Vehicle Movement", 1, "auto", "HQ", "4.2.1i p.22, 10.4 p.72"),  # L187
     "4.2.2a": ("Move to an Adjacent Card", 1, "auto", "HQ", "4.2.2a p.23"),
     "4.2.2b": ("Move a Platoon to an Adjacent Card", 2, "auto", "PLT", "4.2.2b p.23"),
     "4.2.2c": ("Attempt to Infiltrate an Adjacent Card", 1, "attempt", "HQ", "4.2.2c p.23"),
@@ -87,8 +88,28 @@ ACTIONS = {
 }
 
 
-# 4.1.1 p.19: actions that need an HQ/Staff as originator even under General Initiative (Clarification 3)
-HQ_REQUIRED_UNDER_GI = {"4.2.1b", "4.2.1d", "4.2.1e", "4.2.1f", "4.2.1g", "4.2.1h", "4.2.1l", "4.2.3i", "4.2.4m"}
+# 4.1.1 p.19: actions that need an HQ/Staff as originator even under General Initiative (Clarification 3). The rule also
+# lists Fire FPF or FPL (4.2.4m); that action is not implemented (no entry in ACTIONS, cmd_order refuses it as unknown),
+# so it is kept apart and joins the set once it is added to ACTIONS.
+HQ_REQUIRED_UNDER_GI = {"4.2.1b", "4.2.1d", "4.2.1e", "4.2.1f", "4.2.1g", "4.2.1h", "4.2.1l", "4.2.3i"}
+HQ_REQUIRED_UNDER_GI_NOT_IMPLEMENTED = {"4.2.4m"}  # Fire FPF or FPL [RULE 4.1.1 p.19, 4.2.4m]
+assert HQ_REQUIRED_UNDER_GI <= set(ACTIONS), "every GI exception must be an action of the menu"
+assert not HQ_REQUIRED_UNDER_GI_NOT_IMPLEMENTED & set(ACTIONS), "implemented: move it into HQ_REQUIRED_UNDER_GI"
+
+# Actions of the menu that 'order' does not carry out (no order handler): they stay in ACTIONS for cost, originator and
+# the GI rules, but are given with their own command. cmd_order used to end in "Action 4.2.1a not implemented yet".
+ORDER_NOT_IMPLEMENTED = {"4.2.1a": "activate <hq>"}  # [RULE 4.2.1a p.22] commands.cmd_activate
+assert set(ORDER_NOT_IMPLEMENTED) <= set(ACTIONS), "an action given by its own command is still an action of the menu"
+
+
+def order_not_implemented(akt):
+    """The Violation for an action that cmd_order cannot carry out (registry ORDER_NOT_IMPLEMENTED)."""
+    if akt in ORDER_NOT_IMPLEMENTED:
+        return Violation(
+            f"Action {akt} ({ACTIONS[akt][0]}) is not given with order; use: {ORDER_NOT_IMPLEMENTED[akt]}",
+            rule=ACTIONS[akt][4],
+        )
+    return Violation(f"Action {akt} not implemented yet")
 
 
 # 4.2.5 p.26 LAT restrictions (allow lists)
@@ -191,6 +212,30 @@ FIXED_COVER = (
 
 
 STRUCTURES = ("Bunker", "Pillbox")  # [RULE 5.3.2 p.37] fire arc, no Point Blank
+
+# [RULE 7.3.1 p.52, 7.4 p.54, 7.6 p.54, 5.2.2B p.36] high-angle and rocket weapons do not fire from these cover markers
+# (Light/Strong Building are the CSR 8 names, L203; Upper Story/Church Tower per E55)
+NO_FIRE_FROM_COVER = STRUCTURES + (
+    "Building",
+    "Light Building",
+    "Strong Building",
+    "Cave",
+    "Upper Story",
+    "Church Tower",
+)
+
+GRENADE_VOF_DEFAULT = (
+    -4
+)  # [RULE 7.10 p.54, Normandy p.13] value of a successful Grenade Attack when the setup gives none
+
+# status markers on a counter (e["status"])
+PINNED, EXPOSED, ACTIVATED, MOVED_FIRED, FIRE_TEAM_SIDE = (
+    "Pinned",
+    "Exposed",
+    "Activated",
+    "Moved/Fired",
+    "Fire Team side",
+)
 
 
 SIDE_NAME = {(1, 0): "oben", (-1, 0): "unten", (0, -1): "links", (0, 1): "rechts"}
@@ -337,3 +382,17 @@ class Violation(Exception):
 
     def __init__(self, message, rule=None):
         super().__init__(message + (" " + messages.rule(rule) if rule else ""))
+
+
+def need(args, n, usage):
+    """Positional arguments: a Violation with the usage line instead of an IndexError (review 23.10.2026, L221)."""
+    if len(args) < n:
+        raise Violation(f"Usage: {usage}")
+
+
+def int_value(text, what):
+    """int() for user input: a Violation instead of a ValueError/TypeError (L221)."""
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        raise Violation(f"{what}: a whole number is expected, got '{text}'") from None

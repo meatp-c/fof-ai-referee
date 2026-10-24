@@ -14,6 +14,7 @@ Needs `pdftotext` (poppler-utils). It writes into data/:
     <name>_kompakt.txt                 (optional) any further PDF, included in `search`
 The German file names are kept because the engine reads them (see GLOSSARY.md).
 """
+
 import argparse
 import json
 import pathlib
@@ -47,13 +48,18 @@ def build_index(txt, komp_lines):
         s = line.replace("\f", "").strip()
         if not s:
             continue
-        if s.startswith("1.0 Introduction") and page >= 3:   # skip the table of contents
+        if s.startswith("1.0 Introduction") and page >= 3:  # skip the table of contents
             toc_done = True
         if not toc_done:
             continue
         m = pat.match(s)
         if m and m.group(1) not in index:
-            index[m.group(1)] = {"titel": m.group(2).strip(), "seite": page, "zeile_txt": ln, "zeile_kompakt": pos.get(s)}
+            index[m.group(1)] = {
+                "titel": m.group(2).strip(),
+                "seite": page,
+                "zeile_txt": ln,
+                "zeile_kompakt": pos.get(s),
+            }
     return index
 
 
@@ -71,7 +77,9 @@ def main():
     (DATA / "regelindex.json").write_text(json.dumps(idx, indent=1, ensure_ascii=False), encoding="utf-8")
     print(len(idx), "rule headings indexed")
     if not idx:
-        print("WARNING: no headings found. The index expects lines like '6.4 Combat Resolution & Effects' after '1.0 Introduction'.")
+        print(
+            "WARNING: no headings found. The index expects lines like '6.4 Combat Resolution & Effects' after '1.0 Introduction'."
+        )
     if a.clarifications:
         t = pdf_to_text(a.clarifications, DATA / "clarifications.txt")
         (DATA / "clarifications_2025_05_kompakt.txt").write_text(compact(t), encoding="utf-8")

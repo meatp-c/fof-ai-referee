@@ -1,4 +1,8 @@
-"""Game state: load/save, protocol, basic accessors for units and cards."""
+"""Game state: load/save, protocol, basic accessors for units and cards.
+
+Import cycle: state imports briefing and rules at module level (briefing imports state back, used only at call time);
+fire and history import state at module level, so state imports them inside the functions that need them
+(marker_summary, cmd_undo)."""
 
 import datetime
 import json
@@ -21,14 +25,75 @@ def game_dir():
     if os.environ.get("FOF_PARTIE"):
         return ROOT / os.environ["FOF_PARTIE"]
     st = ROOT / ".aktuelle_partie"
-    return ROOT / (st.read_text().strip() if st.exists() else "partie1")
+    return ROOT / (st.read_text(encoding="utf-8").strip() if st.exists() else "partie1")
+
+
+def check_new_game_folder(name, force=False):
+    """Review M5: 'new' must not overwrite a game silently. Raises a Violation if the folder ROOT/name already holds a
+    spielstand.json and force is not set; returns the folder path. Call it before .aktuelle_partie is switched."""
+    folder = ROOT / name
+    if (folder / "spielstand.json").exists() and not force:
+        raise rules.Violation(
+            f"Game folder {name} already holds a game (spielstand.json); choose another name or add --force to overwrite it"
+        )
+    return folder
+
+
+# The state as last read from or written to disk (L344): save_state diffs the markers against the old file without
+# reading it again, and needs no JSON parse at all for the phase/protocol bookkeeping of the Combat Effects segment.
+_DISK = {}
+
+
+def _remember_disk(path, text, s):
+    _DISK.clear()
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    _DISK.update(
+        path=str(path),
+        stat=(st.st_mtime_ns, st.st_size),
+        text=text,
+        phase=s.get("phase"),
+        entries=len(s["protokoll"]) if isinstance(s.get("protokoll"), list) else None,
+    )
+
+
+def _disk_before_save(path):
+    """(phase, protocol length, loader of the full old state) of spielstand.json as it is on disk; None without a file.
+    Uses the cached text when the file is unchanged since it was loaded or written; otherwise reads it (as before)."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    c = _DISK
+    if (
+        c.get("path") == str(path)
+        and c.get("stat") == (st.st_mtime_ns, st.st_size)
+        and c.get("phase") is not None
+        and c.get("entries") is not None
+    ):
+        text = c["text"]
+        return c["phase"], c["entries"], lambda: json.loads(text)
+    old = json.loads(path.read_text(encoding="utf-8"))
+    return old["phase"], len(old["protokoll"]), lambda: old
 
 
 def load_state():
     p = game_dir() / "spielstand.json"
     if not p.exists():
         sys.exit("No game state. First: fof.py new <aufbau.json>")
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        text = p.read_text(encoding="utf-8")
+        s = json.loads(text)
+        _remember_disk(p, text, s)
+        return s
+    except ValueError as err:  # L223: a damaged file names the latest snapshot instead of a traceback
+        snaps = sorted(
+            (int(f.stem) for f in (game_dir() / HISTORY_DIR).glob("*.json") if f.stem.isdigit()), reverse=True
+        )
+        hint = f" Latest snapshot: {HISTORY_DIR}/{snaps[0]}.json (copy it over spielstand.json)." if snaps else ""
+        sys.exit(f"spielstand.json is not valid JSON ({err}).{hint}")
 
 
 HISTORY_DIR = "verlauf"  # snapshots of the state after each protocol entry (for undo)
@@ -44,66 +109,68 @@ def save_snapshot(nr, text):
         for f in d.glob("*.json"):
             if f.stem.isdigit() and int(f.stem) < nr - HISTORY_KEEP:
                 f.unlink()
-    except OSError:
-        pass  # history is a convenience; a read-only or no-delete folder must not block the game
+    except OSError as err:
+        # history is a convenience; a read-only or no-delete folder must not block the game, but say so (L223)
+        if not (d / f"{nr}.json").exists():
+            print(f"NOTE: snapshot {HISTORY_DIR}/{nr}.json not written ({err}); undo to this entry is not possible")
 
 
 def cmd_undo(s, args):
-    """Back to the state after protocol entry N; the discarded entries are listed so the board can be reset."""
-    from . import options
+    """Moved to history.cmd_undo (review Struktur 10: a CLI handler, not state access); kept as an alias for old callers."""
+    from . import history
 
-    if not args or not args[0].isdigit():
-        raise rules.Violation("undo <entry no> --reason=..")
-    nr = int(args[0])
-    o = options.parse_opts(args[1:])
-    last = len(s["protokoll"])
-    if not 0 < nr < last:
-        raise rules.Violation(f"Entry {nr} is not before the last entry {last}")
-    snap = game_dir() / HISTORY_DIR / f"{nr}.json"
-    if not snap.exists():
-        raise rules.Violation(
-            f"No snapshot for entry {nr} (kept: the last {HISTORY_KEEP} entries since the history started)"
-        )
-    old = json.loads(snap.read_text(encoding="utf-8"))
-    dropped = s["protokoll"][nr:]
-    reason = o.get("--grund", "")
-    text = (
-        f"Undo to entry {nr}"
-        + (f" ({reason})" if reason else "")
-        + "; discarded: "
-        + "; ".join(f"{p['nr']} {p['text'][:80]}" for p in dropped)
-    )
-    save_state(old, text, None)
-    print(f"Back to the state after entry {nr}. Discarded entries (reset these on the board):")
-    for p in dropped:
-        print(f"- {p['nr']} T{p['zug']} {p['phase']}: {p['text']}")
-    print(briefing.check_stamp(old))
+    return history.cmd_undo(s, args)
 
 
 MARKER_NOTES = []  # VOF/Crossfire marker changes of the last save, printed before the CHECKSTAMP (L111)
 
 
 def marker_summary(s):
-    """Per card: the VOF marker on the board (strongest VOF, 6.2.2/FM1 p.44) and whether a Crossfire marker lies there."""
+    """Per card the VOF markers on the board (6.2.1): the strongest VOF from outside or off-map at the top, the best friendly
+    Point Blank VOF upper right and the best enemy Point Blank VOF lower left, each only if better than the top marker (L179);
+    plus whether a Crossfire marker lies there."""
     from . import fire
 
+    with fire.cached(s):  # read-only loop: one fire map for all cards (L349)
+        return _marker_summary(s, fire)
+
+
+def _marker_summary(s, fire):
     out = {}
     for k in s["karten"]:
         entries = fire.vof_entries(s, k)
-        best = min(entries, key=lambda x: x[1]) if entries else None
+        whole = [x for x in entries if x[3] is None]
+        top = min(whole, key=lambda x: x[1]) if whole else None
+        top_v = top[1] if top else 99
+        # entry x[3] is the side that is hit: a friendly (US) Point Blank VOF hits the enemy, and vice versa
+        by_us = [x for x in entries if x[3] == "Feind" and x[1] < top_v]
+        by_enemy = [x for x in entries if x[3] == "US" and x[1] < top_v]
+        us_b = min(by_us, key=lambda x: x[1]) if by_us else None
+        en_b = min(by_enemy, key=lambda x: x[1]) if by_enemy else None
         cf = fire.crossfire(s, k, "Feind") or fire.crossfire(s, k, "US")
-        if best or cf:
-            out[k] = ((best[0], best[1]) if best else None, cf)
+        if top or us_b or en_b or cf:
+            out[k] = (
+                (top[0], top[1]) if top else None,
+                cf,
+                (us_b[0], us_b[1]) if us_b else None,  # upper right: friendly Point Blank
+                (en_b[0], en_b[1]) if en_b else None,  # lower left: enemy Point Blank
+            )
     return out
 
 
-def mutual_pdfs(s):
-    """Pairs of cards whose units fire at each other along a PDF (V16)."""
+def pdf_pairs(s):
+    """(from card, to card) of every direct PDF on the board."""
     pdf = set()
     for e in s["einheiten"].values():
         z = e.get("ziel")
         if z and z != e.get("karte") and not e.get("indirekt"):
             pdf.add((e["karte"], z))
+    return pdf
+
+
+def mutual_pdfs(s):
+    """Pairs of cards whose units fire at each other along a PDF (V16)."""
+    pdf = pdf_pairs(s)
     return {tuple(sorted(p)) for p in pdf if (p[1], p[0]) in pdf}
 
 
@@ -118,21 +185,47 @@ def marker_changes(old, new):
     ma, mb = mutual_pdfs(old), mutual_pdfs(new)
     for x, y in sorted(mb - ma):
         lines.append(f"PDF {x} and {y} fire at each other: turn the PDF marker to the double-arrow side [6.3.1, V16]")
+    left = pdf_pairs(new)
     for x, y in sorted(ma - mb):
-        lines.append(f"PDF between {x} and {y} no longer mutual: turn the PDF marker back to the single arrow [6.3.1]")
+        if (x, y) in left or (y, x) in left:
+            lines.append(
+                f"PDF between {x} and {y} no longer mutual: turn the PDF marker back to the single arrow [6.3.1]"
+            )
+        else:  # L198: nobody fires along this PDF any more
+            lines.append(
+                f"PDF between {x} and {y}: nobody fires along it any more, remove the PDF marker [6.1.2, 6.3.1]"
+            )
+    for x, y in sorted(pdf_pairs(old) - left):  # L206: a one-way PDF disappeared
+        if tuple(sorted((x, y))) in ma or (y, x) in left:
+            continue
+        lines.append(f"PDF from {x} to {y}: nobody fires along it any more, remove the PDF marker [6.1.2]")
     for k in sorted(set(a) | set(b)):
-        va, ca = a.get(k, (None, False))
-        vb, cb = b.get(k, (None, False))
-        if va != vb:
-            if vb is None:
-                lines.append(f"{k}: remove the VOF marker ({name(va)})")
-            elif va is None:
-                lines.append(f"{k}: VOF marker {name(vb)}")
+        va, ca, ua, ea = a.get(k, (None, False, None, None))
+        vb, cb, ub, eb = b.get(k, (None, False, None, None))
+        for where, x, y in (
+            ("", va, vb),
+            (" upper right (friendly Point Blank)", ua, ub),
+            (" lower left (enemy Point Blank)", ea, eb),
+        ):
+            if x == y:
+                continue
+            rule = " [6.2.1b]" if where else " (strongest VOF counts) [6.2.2, FM1 p.44]"
+            if y is None:
+                lines.append(f"{k}: remove the VOF marker{where} ({name(x)})")
+            elif x is None:
+                lines.append(f"{k}: VOF marker{where} {name(y)}" + (" [6.2.1b]" if where else ""))
             else:
-                lines.append(f"{k}: VOF marker {name(va)} becomes {name(vb)} (strongest VOF counts) [6.2.2, FM1 p.44]")
+                lines.append(f"{k}: VOF marker{where} {name(x)} becomes {name(y)}{rule}")
         if ca != cb:
             lines.append(f"{k}: {'place' if cb else 'remove'} the Crossfire marker [6.2.4]")
     return lines
+
+
+def write_atomic(path, text):
+    """Write text to path via a temporary file and os.replace, so a crash mid-write keeps the old file intact (L223)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def save_state(s, entry=None, rule=None):
@@ -153,31 +246,46 @@ def save_state(s, entry=None, rule=None):
     h = s.pop("_hinweise", None)
     for k in ("_befehl_opts", "_phase_alt"):
         s.pop(k, None)
-    text = json.dumps(s, indent=1, ensure_ascii=False)
     path = game_dir() / "spielstand.json"
-    if path.exists():
-        try:
-            old = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        old = _disk_before_save(path)  # L344: the file as loaded, without reading and parsing it a second time
+        if old is not None:
+            old_phase, old_entries, old_state = old
             if s["phase"] == "3.7.4":
                 # [RULE 3.7.4] VOF, PDF and level stay frozen until 3.8: announce the changes only when leaving (L119)
-                if old["phase"] != "3.7.4":
-                    s["_ce_start"] = len(old["protokoll"])
+                if old_phase != "3.7.4":
+                    s["_ce_start"] = old_entries
             else:
-                base = old
-                if old["phase"] == "3.7.4" and s.get("_ce_start"):
+                base = None
+                if old_phase == "3.7.4" and s.get("_ce_start"):
                     snap = game_dir() / HISTORY_DIR / f"{s['_ce_start']}.json"
                     if snap.exists():
                         base = json.loads(snap.read_text(encoding="utf-8"))
                 s.pop("_ce_start", None)
-                MARKER_NOTES.extend(marker_changes(base, s))
-            text = json.dumps(s, indent=1, ensure_ascii=False)
-        except (ValueError, KeyError):
-            pass  # announcement only; never blocks saving
-    path.write_text(text, encoding="utf-8")
+                MARKER_NOTES.extend(marker_changes(base if base is not None else old_state(), s))
+    except (ValueError, KeyError):
+        pass  # announcement only; never blocks saving
+    text = json.dumps(s, indent=1, ensure_ascii=False)  # L344: serialized once, after the bookkeeping above
+    write_atomic(path, text)  # L223: never leave a half-written spielstand.json behind
+    _remember_disk(path, text, s)
     save_snapshot(len(s["protokoll"]), text)
     if h:
         s["_hinweise"] = h  # v3: hints (e.g. radio path) are kept for output, not saved
-    briefing.briefing(s)
+    briefing.briefing(s, errors)  # L344: the consistency check above is not run a second time
+
+
+def free_cover(s, kid, side="US"):
+    """Cover markers on card kid not occupied by units of the opposing side of `side` (L224: one helper for the six copies).
+    For an enemy unit pass side="Feind": markers with US units under them are taken."""
+    other = opponent_of_side(side)
+    return [
+        c
+        for c in card(s, kid).get("cover", [])
+        if not any(
+            s["einheiten"][m]["seite"] == other and s["einheiten"][m].get("bereich") == c["id"]
+            for m in units_on(s, kid)
+        )
+    ]
 
 
 def sop(s):
@@ -209,11 +317,11 @@ def is_lat(e):
 
 
 def pinned(e):
-    return "Pinned" in e["status"]
+    return rules.PINNED in e["status"]
 
 
 def fire_team_side(e):
-    return "Fire Team side" in e["status"]
+    return rules.FIRE_TEAM_SIDE in e["status"]
 
 
 def good_order(e):
@@ -299,7 +407,9 @@ def countermix_count(s, name):
 
 
 def card_id(r, c):
-    return f"{r}{c}" if 0 <= c <= 9 else f"{r}m{abs(c)}"
+    """Card id of row r, column c: '23'; negative columns (map extension to the left) get an 'm': row 2, column -1 is
+    '2m1'. Columns from 10 on are plain digits ('210'), they used to become '2m10' as if negative (L346)."""
+    return f"{r}{c}" if c >= 0 else f"{r}m{abs(c)}"
 
 
 def us_front(s):

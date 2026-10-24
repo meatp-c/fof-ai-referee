@@ -121,6 +121,10 @@ def communication(s, hq_name, target_name, akt=None):
     hq, z = state.unit(s, hq_name), state.unit(s, target_name)
     if hq_name == target_name:
         return True
+    from . import vehicles  # L187 [RULE 10.1.1/10.1.2 p.70/71] vehicle nets and vehicle orders
+
+    if (vehicles.is_vehicle(z) or vehicles.is_vehicle(hq)) and vehicles.order_check(s, hq_name, target_name, akt):
+        return True
     if hq.get("netz") and z.get("netz") and hq["netz"] == z["netz"]:
         return True
     # FM1 CAC Run 1 p.36: 'assume that the CO HQ is always in communication with the PLT HQs and with the mortar section'
@@ -168,6 +172,16 @@ def action_allowed(z, target_name, akt):
     """4.2.5: Pinned takes precedence, then LAT lists, Fire Team side like Fire Team."""
     name = rules.ACTIONS[akt][0]
     cc = akt.startswith("4.2.1")
+    if (
+        z.get("fahrzeug")
+        and akt not in {"4.2.2h", "4.2.3a", "4.2.4k", "4.2.4l", "4.2.1i"}
+        and not (cc and state.is_hq(z))
+    ):
+        raise rules.Violation(
+            f"{target_name} is a vehicle: in the Command Phase only Load/Unload/Embark, Rally, Cease/Shift Fire and Activate for AT Combat & Vehicle Movement [10.1.2 p.71]"
+        )  # L187
+    if akt == "4.2.1i":
+        return  # L187 [RULE 4.2.1i p.22] recipient check in vehicles.order_4_2_1i
     if z.get("stationaer") and akt.startswith("4.2.2"):
         raise rules.Violation(
             f"{target_name} is not part of the patrol: orders and fire yes, but no movement (except automatic retreat) [Normandy M3 MSR 1]"
@@ -264,7 +278,7 @@ def spot_modifiers(s, sp, target_card_):
         mods.append(("Target card C&C +0", +1))
     if target_card_ == sp["karte"]:
         mods.append(("same card", +1))
-    if any("Exposed" in f["status"] for f in enemies):
+    if any(rules.EXPOSED in f["status"] for f in enemies):
         mods.append(("Target Exposed", +2))
     if any(f.get("vof_rating") == "A" for f in enemies):
         mods.append(("Target with VOF A", +1))  # A/S does not count [FM1 p.43 Note]
@@ -360,10 +374,13 @@ def lay_line(s, n, e, from_, prot, o=None):
 
 def cmd_line(s, args):
     """Phone lines: result of the damage check in 3.7.4 (ok|cut) or manual laying."""
-    if not args:
-        raise rules.Violation("line <card> ok|cut | line lay <card> <unit>")
+    from . import cli  # lazy: one usage text, from the command table (review H10)
+
+    usage = cli.usage("line")
+    rules.need(args, 1, usage)
     prot = []
     if args[0] == "legen":
+        rules.need(args, 3, usage)  # L330: 'line lay <card>' without the unit was an IndexError
         kid, n = args[1], args[2]
         e = state.unit(s, n)
         if e["karte"] != kid or not e.get("leitungen"):
@@ -372,6 +389,7 @@ def cmd_line(s, args):
         e["leitungen"] -= 1
         prot.append(f"{n} lays a Phone Line on {kid} (4.3.4: 'may lay down one phone line marker per card')")
     else:
+        rules.need(args, 2, usage)  # L330: 'line <card>' without ok|cut
         kid, result = args[0], args[1]
         open_ = s.get("leitung_checks", {})
         if kid not in open_:
@@ -384,7 +402,7 @@ def cmd_line(s, args):
         elif result == "ok":
             prot.append(f"Phone Line on {kid} stays intact ({reason})")
         else:
-            raise rules.Violation("ok | cut")
+            raise rules.Violation(f"Usage: {usage}")
     state.save_state(s, "; ".join(prot), "4.3.4 p.29")
     briefing.print_board(prot, s)
 
@@ -442,7 +460,7 @@ def deliver_runner(s, prot):
             prot.append(
                 f"{n}: {hq} no longer on {e['karte']} or on its Fire Team side; Runner returns to the Assets box [4.3.2 p.27]"
             )
-        del s["einheiten"][n]
+        del s["einheiten"][n]  # back to the CO HQ Assets box (reusable), not a removal from play
         runner_box(s).append(n)
 
 

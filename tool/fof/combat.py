@@ -1,4 +1,7 @@
-"""Net combat modifier, hit effects, unit reduction, ammunition, prisoners (6.4, 7.18, 8.15)."""
+"""Net combat modifier, hit effects, unit reduction, ammunition, prisoners (6.4, 7.18, 8.15).
+
+Import cycle: combat and commands, enemy, campaign import each other at module level (each uses the other's
+functions only at call time, as module attributes such as commands.mark, never at import time)."""
 
 import copy
 
@@ -83,7 +86,7 @@ def _rows_for(s, e, c, base):
         rows.append((f"Cover {cv['id']} {cv['typ']}", cv["wert"]))
     if state.pinned(e):
         rows.append(("Pinned", +1))
-    if "Exposed" in e["status"]:
+    if rules.EXPOSED in e["status"]:
         rows.append(("Exposed", -2))
     if type_ in rules.TERRAIN_LIKE_INCOMING and c.get("burst") is not None:
         rows.append(("Burst symbol", c["burst"]))  # [RULE 5.2.3 p.36, Charts 1: only Incoming and indirect mortar fire]
@@ -113,14 +116,15 @@ def ncm_rows(s, name):
     evaluated with its own modifiers, the strongest result counts (L61 Incoming, L129 all effects, e.g. Grenade at night)."""
     e = state.unit(s, name)
     c = state.card(s, e["karte"])
-    candidate = _fire_effects(s, e, c, name)
-    if not candidate:
-        raise rules.Violation(f"No VOF against {name} on {e['karte']} [3.7.4]")
-    best = None
-    for cand in candidate:
-        rows = _rows_for(s, e, c, cand)
-        if best is None or sum(v for _, v in rows) < sum(v for _, v in best):
-            best = rows
+    with fire.cached(s):  # read-only: every fire effect and C&C row reuses one fire map
+        candidate = _fire_effects(s, e, c, name)
+        if not candidate:
+            raise rules.Violation(f"No VOF against {name} on {e['karte']} [3.7.4]")
+        best = None
+        for cand in candidate:
+            rows = _rows_for(s, e, c, cand)
+            if best is None or sum(v for _, v in rows) < sum(v for _, v in best):
+                best = rows
     return best
 
 
@@ -137,14 +141,15 @@ def ncm_groups(s):
     """L155 (V18): open Combat Effects card by card, per card one group per NCM value.
     Returns [(card, ncm, [units])] in board order (cards by number, groups by NCM, units in protocol order)."""
     by_card = {}
-    for n in s.get("kampf_offen", []):
-        if n not in s["einheiten"]:
-            continue
-        try:
-            ncm, _raw, _rows = _ncm_total(s, n)
-        except rules.Violation:
-            continue
-        by_card.setdefault(s["einheiten"][n]["karte"], {}).setdefault(ncm, []).append(n)
+    with fire.cached(s):
+        for n in s.get("kampf_offen", []):
+            if n not in s["einheiten"]:
+                continue
+            try:
+                ncm, _raw, _rows = _ncm_total(s, n)
+            except rules.Violation:
+                continue
+            by_card.setdefault(s["einheiten"][n]["karte"], {}).setdefault(ncm, []).append(n)
     out = []
     for k in sorted(by_card, key=lambda x: (state.card(s, x)["reihe"], state.card(s, x)["spalte"])):
         for ncm in sorted(by_card[k]):
@@ -154,6 +159,11 @@ def ncm_groups(s):
 
 def print_next_group(s):
     """L155: the next NCM group as a numbered list, so the player sees how many cards to draw at once."""
+    with fire.cached(s):
+        _print_next_group(s)
+
+
+def _print_next_group(s):
     groups = ncm_groups(s)
     if not groups:
         return
@@ -168,9 +178,16 @@ def print_next_group(s):
     for i, n in enumerate(units, 1):
         e = s["einheiten"][n]
         print(f"  {i}. {n} ({comms.experience(e)}, {state.steps(e)} step{'s' if state.steps(e) > 1 else ''})")
-    print("  NCM rows:")
-    for t_, v_ in rows:
-        print(f"    {t_} {v_:+d}")  # one per line (L156)
+    per_unit = [(n, _ncm_total(s, n)[2]) for n in units]
+    if all(r == rows for _, r in per_unit):
+        print("  NCM rows:")
+        for t_, v_ in rows:
+            print(f"    {t_} {v_:+d}")  # one per line (L156)
+    else:  # L183: same NCM from different modifiers, rows per unit
+        for n, r in per_unit:
+            print(f"  NCM rows {n}:")
+            for t_, v_ in r:
+                print(f"    {t_} {v_:+d}")
     print(
         '  Then per unit in this order: fof.py hit "<unit>" HIT|PIN|MISS [letters under its experience] [RULE 3.7.4 p.17, 6.4.2]'
     )
@@ -194,7 +211,9 @@ def cmd_ncm(s, args):
             return
         print_next_group(s)
         return
+    rules.need(args, 1, "ncm <unit> | ncm next")
     name = args[0]
+    state.unit(s, name)
     if s["phase"] == "3.7.4" and name in s.get("kampf_ncm", {}):
         rows = [tuple(z) for z in s["kampf_ncm"][name]]  # state on entering 3.7.4 [RULE 3.7.4 p.17]
     else:
@@ -232,7 +251,7 @@ def new_lat(e, lat, origin):
         "erfahrung": rules.LAT_EXPERIENCE[lat],
         "karte": e["karte"],
         "bereich": e.get("bereich", "offen"),
-        "status": ["Pinned"],
+        "status": [rules.PINNED],
         "steps": 1,
         "herkunft": origin,
         "ziel": None,
@@ -298,11 +317,16 @@ def drop_assets(s, e, name, prot, as_casualty=False, successor=None):
     e["funk"] = []
 
 
-def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None):
+def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None, captured=False):
+    """The one path that takes a counter off the board (review M39): assets/radios/ammo, Concentrated Fire and Grenade
+    markers, removed_from_play (blocks the friendly counter name for new_name, L215), saved Commands, enemy package.
+    captured=True (prisoners, 8.15): assets, radios and carried casualties leave with the counter instead of dropping
+    onto the card, and no own 'Removed from Play' line (the caller names the whole group)."""
     e = s["einheiten"][name]
     if state.is_hq(e) and e["seite"] == "US":
         s.setdefault("rfp_daten", {})[name] = {k: e.get(k) for k in ("ebene", "platoon", "ft_vof")}  # for 6.5.2
-    drop_assets(s, e, name, prot, as_casualty, successor)
+    if not captured:
+        drop_assets(s, e, name, prot, as_casualty, successor)
     if not (
         successor and (s["einheiten"].get(successor) or {}).get("munition")
     ):  # L93: the successor (A fire team) inherits the ammo
@@ -322,7 +346,8 @@ def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None):
         pk = s.get("pakete", {}).get(str(e.get("paket")))
         if pk:
             pk["im_spiel"] = False
-    prot.append(f"{name}: {reason}, Removed from Play [1.2.6, 6.4.3]")
+    if not captured:
+        prot.append(f"{name}: {reason}, Removed from Play [1.2.6, 6.4.3]")
 
 
 def reduce_unit(s, name, code, prot):
@@ -331,25 +356,25 @@ def reduce_unit(s, name, code, prot):
     lat = rules.LAT_TYPES[code]
     if state.is_lat(e):
         if e["typ"] == lat:
-            commands.mark(e, "Pinned")
+            commands.mark(e, rules.PINNED)
             prot.append(f"{name} is already {lat}: Pinned only [6.4.3]")
         elif code == "C":
             make_casualty(s, e, prot, name)
-            drop_assets(s, e, name, prot, as_casualty=True)
-            del s["einheiten"][name]
-            prot.append(f"{name} ({e['typ']}) becomes a Casualty, remove counter")
+            # review M39: via remove_from_play, so removed_from_play and the markers stay consistent
+            remove_from_play(s, name, prot, f"{e['typ']} becomes a Casualty, remove counter", as_casualty=True)
         else:
             e["typ"], e["erfahrung"] = lat, rules.LAT_EXPERIENCE[lat]
             # L163 [Normandy Unit Breakdown p.47, K12, E72 counter photo]: generic LAT counter values, Assault Team A • P, Fire Team S • C
             e["vof_rating"], e["reichweite"] = LAT_VALUES[lat]
             if e["vof_rating"] is None:
-                e["ziel"] = None
-            commands.mark(e, "Pinned")
+                fire.cease_fire(e)
+            commands.mark(e, rules.PINNED)
             prot.append(f"{name} becomes {lat} (swap counter), Pinned [6.4.3]")
         return
     if state.fire_team_side(e):
         if code in ("F", "A"):
-            commands.mark(e, "Pinned")
+            e.pop("ooa_flip", None)  # L228: from now on the flip is HIT-caused, resupply does not undo it
+            commands.mark(e, rules.PINNED)
             prot.append(f"{name} (named Fire Team): no further effect, Pinned [6.4.3]")
         elif code == "C":
             make_casualty(s, e, prot, name)
@@ -362,8 +387,8 @@ def reduce_unit(s, name, code, prot):
         return
     if state.steps(e) == 1:
         if code in ("F", "A") and e.get("fire_team_seite"):
-            commands.mark(e, "Fire Team side")
-            commands.mark(e, "Pinned")
+            commands.mark(e, rules.FIRE_TEAM_SIDE)
+            commands.mark(e, rules.PINNED)
             prot.append(
                 f"{name}: flip to the Fire Team side (VOF {e.get('ft_vof', 'S')}), Pinned"
                 + ("; saved Commands remain, orders only itself, cannot be activated [4.1.4]" if state.is_hq(e) else "")
@@ -379,23 +404,8 @@ def reduce_unit(s, name, code, prot):
             prot.append(f"{name}: step becomes {lat} ({new}) on {e['karte']}, Pinned")
         remove_from_play(s, name, prot, "last step converted", as_casualty=(code == "C"), successor=new)
         return
-    if code in ("F", "A") and e.get("breakdown") == "mtr_sec" and state.is_v4(s):
-        # [CSR 2 p.13, Normandy p.47] F/A hit on the Mortar Section: the step becomes a named 1-step Mortar Team (Fire Team side)
-        tn = mortar_team_name(s, ("1/Mtr", "2/Mtr", "3/Mtr"))
-        te = mortar_team(s, e, tn)
-        te["status"] = ["Fire Team side", "Pinned"]
-        s["einheiten"][tn] = te
-        prot.append(
-            f"{name}: one step becomes {tn} on the Fire Team side (S • C), Pinned, with the same ammo ({(e.get('munition') or {}).get('punkte')}) [CSR 2 p.13, 7.18.1B p.60]"
-        )
-    elif code in ("F", "A") and e.get("breakdown") == "mtr_sec_de" and state.steps(e) == 2:
-        # [CSR 4 p.14, Normandy p.48] last two steps: 1/81mm Mtr (Fire Team side) and 2/81mm Mtr, full ammo
-        te = mortar_team_de(s, e, "1/81mm Mtr")
-        te["status"] = ["Fire Team side", "Pinned"]
-        s["einheiten"][commands.new_name(s, "1/81mm Mtr")] = te
-        prot.append(
-            f"{name}: one step becomes 1/81mm Mtr on the Fire Team side (S • C), Pinned, ammo {(e.get('munition') or {}).get('punkte')} [CSR 4 p.14, Normandy p.48]"
-        )
+    if breakdown_step(s, name, code, prot):
+        pass  # Mortar Section: the hit step became a named Mortar Team
     elif code == "C":
         make_casualty(s, e, prot, name)
     else:
@@ -426,6 +436,77 @@ def reduce_unit(s, name, code, prot):
         )
     e["steps"] = state.steps(e) - 1
     prot.append(f"{name}: flip to {e['steps']} steps")
+
+
+def _mortar_section(s, e):
+    """'US' for a US Mortar Section (v4), 'DE' for a German 81mm Mortar Section, otherwise None."""
+    if e.get("breakdown") == "mtr_sec" and state.is_v4(s):
+        return "US"
+    if e.get("breakdown") == "mtr_sec_de":
+        return "DE"
+    return None
+
+
+def breakdown_step(s, name, code, prot):
+    """Mortar Section breakdown, the one copy for reduce_unit and cmd_hit (review Struktur 9). Returns True if handled.
+    code F/A: the hit step of a multi-step section becomes a named 1-step Mortar Team on its Fire Team side
+    [CSR 2 p.13, CSR 4 p.14: German only from the last two steps]. code None: the last remaining step becomes the
+    final 1-step team and the section is Removed from Play [CSR 2 p.13, CSR 4 p.14, Normandy p.47/48]."""
+    e = s["einheiten"][name]
+    kind = _mortar_section(s, e)
+    if kind is None:
+        return False
+    ammo_pts = (e.get("munition") or {}).get("punkte")
+    if code is None:
+        if state.steps(e) != 1:
+            return False
+        if kind == "DE":
+            te = mortar_team_de(s, e, "2/81mm Mtr")
+            te["status"] = [rules.PINNED]
+            tn = commands.new_name(s, "2/81mm Mtr")
+            s["einheiten"][tn] = te
+            remove_from_play(
+                s,
+                name,
+                prot,
+                f"last step becomes {tn} (G! • C-V, ammo {(te.get('munition') or {}).get('punkte')}) [CSR 4 p.14, Normandy p.48]",
+                successor=tn,
+            )
+        else:
+            # [CSR 2 p.13] 'If only one step remains, place a 1-step mortar team'
+            tn = mortar_team_name(s, ("3/Mtr", "2/Mtr", "1/Mtr"))
+            te = mortar_team(s, e, tn)
+            te["status"] = [rules.PINNED]
+            te["funk"] = [dict(g) for g in comms.radios_of(e)]
+            e["funk"] = []
+            s["einheiten"][tn] = te
+            remove_from_play(
+                s,
+                name,
+                prot,
+                f"last step becomes 1-step Mortar Team {tn} (G! • C-L, ammo {(te.get('munition') or {}).get('punkte')}) [CSR 2 p.13]",
+            )
+        return True
+    if code not in ("F", "A") or (kind == "DE" and state.steps(e) != 2):
+        return False
+    if kind == "US":
+        # [CSR 2 p.13, Normandy p.47] F/A hit on the Mortar Section: the step becomes a named 1-step Mortar Team (Fire Team side)
+        tn = mortar_team_name(s, ("1/Mtr", "2/Mtr", "3/Mtr"))
+        te = mortar_team(s, e, tn)
+        te["status"] = [rules.FIRE_TEAM_SIDE, rules.PINNED]
+        s["einheiten"][tn] = te
+        prot.append(
+            f"{name}: one step becomes {tn} on the Fire Team side (S • C), Pinned, with the same ammo ({ammo_pts}) [CSR 2 p.13, 7.18.1B p.60]"
+        )
+    else:
+        # [CSR 4 p.14, Normandy p.48] last two steps: 1/81mm Mtr (Fire Team side) and 2/81mm Mtr, full ammo
+        te = mortar_team_de(s, e, "1/81mm Mtr")
+        te["status"] = [rules.FIRE_TEAM_SIDE, rules.PINNED]
+        s["einheiten"][commands.new_name(s, "1/81mm Mtr")] = te
+        prot.append(
+            f"{name}: one step becomes 1/81mm Mtr on the Fire Team side (S • C), Pinned, ammo {ammo_pts} [CSR 4 p.14, Normandy p.48]"
+        )
+    return True
 
 
 def mortar_team_name(s, order_of):
@@ -486,15 +567,20 @@ def cmd_hit(s, args):
     name, result = args[0], args[1].upper()
     effect = args[2].upper() if len(args) > 2 else ""
     e = state.unit(s, name)
+    if e.get("fahrzeug"):
+        # review LOW: VOF against vehicles is resolved in 3.6 on the AT table, not with Combat Effects
+        raise rules.Violation(f"{name} is a vehicle: VOF against vehicles is resolved with 'at' in 3.6 [10.5.3 p.72]")
+    if e.pop("crew_hit_offen", None) and result != "HIT":
+        raise rules.Violation(f"{name} is a vehicle crew team and takes a HIT [10.7 Knocked Out]")  # L187
     prot = []
     if result == "MISS":
         if state.pinned(e):
-            e["status"].remove("Pinned")
+            e["status"].remove(rules.PINNED)
             prot.append(f"{name}: MISS, remove Pinned marker [6.4.2A]")
         else:
             prot.append(f"{name}: no effect")
     elif result == "PIN":
-        commands.mark(e, "Pinned")
+        commands.mark(e, rules.PINNED)
         prot.append(
             f"{name} Pinned" + (" (its VOF becomes 'All Pinned' +2, adjust marker in 3.8)" if fire.is_firing(e) else "")
         )
@@ -513,32 +599,8 @@ def cmd_hit(s, args):
                 reduce_unit(s, name, code, prot)
         if name in s["einheiten"]:
             e = s["einheiten"][name]
-            if state.steps(e) == 1 and e.get("breakdown") == "mtr_sec_de":
-                te = mortar_team_de(s, e, "2/81mm Mtr")
-                te["status"] = ["Pinned"]
-                tn = commands.new_name(s, "2/81mm Mtr")
-                s["einheiten"][tn] = te
-                remove_from_play(
-                    s,
-                    name,
-                    prot,
-                    f"last step becomes {tn} (G! • C-V, ammo {(te.get('munition') or {}).get('punkte')}) [CSR 4 p.14, Normandy p.48]",
-                    successor=tn,
-                )
-            elif state.steps(e) == 1 and e.get("breakdown") == "mtr_sec" and state.is_v4(s):
-                # [CSR 2 p.13] 'If only one step remains, place a 1-step mortar team'
-                tn = mortar_team_name(s, ("3/Mtr", "2/Mtr", "1/Mtr"))
-                te = mortar_team(s, e, tn)
-                te["status"] = ["Pinned"]
-                te["funk"] = [dict(g) for g in comms.radios_of(e)]
-                e["funk"] = []
-                s["einheiten"][tn] = te
-                remove_from_play(
-                    s,
-                    name,
-                    prot,
-                    f"last step becomes 1-step Mortar Team {tn} (G! • C-L, ammo {(te.get('munition') or {}).get('punkte')}) [CSR 2 p.13]",
-                )
+            if breakdown_step(s, name, None, prot):
+                pass  # Mortar Section: the last step became the final Mortar Team
             elif state.steps(e) == 1 and e.get("letzter_step") and not state.is_lat(e):
                 lat2 = e["letzter_step"]
                 new2 = commands.new_name(s, lat2)
@@ -549,6 +611,12 @@ def cmd_hit(s, args):
                     )  # Normandy p.48: A squad ends as an A-rated Fire Team
                     if e.get("munition"):
                         s["einheiten"][new2]["munition"] = copy.deepcopy(e["munition"])
+                        # L177 [RULE 7.18.2 p.61]: the last ammo point fired this turn passes its Out of Ammo state to the team
+                        for _k in ("munition_leer", "out_of_ammo"):
+                            if e.get(_k):
+                                s["einheiten"][new2][_k] = True
+                        if not e["munition"].get("punkte") and not e.get("out_of_ammo"):
+                            s["einheiten"][new2]["munition_leer"] = True
                     prot.append(
                         f"{new2}: {' • '.join(str(v) for v in e['letzter_step_werte'].values()) if isinstance(e['letzter_step_werte'], dict) else e['letzter_step_werte']} with the remaining ammo [Normandy p.48, 7.18.1B]"
                     )
@@ -560,7 +628,7 @@ def cmd_hit(s, args):
                     successor=new2,
                 )
             else:
-                commands.mark(e, "Pinned")
+                commands.mark(e, rules.PINNED)
                 prot.append(f"{name} Pinned (every HIT pins) [6.4.3]")
     else:
         raise rules.Violation("Result must be HIT, PIN or MISS")
@@ -577,6 +645,17 @@ def cmd_hit(s, args):
 
 def ammo(e):
     return e.get("munition")
+
+
+def fire_ammo(e):
+    """L173: ammo used by direct fire (VOF, Concentrate Fire). Rockets serve Grenade Attacks only (7.18.1D), the S fire of
+    rocket teams and AT guns with a Small Arms VOF tracks no ammo (Normandy CSR 7)."""
+    m = ammo(e)
+    if not m or m.get("typ") == "RKT" or e.get("out_of_ammo"):
+        return None
+    if e.get("typ") == "AT Gun" and e.get("vof_rating") == "S":
+        return None
+    return m
 
 
 def ammo_capacity(e):
@@ -615,8 +694,9 @@ def out_of_ammo(s, n, e, prot):
         prot.append(f"{n}: no rockets left, no Grenade Attacks at range; Basic VOF S remains [7.18.1D p.60]")
         return
     if state.steps(e) == 1 and e.get("fire_team_seite") and e.get("ft_vof") in ("S", "A/S") and e["typ"] != "Squad":
-        commands.mark(e, "Fire Team side")
-        e["ziel"] = None
+        commands.mark(e, rules.FIRE_TEAM_SIDE)
+        e["ooa_flip"] = True  # L228 (review H4): only this flip is undone by resupply, not a HIT-caused one
+        fire.cease_fire(e)
         prot.append(
             f"{n}: Out of Ammo, flip to the Fire Team side [7.18.2 p.61]"
             + (
@@ -649,7 +729,7 @@ def out_of_ammo(s, n, e, prot):
             prot.append(
                 f"{n}: target {e['ziel']} now out of range and own units on {fk} along the PDF: Cease Fire, reopens per 6.1.1 [6.3.2, 6.1.1]"
             )
-            e["ziel"] = None
+            fire.cease_fire(e)
         else:
             e["_reichweite_vof"] = fk
             prot.append(
@@ -672,7 +752,8 @@ def ammo_surplus(s, n, e, from_, prot):
 
 def cmd_ammo(s, args):
     if args and args[0] == "lager":
-        kid, type_, number = args[1], args[2], int(args[3])
+        rules.need(args, 4, "ammo depot <card> <type> <n>")
+        kid, type_, number = args[1], args[2], rules.int_value(args[3], "ammo depot <n>")
         ev = s.get("ereignis_munition")
         if not ev:
             raise rules.Violation("Ammo on cards only via event (Ammo Resupply) or dropping (drop <unit> <type>:<n>)")
@@ -707,8 +788,7 @@ def cmd_ammo(s, args):
 
 def ammo_pick_up(s, z, name, what, prot):
     """[RULE 5.1.6 p.32, 7.18.3 p.61] Pick up ammo from the card; an Out of Ammo unit is resupplied."""
-    type_, number = what.split(":")
-    number = int(number)
+    type_, number = ammo_spec(what)
     depot = state.card(s, z["karte"]).setdefault("munition", {})
     if depot.get(type_, 0) < number:
         raise rules.Violation(f"On {z['karte']} there are only {depot.get(type_, 0)} {type_}")
@@ -720,10 +800,11 @@ def ammo_pick_up(s, z, name, what, prot):
         m["punkte"] = new
         depot[type_] -= taken
         prot.append(f"{name} picks up {taken} {type_} (now {new}) [7.18.3 p.61]")
-        if z.get("out_of_ammo") or (state.fire_team_side(z) and z.get("fire_team_seite") and z["typ"] != "HQ"):
+        if z.get("out_of_ammo") or z.pop("ooa_flip", None):
+            # L228 (review H4): a Fire-Team flip caused by a HIT (6.4.3) is not undone by resupply, only the Out-of-Ammo flip
             z.pop("out_of_ammo", None)
             if state.fire_team_side(z):
-                z["status"].remove("Fire Team side")
+                z["status"].remove(rules.FIRE_TEAM_SIDE)
             prot.append(
                 f"{name}: resupplied, Out of Ammo marker removed or back to the Good Order side, fires again with original VOF [7.18.3 p.61]"
             )
@@ -745,9 +826,19 @@ def ammo_pick_up(s, z, name, what, prot):
     prot.append(f"{name} picks up {number} {type_} for transport [5.1.6 p.32]")
 
 
+def ammo_spec(what):
+    """'<type>:<n>' (e.g. MG:2) -> (type, n); a Violation instead of ValueError for user input (review H12)."""
+    type_, sep, number = str(what).partition(":")
+    if not sep or not type_:
+        raise rules.Violation(f"Ammo as <type>:<n> (e.g. MG:2), got '{what}' [7.18.3 p.61]")
+    n = rules.int_value(number, f"ammo {type_}")
+    if n < 1:
+        raise rules.Violation(f"Ammo {type_}: at least 1 point, got {n} [7.18.3 p.61]")
+    return type_, n
+
+
 def ammo_drop(s, e, n, what, prot):
-    type_, number = what.split(":")
-    number = int(number)
+    type_, number = ammo_spec(what)
     tm = e.get("traegt_munition")
     if not tm or tm["typ"] != type_ or tm["punkte"] < number:
         raise rules.Violation(f"{n} does not carry {number} {type_}")
@@ -779,42 +870,56 @@ def ammo_3_7_4(s, prot):
             ammo_use(s, n, e, 1, "VOF this turn", prot)
 
 
+PRISONER_TYPES = ("Paralyzed Team", "Litter Team")
+
+
+def can_capture(x):
+    """L199 [RULE 3.5.1 p.16]: 'opposing, Unpinned infantry units with a VOF rating' (no vehicles, no HQs without VOF,
+    no Paralyzed/Litter Teams). Also the condition for the guard step (review LOW)."""
+    return (
+        not x.get("fahrzeug")  # L199/L208: vehicles are no infantry captors
+        and not state.pinned(x)
+        and x.get("vof_rating") is not None
+        and x["typ"] not in (*PRISONER_TYPES, "Casualty")
+    )
+
+
 def cmd_capture(s, args):
     """[RULE 3.5.1 p.16, 8.15 p.69, Normandy p.13 'Both sides take prisoners'] Paralyzed/Litter Team alone with unpinned infantry with VOF:
     one guard step and the prisoners are Removed from Play."""
     if s["phase"] != "3.5.1":
         raise rules.Violation("Taking prisoners only in the Capture Segment 3.5.1")
+    rules.need(args, 2, 'capture "<Paralyzed/Litter Team>" "<guard unit>"')
     g, w = args[0], args[1]
     ge, we = state.unit(s, g), state.unit(s, w)
-    if ge["typ"] not in ("Paralyzed Team", "Litter Team"):
+    if ge["typ"] not in PRISONER_TYPES:
         raise rules.Violation(f"{g} is not a Paralyzed/Litter Team [3.5.1]")
     # K33: all same-side units on the card are Paralyzed/Litter Teams; one guard step takes them all [8.15 p.69] (L117)
     group = state.units_on(s, ge["karte"], ge["seite"])
-    if [m for m in group if s["einheiten"][m]["typ"] not in ("Paralyzed Team", "Litter Team")]:
+    if [m for m in group if s["einheiten"][m]["typ"] not in PRISONER_TYPES]:
         raise rules.Violation(
             f"{g} is not alone on {ge['karte']} (other same-side units besides P/L teams) [3.5.1, K33]"
         )
-    LATS = ("Fire Team", "Assault Team", "Paralyzed Team", "Litter Team")
     captor = [
-        m
-        for m in state.units_on(s, ge["karte"], state.opponent_of_side(ge["seite"]))
-        if (s["einheiten"][m]["typ"] not in LATS)
-        or (s["einheiten"][m]["typ"] in ("Fire Team", "Assault Team") and not state.pinned(s["einheiten"][m]))
+        m for m in state.units_on(s, ge["karte"], state.opponent_of_side(ge["seite"])) if can_capture(s["einheiten"][m])
     ]
     if not captor:
         raise rules.Violation(
             f"On {ge['karte']} there is no Good Order unit and no unpinned Assault/Fire Team of the opposing side [RULE 8.15 p.69]"
         )
-    if we["karte"] != ge["karte"] or we["seite"] == ge["seite"] or not we.get("vof_rating"):
+    if w not in captor or not we.get("vof_rating"):
+        # review LOW: the guard step must itself satisfy the captor conditions (unpinned infantry with a VOF)
         raise rules.Violation(
-            f"Guard {w}: one step of an opposing unit with a printed VOF on the same card [RULE 8.15 p.69]"
+            f"Guard {w}: one step of an opposing, unpinned infantry unit (no vehicle, no Paralyzed/Litter Team) with a "
+            f"printed VOF on the same card; possible: {', '.join(captor)} [RULE 3.5.1 p.16, 8.15 p.69]"
         )
-    if ge["seite"] == "Feind" and not state.is_v4(s):
-        pass
     prot = []
     st = sum(state.steps(s["einheiten"][m]) for m in group)
+    # L209: name the markers that leave the board with the prisoners (e.g. Pinned)
+    marks = sorted({x for m in group for x in s["einheiten"][m].get("status", [])})
     for m in group:
-        del s["einheiten"][m]
+        # review M39: removed_from_play keeps the names that wachen[].gefangene refers to (new_name skips them)
+        remove_from_play(s, m, prot, "captured [8.15]", captured=True)
     if we["seite"] == "US":
         # [RULE 8.15 p.69] 'return between missions and retain their original Experience Level (it is not considered
         # an LAT). Make a note of the guard step and its Experience Level on your mission log.' (K35, L126)
@@ -848,7 +953,8 @@ def cmd_capture(s, args):
         )
     else:
         s["us_gefangen"] = s.get("us_gefangen", 0) + st
-    prot.insert(0, f"{', '.join(group)} ({ge['seite']}) captured, Removed from Play; one guard step for all [8.15]")
+    mk = f", remove the counter with its {', '.join(marks)} marker" if marks else ""
+    prot.insert(0, f"{', '.join(group)} ({ge['seite']}) captured, Removed from Play{mk}; one guard step for all [8.15]")
     c = state.card(s, ge["karte"])
     if ge["seite"] == "Feind" and c.get("casualties_feind") and not state.units_on(s, ge["karte"], "Feind"):
         # [RULE 3.5.1 p.16] enemy casualties on a friendly-occupied card are captured automatically (L117)
