@@ -4,11 +4,15 @@ from . import briefing, geometry, rules, state
 
 
 def radios_of(e, type_=None, net=None):
-    """Radios carried by the unit (setup field 'funk': [{typ, netz}]); destroyed ones do not count."""
+    """Radios carried by the unit (setup field 'funk': [{typ, netz}]); destroyed ones do not count. A radio mounted in a
+    vehicle (eingebaut, Arty Jeep CSR 1) only works while the unit is on board of that vehicle (L454)."""
     return [
         g
         for g in e.get("funk", [])
-        if not g.get("zerstoert") and (type_ is None or g["typ"] == type_) and (net is None or g["netz"] == net)
+        if not g.get("zerstoert")
+        and (not g.get("eingebaut") or e.get("an_bord") == g["eingebaut"])
+        and (type_ is None or g["typ"] == type_)
+        and (net is None or g["netz"] == net)
     ]
 
 
@@ -193,7 +197,10 @@ def action_allowed(z, target_name, akt):
     if state.pinned(z) and akt in rules.PINNED_ALLOWED:
         return  # Pinned takes precedence over the LAT lists (4.2.5)
     if z["typ"] in rules.LAT_ALLOWED and akt not in rules.LAT_ALLOWED[z["typ"]] and not cc:
-        raise rules.Violation(f"{z['typ']} may not perform '{name}' [RULE 4.2.5 p.26]")
+        # L463: a 'rally' of an unpinned generic LAT means the upgrade action (6.5.1); name it in the refusal
+        upgrade = {"Paralyzed Team": "4.2.3b", "Litter Team": "4.2.3c", "Fire Team": "4.2.3d"}.get(z["typ"])
+        hint = f"; rally it upward with {upgrade} [6.5.1]" if akt == "4.2.3a" and upgrade else ""
+        raise rules.Violation(f"{z['typ']} may not perform '{name}' [RULE 4.2.5 p.26]{hint}")
     if state.fire_team_side(z) and akt not in rules.LAT_ALLOWED["Fire Team"] | {"4.2.3f"} and not cc:
         raise rules.Violation(
             f"{target_name} is on its Fire Team side and acts like a Fire Team [RULE 4.2.5 p.26, 6.4.3 p.47]"

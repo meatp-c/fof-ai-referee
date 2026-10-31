@@ -16,6 +16,9 @@ OPT_ALIASES = {
     "--free": "--gratis",
     "--agency": "--agentur",
     "--edges": "--raender",
+    "--vehicles": "--fahrzeuge",
+    "--new-type": "--typ-neu",
+    "--elevation": "--hoehe_plus",
     "--building": "--gebaeude",
     "--building-value": "--gebaeude_wert",
     "--experience": "--erfahrung",
@@ -91,8 +94,11 @@ KNOWN_OPTIONS = frozenset(
         "--gratis",
         "--grund",
         "--hill",
+        "--fahrzeuge",
+        "--hoehe_plus",
         "--hq",
         "--illum",
+        "--jeep",
         "--jam",
         "--kosten",
         "--kritisch",
@@ -159,6 +165,9 @@ ENUM_VALUE_OPTIONS = frozenset(
         "--granate",
         "--target_marker",
         "--typ-neu",
+        "--jeep",
+        "--fahrzeuge",
+        "--zusatz",  # L467: --extra=yes|no (L452) needs the value alias too
     }
 )
 

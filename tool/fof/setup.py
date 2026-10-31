@@ -63,7 +63,7 @@ def cmd_setup(s, args):
     if not prot:
         raise rules.Violation(
             "setup <unit> <staging card> and/or --platoon=<no>|none"
-            + (" | --net= --mortar= --asset= --lines= --pyro= --device=" if state.is_v4(s) else "")
+            + (" | --net= --mortar= --jeep= --asset= --lines= --pyro= --device=" if state.is_v4(s) else "")
         )
     if s.get("reattempt_setup") or s.get("patrouille_mission"):
         # L181 [6.1.1, 6.1.2, 8.1]: after repositioning, fire and the Activity level follow the new positions
@@ -186,6 +186,12 @@ def place_unit(s, n, e, k, o, prot):
         e.pop("ziel_offen", None)
         e.pop("konzentriert", None)
     e["karte"], e["bereich"] = k, "offen"
+    for m, x in s["einheiten"].items():  # L454: the Arty Jeep and the Arty FO on board are set up together
+        if x is not e and (e.get("an_bord") == m or x.get("an_bord") == n):
+            x["karte"] = k
+            prot.append(
+                f"{m} {'carries' if x.get('arty_jeep') else 'on board of'} {n if x.get('arty_jeep') else m}: also on {k}"
+            )
     if o.get("--bereich") and (s.get("reattempt_setup") or s.get("patrouille_mission") or s.get("aufstellung_feld")):
         commands.set_area(s, e, options.text_opt(o, "--bereich", _usage("setup")))
     prot.append(
@@ -426,7 +432,24 @@ def parse_edges(txt):
 
 
 def set_terrain(s, kid, type_, o):
-    catalog = s.get("terrain_katalog", {})
+    catalog = s.setdefault("terrain_katalog", {})
+    if type_ not in catalog and o.get("--typ-neu") == "ja":
+        # L482 [RULE 2.2.1 p.9]: a terrain type of a new deck (e.g. Naktong) is recorded from the card on the board once and
+        # then reused for every further card of that type
+        new = {"quelle": "beim Aufdecken vom Brett abgelesen (L482)"}
+        for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "hoehe_plus"):
+            if o.get("--" + k) is not None:
+                new[k] = options.int_opt(o, "--" + k, "--" + k)
+        if o.get("--raender"):
+            new["raender"] = parse_edges(options.text_opt(o, "--raender", "--edges=top:white,.."))
+        fz = o.get("--fahrzeuge")
+        if fz is not None:
+            fz_map = {"ja": True, "normal": True, "slow": "SLOW", "nein": False, "no": False}
+            if fz not in fz_map:
+                raise rules.Violation("--vehicles=normal|slow|no")
+            new["fahrzeuge"] = fz_map[fz]
+        catalog[type_] = new
+        s.setdefault("_hinweise", []).append(f"New terrain type {type_} recorded in the catalog: {new}")
     if type_ not in catalog:
         raise rules.Violation(
             f"Terrain type '{type_}' not in the catalog: {', '.join(k for k in catalog if k != 'Hill')}; unknown types with all values: --typ-neu=ja --cc=.. --cover_max=.. --cover_draw=.. --edges=.."
@@ -450,14 +473,18 @@ def set_terrain(s, kid, type_, o):
         if k in w:
             c[k] = w[k]
     for k in ("cc", "cc2", "burst", "cover_max", "cover_draw"):
-        if o.get("--" + k) is not None:
+        if k == "cc2" and o.get("--cc2") in ("none", "keiner"):
+            c["cc2"] = None  # L455: a card printed without the second C&C value (e.g. a Hedgerow/Bocage with only +2)
+        elif o.get("--" + k) is not None:
             c[k] = options.int_opt(o, "--" + k, "--" + k)  # L333
     if o.get("--raender"):
         c["raender"] = parse_edges(options.text_opt(o, "--raender", "--edges=top:white,.."))
     if o.get("--nr"):
         c["kartennummer"] = options.text_opt(o, "--nr", "--no=<card number>")
     hills = options.int_opt(o, "--hill", "--hill", 0)  # L333
-    c["elevation"] = 1 + hills  # [RULE 2.2.1 p.9, 5.2.2A p.35] each Hill card +1
+    # [RULE 2.2.1 p.9, 5.2.2A p.35] each Hill card +1; L482 [Naktong CSR 8 p.14] an Embankment card itself is one level up
+    c["elevation"] = 1 + hills + (w.get("hoehe_plus") or 0)
+    c.pop("verdeckt", None)  # L481: entering the terrain of a face-down card flips it
     if hills:
         c["terrain"] = f"{type_} on {hills} Hill"
         if c.get("raender") != "gruen" and o.get("--raender"):
@@ -467,6 +494,17 @@ def set_terrain(s, kid, type_, o):
         # L157 [RULE 5.2.2A p.35] "The dark LOS borders on the Hill card supersede any light borders on the non-Hill Terrain card"
         # (Shonai_Dweller BGG 3478872: "There is no white border if you a using terrain on top of a Hill card"); E9
         c["raender"] = "gruen"
+    fz = o.get("--fahrzeuge")
+    if fz is not None and o.get("--typ-neu") != "ja":
+        fz_map = {"ja": True, "normal": True, "slow": "SLOW", "nein": False, "no": False}
+        if fz not in fz_map:
+            raise rules.Violation("--vehicles=normal|slow|no")
+        c["fahrzeuge"] = fz_map[fz]
+    # L482: values the catalog of a new deck did not know yet are kept for further cards of the type (not the edges,
+    # which differ from card to card for some types)
+    for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "fahrzeuge"):
+        if catalog[type_].get(k) is None and c.get(k) is not None and (o.get("--" + k) is not None or k == "fahrzeuge"):
+            catalog[type_][k] = c[k]
     missing = [k for k in ("cc", "cover_max", "cover_draw", "raender") if c.get(k) is None]
     if missing:
         raise rules.Violation(
@@ -487,7 +525,7 @@ def cmd_terrain(s, args):
     c = state.card(s, kid)
     if c.get("staging"):
         raise rules.Violation("Staging cards stay face down (2.2.1)")
-    if c.get("terrain") and not state.in_setup(s):
+    if c.get("terrain") and not state.in_setup(s) and not geometry.face_down(c):
         raise rules.Violation(f"{kid} already has terrain ({c['terrain']}); change only before turn 1")
     set_terrain(s, kid, type_, o)
     rt = c["raender"] if isinstance(c["raender"], str) else ", ".join(f"{a} {b}" for a, b in c["raender"].items())
@@ -533,6 +571,7 @@ def cmd_extend(s, args):
 OBJECTIVE_USAGE_ROUTE = "objective route <1-4> <card in rows 2-4> (Combat Patrol) [Normandy M3 MSR 2]"
 OBJECTIVE_USAGE_CONCENTRATION = "objective concentration <card> <fire asset, e.g. '105mm HE'> [RULE 7.16.5 p.59]"
 OBJECTIVE_USAGE_PHASELINE = "objective phaseline <n> <row>"
+OBJECTIVE_USAGE_FORTIFY = "objective fortify <secured card> foxholes|deepbunker (between attempts) [Naktong M1 p.15]"
 OBJECTIVE_NAMES = {
     "primaer": "Primary Objective",
     "sekundaer": "Secondary Objective",
@@ -604,7 +643,37 @@ def objective_concentration(s, z, args, prot):
     )
 
 
+def objective_fortify(s, z, args, prot):
+    """L478 [Naktong M1 p.15 Tactical Controls]: 'In between attempts, select two secured cards and place 2 new Foxholes
+    (if available) on one and 1 Deep Bunker (CSR 7) on the other' (versuch_plan.befestigung in the setup)."""
+    spec = s.get("befestigung_zwischen_versuchen")
+    if not spec or not s.get("reattempt_setup"):
+        raise rules.Violation("Fortifications only between attempts when the mission allows them [Naktong M1 p.15]")
+    rules.need(args, 3, OBJECTIVE_USAGE_FORTIFY)
+    kid, what = args[1], args[2].lower()
+    if what not in ("foxholes", "deepbunker"):
+        raise rules.Violation(OBJECTIVE_USAGE_FORTIFY)
+    from . import campaign
+
+    if not campaign.is_secured(s, kid):
+        raise rules.Violation(f"{kid} is not a secured card [Naktong M1 p.15]")
+    done = s.setdefault("befestigung_gesetzt", {})
+    if what in done:
+        raise rules.Violation(f"{what} already placed on {done[what]} in this break")
+    other = done.get("deepbunker" if what == "foxholes" else "foxholes")
+    if other == kid:
+        raise rules.Violation("Foxholes and Deep Bunker go on two different secured cards [Naktong M1 p.15]")
+    if what == "foxholes":
+        for _ in range(spec.get("foxholes", 2)):
+            prot.append(f"Foxholes marker {commands.new_cover_marker(s, kid, 'Foxholes', 1)} (+1) on {kid}")
+    else:
+        v = s.get("cover_werte", {}).get("Deep Bunker", 5)
+        prot.append(f"Deep Bunker marker {commands.new_cover_marker(s, kid, 'Deep Bunker', v)} (+{v}) on {kid} [CSR 7]")
+    done[what] = kid
+
+
 OBJECTIVE_KINDS = {
+    "befestigung": objective_fortify,
     "phaseline": objective_phaseline,
     "route": objective_route,
     "konzentration": objective_concentration,
@@ -615,23 +684,30 @@ def objective_card(s, z, kind, kid, prot):
     """Primary/Secondary, Attack Position, CCP or Combat Outpost on card kid."""
     c = state.card(s, kid)
     top = state.top_row(s)
+    # L456: the mission may name other rows (ziele_reihen, tool rows) and the objective the Attack Position must touch
+    # (ap_neben), e.g. Normandy M7 p.42: Primary row 6, Secondary row 5, Attack Position row 4 next to the Secondary
+    rows = s.get("ziele_reihen") or {}
+    src = s.get("ziele_quelle", "Normandy M1 p.16, M2 p.20")
     if kind in ("primaer", "sekundaer"):
-        if c["reihe"] != top or c.get("staging"):
+        row = rows.get(kind, top)
+        if c["reihe"] != row or c.get("staging"):
+            name = "Primary" if kind == "primaer" else "Secondary"
             raise rules.Violation(
-                f"Primary/Secondary only on the top mission row (tool row {top}) [Normandy M1 p.16, M2 p.20]"
+                f"{name} only on tool row {row}" + (" (top mission row)" if row == top else "") + f" [{src}]"
             )
         other = z.get("sekundaer" if kind == "primaer" else "primaer")
         if other == kid:
             raise rules.Violation("Primary and Secondary on different cards")
     elif kind == "ap":
-        if c["reihe"] != top - 1:
-            raise rules.Violation(
-                f"Attack Position on the second-to-last mission row (tool row {top - 1}) [Normandy M1 p.16, M2 p.20]"
-            )
-        objs = [z.get("primaer"), z.get("sekundaer")]
+        row = rows.get("ap", top - 1)
+        if c["reihe"] != row:
+            raise rules.Violation(f"Attack Position only on tool row {row} [{src}]")
+        neighbours = s.get("ap_neben") or ["primaer", "sekundaer"]
+        objs = [z.get(k) for k in neighbours]
         if not any(o_ and geometry.adjacent(s, kid, o_) for o_ in objs):
+            names = " or ".join({"primaer": "Primary", "sekundaer": "Secondary"}[k] for k in neighbours)
             raise rules.Violation(
-                "Attack Position must be adjacent to Primary or Secondary; place the Objectives first [Normandy M1 p.16]"
+                f"Attack Position must be adjacent to the {names}; place the Objectives first [{src}]"
             )
     elif kind == "ccp":
         s["ccp"] = kid
@@ -764,6 +840,41 @@ def setup_mortar(s, n, e, o, prot):
     s["moerser_wahl"] = o["--moerser"]
 
 
+def setup_jeep(s, n, e, o, prot):
+    """--jeep=yes|no: mount the Arty FD Net SCR610 in the Arty Jeep (Normandy CSR 1 p.13, only in missions that offer it,
+    field arty_jeep_moeglich). The jeep carries only the Arty FO; the radio cannot be a manpack until the next mission (L454)."""
+    from . import vehicles
+
+    if not s.get("arty_jeep_moeglich"):
+        raise rules.Violation(
+            "This mission offers no Arty Jeep (CSR 1: 'In some missions, the option ... may be available')"
+        )
+    if not any(g["netz"] == "Arty FD" for g in e.get("funk", [])):
+        raise rules.Violation('Give --jeep with the Arty FO: setup "Arty FO" --jeep=yes|no [Normandy CSR 1 p.13]')
+    choice = o["--jeep"]
+    if choice not in ("ja", "nein"):
+        raise rules.Violation("--jeep=yes|no")
+    s["arty_jeep_wahl"] = choice
+    radios = [g for g in e.get("funk", []) if g["netz"] == "Arty FD"]
+    if choice == "ja":
+        if vehicles.ARTY_JEEP not in s["einheiten"]:
+            s["einheiten"][vehicles.ARTY_JEEP] = vehicles.arty_jeep_unit(e)
+        s["einheiten"][vehicles.ARTY_JEEP]["karte"] = e.get("karte")
+        e["an_bord"], e["bereich"] = vehicles.ARTY_JEEP, "offen"
+        for g in radios:
+            g["eingebaut"] = vehicles.ARTY_JEEP
+        prot.append(
+            f"CSR 1: {n} with the SCR610 in the {vehicles.ARTY_JEEP} (carries only {n}; automatically Activated for Vehicle "
+            "Movement while he is on board; the SCR610 works only on board, no manpack until the next mission) [Normandy CSR 1 p.13]"
+        )
+    else:
+        s["einheiten"].pop(vehicles.ARTY_JEEP, None)  # setup choice (CSR 1), not a removal from play
+        e.pop("an_bord", None)
+        for g in radios:
+            g.pop("eingebaut", None)
+        prot.append(f"CSR 1: no Arty Jeep, {n} carries the SCR610 as a manpack [Normandy CSR 1 p.13]")
+
+
 def setup_device(s, n, e, o, prot):
     """--device=<type>: the Mortar Section's radio to any unit once teams were chosen [CSR 2 p.13]."""
     free = s.get("mtr_sec_funk_frei", [])
@@ -842,6 +953,7 @@ V4_SETUP_STEPS = (
     ("--netz", setup_net),
     ("--moerser", setup_mortar),
     ("--geraet", setup_device),
+    ("--jeep", setup_jeep),
     ("--asset", setup_assets),
     ("--leitungen", setup_lines),
     ("--pyro", setup_pyro),
@@ -882,6 +994,8 @@ def check_setup_v4(s):
         f.append("no starting card: " + ", ".join(without) + " (setup <unit> <11-14>)")
     if s.get("co_tac_mittel") is None and "telefon_leitungen" in s:
         f.append('CSR 1: setup "CO HQ" --net=radio|phone')
+    if s.get("arty_jeep_moeglich") and s.get("arty_jeep_wahl") is None:
+        f.append('CSR 1: setup "Arty FO" --jeep=yes|no (SCR610 in the Arty Jeep)')
     if s.get("moerser_wahl") is None and s.get("reserve_einheiten"):
         f.append('CSR 2: setup "Mtr Sec" --mortar=section|teams')
     z = s.get("ziele", {})

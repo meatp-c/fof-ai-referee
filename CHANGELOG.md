@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-10-31 (sixth release)
+Engine updates from Normandy Mission 7 (campaign complete) and first building blocks for the Korea campaign:
+- Game step runner: new `tool/zug.py`, one call per game step (commands on stdin), probe in a scratch copy, booking
+  only without VIOLATION, then git commit; undo works in the probe; new result `OPEN:` (exit 0) for steps that are
+  saved and wait for a draw (first case: VOF against vehicles at the end of 3.6). L470, L474, L475
+- History: snapshots in `verlauf/` are a ring of 41 files, also where the file system does not allow deletes. L471
+- Setup: packages with an optional extra on a die roll (`--extra=yes|no`), single-variant packages need no
+  `--variant`, objective rows per mission (`ziele_reihen`, `ap_neben`), `terrain --cc2=none`, Normandy CSR 1 Arty
+  Jeep (`setup "Arty FO" --jeep=yes|no`). L452-L456, L467, L469
+- Fire: Concentrate Fire takes the only spotted enemy without `--unit`; Shift Fire names the PDF marker correctly;
+  moving with Cease Fire names the PDF left behind; HC/WP smoke on a firing card keeps the VOF on the own card
+  (6.1.2); opening fire takes the own card first when both sides are on it (6.2.1b); after a capture the shooters
+  whose only target were the prisoners open fire anew (6.3.3); `WATCH friendly fire` when a unit moves onto a card
+  under friendly VOF. L457, L458, L461, L462, L466, L468, L472
+- Orders: Rally on an unpinned generic LAT names the upgrade action (4.2.3b-d); a second failed Grenade Attack keeps
+  one Miss marker (7.10.4); `vehicle spot` checks LOS like infantry Spot (5.4); vehicle fire hint only with an enemy
+  vehicle in LOS and range; Arty Jeep riders are not marked Exposed inside the Staging Area. L459, L460, L463-L465
+- Enemy: Fall Back avoids diagonals that cross a PDF (5.1.2). L473
+- Skill name unified: "Auto Concentrate" (the old "Auto Concentrate Fire" is accepted as alias). L476
+- Korea building blocks (Naktong River Mission 1, preliminary, not yet played at the table): attempt plan with
+  turns, visibility per turn, enemy experience and package ammo per attempt; fortifying secured objectives between
+  attempts (`objective fortify`); no prisoners (8.15); Korea chart rows and recoilless rifles (75mm RCL cannot fire
+  while Exposed, no RCL fire from building/bunker cover); face-down cards with reveal prompts and a lock until
+  revealed; new terrain types during setup (`terrain ... --new-type=yes`); Heat Casualties (`heat <unit> yes|no`);
+  Naktong counter attack (CSR 5) incl. the planned counter attack; event units with a pool (.50 cal HMG); Human Wave
+  (8.14: PIN becomes MISS, every hit a casualty, never pinned); enemy tank priorities 1 to 4 and enemy vehicles
+  activated every turn (MSR 3, CSR 9), tanks out of ammo leave the board. L477-L488
+- Tests: 16 new test files, 421 tests in the full project (the kit skips those that need mission data).
+
 ## 2026-10-24 (fifth release)
 Engine updates from Normandy Missions 5 and 6 (the first mission with tanks and AT guns) and from a full code review
 of the engine:

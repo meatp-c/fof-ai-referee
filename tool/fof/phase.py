@@ -53,6 +53,7 @@ def cmd_new(args):
         s["assets_start"] = copy.deepcopy(s.get("assets_pool", {}))
         s.setdefault("xp", [])
         s.setdefault("us_casualties_gesamt", 0)
+        campaign.apply_attempt_plan(s, [])  # L477: turns, visibility and enemy values of attempt 1
     setup.check_new_game(s)  # review M5 (L348): validate before .aktuelle_partie is switched or anything is written
     if not test_run:
         (state.ROOT / ".aktuelle_partie").write_text(name, encoding="utf-8")
@@ -334,6 +335,10 @@ def _leave_setup(s, prot):
 
 def _leave_event_draw(s, prot):
     if s.get("ereignistabellen") and s["zug"] >= 2 and s.get("ereignis_erledigt") != [s["zug"], s["phase"]]:
+        if s["phase"] != "3.1" and events.planned_counter_attack(s):
+            raise rules.Violation(
+                "Planned Counter Attack this turn, no draw: fof.py event ? no (booked automatically as Counter Attack) [MSR 1]"
+            )
         raise rules.Violation(
             f"First the Higher HQ Event of this segment: draw an Action card, fof.py event <cardno> yes <R#> | no [RULE {'3.1 S.15' if s['phase'] == '3.1' else '3.4.1 S.16'}]"
         )
@@ -566,7 +571,15 @@ def check_capture(s, prot):
                     for m in state.units_on(s, kid, state.opponent_of_side(e["seite"]))
                     if can_capture(s["einheiten"][m])
                 ]
-                if opp:
+                if opp and not takes_prisoners(s, state.opponent_of_side(e["seite"])):
+                    # L479 [RULE 8.15 p.69] 'If a side does not take prisoners per the campaign instructions,
+                    # automatically convert any captured units to casualties' (Naktong p.13: the North Koreans do not)
+                    for _ in range(state.steps(e)):
+                        combat.make_casualty(s, e, prot, n)
+                    combat.remove_from_play(
+                        s, n, prot, "captors take no prisoners, converted to casualties [8.15]", True
+                    )
+                elif opp:
                     if state.is_v4(s):
                         s.setdefault("capture_offen", []).append(n)  # L208: phase next waits for fof.py capture
                         prot.append(
@@ -576,6 +589,11 @@ def check_capture(s, prot):
                         prot.append(
                             f"{kid}: {n} ({e['typ']}, {e['seite']}) is captured: one guard step with VOF value goes along (both Removed from Play); enemies take no prisoners, US team then becomes a Casualty. Afterwards fof.py enemy/order to correct [8.15]"
                         )
+
+
+def takes_prisoners(s, side):
+    """L479: setup 'gefangene_nehmen' {US|Feind: bool}; without it both sides take prisoners (Normandy p.13)."""
+    return (s.get("gefangene_nehmen") or {}).get(side, True)
 
 
 def can_capture(x):
@@ -752,6 +770,7 @@ def cmd_end_turn(s, args):
         return
     s["zug"] += 1
     s["phase"] = state.sop(s)[0][0]
+    campaign.apply_turn_visibility(s, prot)  # L477
     ak = fire.update_activity(s)
     if ak:
         prot.append(ak)

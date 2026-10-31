@@ -384,6 +384,11 @@ class Violation(Exception):
         super().__init__(message + (" " + messages.rule(rule) if rule else ""))
 
 
+class Pending(Violation):
+    """L475: the step saved a partial result (an open draw) and stops there; printed as OPEN, exit code 0, so a batch
+    can resolve the draw next. Callers that catch Violation still stop on it."""
+
+
 def need(args, n, usage):
     """Positional arguments: a Violation with the usage line instead of an IndexError (review 23.10.2026, L221)."""
     if len(args) < n:

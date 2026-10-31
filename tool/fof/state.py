@@ -105,10 +105,19 @@ def save_snapshot(nr, text):
     d = game_dir() / HISTORY_DIR
     try:
         d.mkdir(exist_ok=True)
-        (d / f"{nr}.json").write_text(text, encoding="utf-8")
+        target = d / f"{nr}.json"
+        oldest = d / f"{nr - HISTORY_KEEP - 1}.json"
+        if not target.exists() and oldest.exists():
+            # L471: reuse the snapshot that drops out of the window (rename + overwrite): the history stays at
+            # HISTORY_KEEP files even where deleting is not allowed (sandboxed shell on a synced folder)
+            oldest.rename(target)
+        target.write_text(text, encoding="utf-8")
         for f in d.glob("*.json"):
             if f.stem.isdigit() and int(f.stem) < nr - HISTORY_KEEP:
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError:
+                    pass  # no-delete folder: the rename above keeps the count bounded
     except OSError as err:
         # history is a convenience; a read-only or no-delete folder must not block the game, but say so (L223)
         if not (d / f"{nr}.json").exists():
@@ -228,6 +237,20 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def heat_check(s):
+    """L483 [Naktong M1 p.17 Heat Casualties]: friendly units newly marked Exposed while the event runs get a draw."""
+    heat = s.get("hitze")
+    active = bool(heat) and s.get("zug", 0) <= heat["bis_zug"] and (s.get("wetter") or 0) < 2
+    for n, e in s.get("einheiten", {}).items():
+        if e.pop("_neu_exposed", None) and active:
+            s.setdefault("hitze_offen", []).append(n)
+            s.setdefault("_hinweise", []).append(
+                f'Heat Casualties: {n} marked Exposed, draw a card, R#1/4 = one step Casualty: fof.py heat "{n}" yes|no [Naktong M1 p.17]'
+            )
+    if heat and s.get("zug", 0) > heat["bis_zug"]:
+        s.pop("hitze")
+
+
 def save_state(s, entry=None, rule=None):
     errors = briefing.consistency_check(s)
     if errors:
@@ -243,6 +266,7 @@ def save_state(s, entry=None, rule=None):
                 "zeit": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
         )
+    heat_check(s)  # L483
     h = s.pop("_hinweise", None)
     for k in ("_befehl_opts", "_phase_alt"):
         s.pop(k, None)

@@ -414,6 +414,8 @@ def new_cover_marker(s, kid, type_, value):
 def mark(e, m):
     if m not in e["status"]:
         e["status"].append(m)
+        if m == rules.EXPOSED and e.get("seite") == "US":
+            e["_neu_exposed"] = True  # L483: Heat Casualties (Naktong M1 p.17) are checked in state.save_state
 
 
 def new_name(s, type_, reuse_removed=False):
@@ -461,6 +463,10 @@ def check_move(s, e, n, target_card, akt):
             memo[kid] = fire.vof_against(s, kid, e["seite"])
         return memo[kid]
 
+    if e.get("an_bord"):
+        raise rules.Violation(
+            f'{n} is on board the {e["an_bord"]} and moves with it in phase 3.6; to leave it first: order <HQ> "{n}" 4.2.2h --what=jeep [10.8.1, Normandy CSR 1]'
+        )
     if rules.EXPOSED in e["status"]:
         raise rules.Violation(f"{n} is Exposed and may no longer change cards [RULE 5.1.2 p.31]")
     if not geometry.adjacent(s, e["karte"], target_card):
@@ -672,8 +678,7 @@ def cmd_grenade(s, args):
                 prot,
             )
     else:
-        state.card(s, e["karte"])["grenade_miss"] = True
-        prot.append(f"Grenade Miss Modifier (-1) on {e['karte']} [7.10.4]")
+        prot.append(place_grenade_miss(s, e["karte"]))
     ak = fire.update_activity(s)
     if ak:
         prot.append(ak)
@@ -749,6 +754,12 @@ def move_unit(s, n, target_card, area, exposed, prot, open_all=True):
     fire.fire_after_move(s, n, prot, origin=from_, open_all=open_all)
     if state.units_on(s, target_card, state.opponent_of_side(e["seite"])):
         prot.append(f"Point Blank on {target_card}: each side's VOF only hits the opposing side [6.2.1b]")
+    own_fire = friendly_fire_on(s, n, target_card)
+    if own_fire:
+        prot.append(
+            f"WATCH friendly fire: {n} on {target_card} is under the VOF of own units from other cards: "
+            f"{', '.join(own_fire)} (Cease Fire/Shift Fire, 4.2.4k/l) [6.3.3, 6.1]"
+        )
     if state.is_v4(s):
         pc_ = s.pop("_pionier_check", None)
         if pc_ and pc_[0] == n and pc_[1] == target_card:
@@ -1178,7 +1189,7 @@ def check_grenade(s, z, target_name, o):
             )[0]
         ):
             raise rules.Violation("Ranged Grenade Attack: target must be in LOS and range [RULE 7.10.1 p.55]")
-        if not rg and combat.ammo(z) and combat.ammo(z)["typ"] == "RKT":
+        if not rg and combat.ammo(z) and combat.ammo(z)["typ"] in ("RKT", "RCL"):  # L480: RCL too
             cv = geometry.cover_marker(s, z)  # L97 [RULE 7.4 p.54]
             if cv and cv["typ"] in rules.NO_FIRE_FROM_COVER:
                 raise rules.Violation(
@@ -1218,7 +1229,7 @@ def check_grenade(s, z, target_name, o):
 SKILL_AUTO = {
     "Auto Spot": ("4.2.4a",),
     "Auto Cover": ("4.2.2e",),
-    "Auto Concentrate Fire": ("4.2.4b",),
+    "Auto Concentrate": ("4.2.4b",),  # L476: marker name as in rules.SKILL_MARKERS_NORMANDY and the setup data
     "Auto Infiltrate": ("4.2.2c", "4.2.2g"),
     "Auto Grenade": ("4.2.4d",),
 }
@@ -1389,6 +1400,8 @@ def platoon_move_members(s, orig_name, orig, akt):
             continue
         if not state.good_order(e) or rules.EXPOSED in e["status"]:
             continue
+        if e.get("an_bord") or e.get("fahrzeug"):
+            continue  # L454: vehicles and units on board move in phase 3.6, not with the platoon
         if akt == "4.2.2d" and (e.get("tripod") or e.get("vof_rating") == "H"):
             continue
         candidate.append(n)
@@ -1437,6 +1450,8 @@ def _order_move_platoon(s, ctx):
 
 def _order_seek_cover(s, ctx):
     """Order handler for: akt == '4.2.2e'"""
+    if ctx.z.get("an_bord"):
+        raise rules.Violation(f"{ctx.target_name} is on board the {ctx.z['an_bord']}: no cover marker [10.8.1]")
     if ctx.z.get("bereich", "offen") != "offen":
         raise rules.Violation(f"{ctx.target_name} is already under cover [RULE 4.2.2e p.23]")
     present = len([c for c in ctx.zk.get("cover", []) if not c.get("feld")])
@@ -1578,6 +1593,31 @@ def _order_pick_up(s, ctx):
     ctx.prot.append(f"{ctx.target_name}: pick up/load, Exposed [5.1.6]")
 
 
+def embark_jeep(s, ctx):
+    """L454 [4.2.2h p.23, 10.8.1, Normandy CSR 1 p.13] get on or off the Arty Jeep; it carries a single step, the Arty FO."""
+    from . import vehicles
+
+    z, n = ctx.z, ctx.target_name
+    if z.get("an_bord"):
+        jeep = z.pop("an_bord")
+        ctx.prot.append(
+            f"{n} gets off the {jeep} on {z['karte']}; the SCR610 stays mounted in the jeep and works only on board [Normandy CSR 1 p.13]"
+        )
+        return
+    jeeps = [m for m in state.units_on(s, z["karte"], "US") if s["einheiten"][m].get("arty_jeep")]
+    if not jeeps:
+        raise rules.Violation(f"No Arty Jeep on {z['karte']} [Normandy CSR 1 p.13]")
+    if not any(g.get("eingebaut") == jeeps[0] for g in z.get("funk", [])):
+        raise rules.Violation(
+            f"The {jeeps[0]} can only carry a single step, the Arty FO [Normandy CSR 1 p.13 'this Jeep can only carry a single step (the Arty FO)']"
+        )
+    if vehicles.passengers(s, jeeps[0]):
+        raise rules.Violation(f"{jeeps[0]} is already occupied [Normandy CSR 1 p.13]")
+    z["an_bord"] = jeeps[0]
+    z["bereich"] = "offen"
+    ctx.prot.append(f"{n} gets on the {jeeps[0]} [4.2.2h, 10.8.1]")
+
+
 def pick_up_item(s, ctx, part):
     """One item of a Pick Up order (L239)."""
     head, _, count = part.partition(":")
@@ -1591,6 +1631,8 @@ def pick_up_item(s, ctx, part):
         ctx.zk["leitung_assets"] -= nz
         ctx.z["leitungen"] = ctx.z.get("leitungen", 0) + nz
         ctx.prot.append(f"{ctx.target_name} picks up {nz} Phone Line(s) [4.3.4, 5.1.6]")
+    elif head.lower() in ("jeep", "arty jeep"):
+        embark_jeep(s, ctx)
     elif head.lower() == "casualty" and count:
         for _ in range(rules.int_value(count, "casualty count")):
             pick_up(s, ctx.z, ctx.target_name, "Casualty", ctx.prot)
@@ -1785,6 +1827,9 @@ def _order_concentrate_fire(s, ctx):
         ctx.success = "nein"
     elif ctx.success == "ja":
         ze = ctx.o.get("--einheit")
+        targets = spotted_enemies(s, zt)
+        if not ze and len(targets) == 1:
+            ze = targets[0]  # L457 (E91): the only spotted enemy on the card is the target, no --unit needed
         if not ze:
             raise rules.Violation(
                 f"Specify --unit=<target enemy> (stack under a cover marker or random unit without cover on {zt})"
@@ -1900,8 +1945,7 @@ def _order_grenade_attack(s, ctx):
         stack, _under = apply_grenade(s, ze, value, ctx.o.get("--kritisch") == "ja", ctx.prot, "7.10.1, 7.10.6")
         grenade_back_notes(s, ctx.z, stack, True, ctx.prot)
     else:
-        state.card(s, zt)["grenade_miss"] = True
-        ctx.prot.append(f"Grenade Miss Modifier (-1) on {zt} [7.10.4]")
+        ctx.prot.append(place_grenade_miss(s, zt))
         grenade_back_notes(s, ctx.z, grenade_stack(s, ze) if ze else state.units_on(s, zt, "Feind"), False, ctx.prot)
         s["letzter_versuch"] = [ctx.target_name, ctx.akt, s["phase"]]
 
@@ -2188,6 +2232,10 @@ def _order_shift_fire(s, ctx):
     )
     if not ok:
         raise rules.Violation(f"Originator has no LOS to {zt}: {reason}")
+    # L458: the PDF situation before the shift, so the board instruction names the marker that turns
+    firing_before = {
+        n: e["ziel"] for n, e in s["einheiten"].items() if e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e)
+    }
     for n, e in s["einheiten"].items():
         if (
             e["seite"] == "US" and e["karte"] == kk and fire.is_firing(e)
@@ -2204,8 +2252,22 @@ def _order_shift_fire(s, ctx):
                 continue
             e["ziel"] = zt
             e.pop("konzentriert", None)
+    already = sorted(n for n, z in firing_before.items() if z == zt)
+    if already:
+        how = f"PDF marker {kk} to {zt} already lies there from {', '.join(already)}"
+    else:  # the old marker is handled by the board summary (removed, or back to a single arrow if it was mutual)
+        how = f"place a new PDF marker {kk} to {zt}"
+    others = sorted(
+        {
+            x["ziel"]
+            for x in s["einheiten"].values()
+            if x.get("karte") == kk and x.get("ziel") and x["ziel"] not in (kk, zt) and fire.is_firing(x)
+        }
+    )
     ctx.prot.append(
-        f"Shift Fire: units on {kk} now fire at {zt} (move PDF)" + fire.pdf_note(s, kk, zt, None) + " [6.3.3]"
+        f"Shift Fire: units on {kk} now fire at {zt}: {how}"
+        + (f"; further PDF from {kk}: to {', '.join(others)}" if others else f"; no other PDF from {kk}")
+        + " [6.3.3]"
     )
 
 
@@ -2523,6 +2585,10 @@ def apply_skill(s, ctx):
     """[RULE 12.7 p.82, Player Aid 2] --skill=<Auto ...|Extra Draw>: the holder hands in the marker; Auto skills make
     the attempt succeed (cards still drawn for Critical Hit/Jam, L153); --short only for a Call for Fire (L250)."""
     skill, akt, o, z = ctx.skill, ctx.akt, ctx.o, ctx.z
+    if (
+        skill == "Auto Concentrate Fire"
+    ):  # L476: long name on the counter mix list (E67) = the marker 'Auto Concentrate'
+        skill = ctx.skill = "Auto Concentrate"
     if skill:
         if skill not in SKILL_AUTO and skill != "Extra Draw":
             raise rules.Violation(f"Skill in an order: {', '.join(list(SKILL_AUTO) + ['Extra Draw'])} [RULE 12.7 p.82]")
@@ -2740,6 +2806,29 @@ def cmd_fire(s, args):
     briefing.print_board(prot, s)
 
 
+def friendly_fire_on(s, n, kid):
+    """L466 [RULE 6.1, 6.3.3 p.43]: own-side units on other cards whose VOF lies on kid (friendly fire on the mover)."""
+    side = s["einheiten"][n]["seite"]
+    return [
+        m
+        for m, x in s["einheiten"].items()
+        if m != n
+        and x["seite"] == side
+        and x["karte"] != kid
+        and fire.is_firing(x)
+        and fire.effective_fire_target(s, m) == kid
+    ]
+
+
+def place_grenade_miss(s, kid):
+    """[RULE 7.10.4, 6.3.2 p.43] 'Place only one Miss Modifier regardless of the number of failed attempts' (L464)."""
+    c = state.card(s, kid)
+    if c.get("grenade_miss"):
+        return f"Grenade Miss Modifier already on {kid}: no second marker, still -1 [7.10.4, 6.3.2]"
+    c["grenade_miss"] = True
+    return f"Grenade Miss Modifier (-1) on {kid} [7.10.4]"
+
+
 def execute_pyro(s, z, name, o, prot):
     """[RULE 4.2.1c p.22, 4.4 p.30] Fire a pyrotechnic asset: Hand Held Illumination, HC/WP smoke or a signal (L256:
     split into the parts below)."""
@@ -2799,10 +2888,9 @@ def _pyro_smoke(s, type_, zk, o, prot):
     prot.append(
         f"{type_} on {zk} (cover +{w} against everything except Incoming/Air Strike/Mines/Grenade; blocks LOS out of and through {zk}; removed in Clean Up) [4.4.3 p.31, 5.4 p.38]"
     )
-    for n, e in s["einheiten"].items():
-        if e["karte"] == zk and fire.is_firing(e) and e["ziel"] != zk:
-            fire.cease_fire(e)
-            prot.append(f"{n} loses LOS out of the card, remove PDF [5.4]")
+    # L462 [RULE 6.1.2 p.40 example 1]: firing units on the card keep firing, VOF on their own card (uses ammo), PDF
+    # removed; Clean Up lifts the smoke and they fire along the old PDF again (L148). Before: Cease Fire (no ammo).
+    fire.cease_fire_on_los_loss(s, prot)
 
 
 def _pyro_signal(s, type_, zk, name, o, prot):

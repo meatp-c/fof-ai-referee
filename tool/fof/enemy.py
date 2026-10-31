@@ -632,6 +632,12 @@ def prepare_enemy_check(s, prot):
                 commands.mark(e, rules.FIRE_TEAM_SIDE)
                 prot.append(f"{n}: Leader alone on {e['karte']}, flipped to Fire Team side [8.9 p.67]")
     enemies = [n for n, e in s["einheiten"].items() if e["seite"] == "Feind"]
+    tanks = [n for n in enemies if s["einheiten"][n].get("fahrzeug")]
+    if tanks:
+        # L488 [Naktong CSR 9 p.14] 'They take no actions during the Enemy Action Phase (except to Shift and Cease fire in
+        # line with other units on their card)'
+        enemies = [n for n in enemies if n not in tanks]
+        prot.append(f"no Activity Check for the vehicles {', '.join(tanks)} (they act in 3.6) [CSR 9]")
     for n in enemies:
         s["einheiten"][n]["check_offen"] = True
     # L60: units from an Enemy Higher HQ Event this turn do not check again [RULE 3.4.1 p.16]
@@ -1546,6 +1552,15 @@ def fall_back_candidates(s, e):
         k = geometry.card_at(s, c["reihe"] + 1, sp)
         if k and not state.card(s, k).get("staging"):
             cands.append(k)
+
+    def diagonal_ok(k):
+        try:
+            commands.diagonal_pdf_check(s, e, k)
+            return True
+        except rules.Violation:
+            return False
+
+    cands = [k for k in cands if diagonal_ok(k)]  # L473 [RULE 5.1.2 p.32]: no diagonal across a PDF
     if restricted_mover(e):
         # E90/L213 [RULE 4.2.5 p.26, 8.6.1C p.66] reading B: Pinned units, Paralyzed and Litter Teams need no
         # friendly-occupied card (8.6.1C), but 'with no VOF on it' still applies

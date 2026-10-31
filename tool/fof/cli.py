@@ -60,7 +60,7 @@ COMMANDS = [
         "objective",
         "ziel",
         "setup.cmd_objective",
-        "objective primary|secondary|ap|ccp|cop <card> | objective route <1-4> <card> | objective concentration <card> <fire asset> | objective phaseline <n> <row>",
+        "objective primary|secondary|ap|ccp|cop <card> | objective route <1-4> <card> | objective concentration <card> <fire asset> | objective phaseline <n> <row> | objective fortify <card> foxholes|deepbunker",
         "Tactical Controls (2.4.1)",
     ),
     (
@@ -74,7 +74,7 @@ COMMANDS = [
         "setup",
         "aufstellen",
         "setup.cmd_setup",
-        "setup <unit> <card> [--area=C1|open] [--platoon=1|2|3|none] [--net=radio|phone] [--mortar=section|teams] [--asset=<type>] [--lines=n] [--pyro=<type>:<code>]",
+        "setup <unit> <card> [--area=C1|open] [--platoon=1|2|3|none] [--net=radio|phone] [--mortar=section|teams] [--jeep=yes|no] [--asset=<type>] [--lines=n] [--pyro=<type>:<code>]",
         "starting setup, attachments and assets (2.3.3, 2.3.5)",
     ),
     (
@@ -114,6 +114,7 @@ COMMANDS = [
         "Higher HQ events (3.1, 3.4.1)",
     ),
     ("endturn", "rundenende", "phase.cmd_end_turn", "endturn", "3.8 Clean Up and the next turn"),
+    ("heat", "hitze", "events.cmd_heat", "heat <unit> yes|no", "Heat Casualties draw R#1/4 (Naktong M1 event)"),
     # friendly command phase
     ("activate", "aktivieren", "commands.cmd_activate", "activate <hq>", "4.2.1a in the BN HQ / CO HQ impulse"),
     ("hq", "hq", "commands.cmd_hq", "hq <hq>", "choose the active HQ of the impulse"),
@@ -323,6 +324,7 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
     "reattempt": {"done": "fertig"},
     "xp": {"add": "plus", "spend": "ausgeben", "promote": "befoerdern"},
     "granate": {"response": "antwort"},
+    "hitze": {"yes": "ja", "no": "nein"},
     "ncm": {"next": "weiter"},
     "fahrzeug": {
         "move": "bewegen",
@@ -336,7 +338,12 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
     },
     "at": {"grenade": "granate", "yes": "ja", "no": "nein", "again": "nochmal"},
     "pc": {"reveal": "aufdecken", "set": "setzen", "clear": "frei", "contact": "kontakt"},
-    "ziel": {"primary": "primaer", "secondary": "sekundaer", "concentration": "konzentration"},
+    "ziel": {
+        "primary": "primaer",
+        "secondary": "sekundaer",
+        "concentration": "konzentration",
+        "fortify": "befestigung",
+    },
     "leitung": {"lay": "legen"},
     "funk": {"check": "pruefen", "damage": "schaden", "intact": "heil", "destroyed": "zerstoert"},
     "feuer": {"off": "aus"},
@@ -487,6 +494,8 @@ def main(argv=None):
             print(briefing.check_stamp(s))
         else:
             resolve(BY_GERMAN[cmd][2])(s, args)
+    except rules.Pending as v:
+        print(f"{messages.OPEN}: " + str(v))
     except rules.Violation as v:
         print(f"{messages.VIOLATION}: " + str(v))
         sys.exit(2)

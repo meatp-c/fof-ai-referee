@@ -8,7 +8,7 @@ until the player has drawn its card:
 A vehicle action is a plan of steps (VOF on its card, the action, VOF on the new card, Reaction Fire) that advances as
 soon as the queue is empty (10.5.1)."""
 
-from . import briefing, combat, commands, comms, contact, enemy, fire, geometry, options, rules, state
+from . import briefing, campaign, combat, commands, comms, contact, enemy, fire, geometry, options, rules, state
 
 # [Vehicle and Anti-Tank Weapons Chart, WWII] gunnery P, C, L, V (None: no fire at that range), defensive value, crew steps,
 # mobile, Move & Fire modifier (None: no Move then Fire), Quick Shot, target type, G! procedure (10.6.2), transport capacity
@@ -28,12 +28,29 @@ CHART = {
     "Jeep": ((None, None, None, None), -2, 0, True, None, False, "V", False, 2),
     "Truck": ((None, None, None, None), -2, 1, True, None, False, "V", False, 10),
     ".50 Cal HMG": ((0, 0, 1, 2), None, None, False, None, False, "I", False, None),
+    # L480 [Vehicle and Anti-Tank Weapons Chart, Korea / Korea & Vietnam]
+    "M26 Pershing 90mm": ((-6, -5, -3, -2), 2, 2, True, 3, True, "V", False, 4),
+    "T-34/85": ((-5, -3, -1, 0), 1, 2, True, 3, True, "V", False, 4),
+    "SU-76M": ((-4, -3, -1, 0), 0, 2, True, None, True, "V", False, 4),
+    "Quad .50": ((0, 0, 1, 2), -1, 2, True, 1, True, "V", False, None),
+    "57mm RCL": ((-3, -3, -2, 0), None, None, True, None, False, "I", True, None),
+    "75mm RCL": ((-4, -3, -2, 0), None, None, True, None, False, "I", False, None),
 }
 RANGE_LETTER = ("P", "C", "L", "V")
 # [Anti-Tank Combat Resolution and Modifiers, VOF against a vehicle 10.5.3] AT modifier by VOF type
 VOF_AT_MOD = {"Pinned": 4, "S": 3, "A": 2, "H": 1, "Sniper": 1, "Incoming": -1, "Mines": -2, "G": -2, "AirStrike": -3}
 QUICK_SHOT_SUMS = {-4, -2, 0, 2, 4}  # [RULE 10.6.1 p.73]
-AMBUSH_WEAPONS = {"M1A1 Bazooka", "M20 Bazooka", "Panzerfaust", "Panzerschreck", "75mm AT Gun", "88mm FLAK"}
+# [RULE 10.8.3 p.76] "anti-tank guns or rocket launchers"; L480: recoilless rifles count with the rocket launchers (7.4, open U37)
+AMBUSH_WEAPONS = {
+    "M1A1 Bazooka",
+    "M20 Bazooka",
+    "Panzerfaust",
+    "Panzerschreck",
+    "75mm AT Gun",
+    "88mm FLAK",
+    "57mm RCL",
+    "75mm RCL",
+}
 # [Normandy CSR 7 p.15] automatically Activated every turn; the others only on a card with a US vehicle
 CSR7_ALWAYS = {"75mm AT Gun", "88mm FLAK", "Panzerschreck"}
 CSR7_SAME_CARD = {"Panzerfaust", "75mm Infantry Gun"}
@@ -56,6 +73,37 @@ def result_v(final):
 
 def is_vehicle(e):
     return bool(e.get("fahrzeug"))
+
+
+# [Normandy CSR 1 p.13] Arty Jeep: the Arty FD Net SCR610 mounted in a jeep that carries only the Arty FO (L454)
+ARTY_JEEP = "Arty Jeep"
+
+
+def passengers(s, name):
+    """Units embarked on vehicle `name` (field an_bord, 10.8.1)."""
+    return [n for n, e in s["einheiten"].items() if e.get("an_bord") == name]
+
+
+def arty_jeep_unit(fo):
+    """The ARTY FD Net Jeep counter (E79): no crew (10.8.8), Jeep chart line, embarked units drive it (10.8.1)."""
+    return {
+        "seite": "US",
+        "typ": "Vehicle",
+        "fahrzeug": "Jeep",
+        "arty_jeep": True,
+        "karte": fo.get("karte"),
+        "bereich": "offen",
+        "status": [],
+        "steps": 0,
+        "ziel": None,
+        "vof_rating": None,
+        "reichweite": None,
+        "erfahrung": fo.get("erfahrung"),
+        "platoon": None,
+        "attached_an": [],
+        "hinweis": "ARTY FD Net Jeep with SCR610 (E79); no crew (10.8.8); carries only the Arty FO; automatically Activated for "
+        "Vehicle Movement while he is on board (Normandy CSR 1 p.13)",
+    }
 
 
 def vehicle_types():
@@ -415,6 +463,10 @@ def apply_result(s, target, res, prot):
     kid = z["karte"]
     c = state.card(s, kid)
     at36(s)["angegriffen"].append(target)
+    if z["seite"] == "Feind" and res in ("Brewed Up", "Knocked Out"):
+        # L488 [Naktong p.12 Experience] 'Knock out or Brew Up enemy tank or assault gun 4 per vehicle', truck 2
+        key = "feind_truck" if "Truck" in (z.get("fahrzeug") or "") else "feind_panzer"
+        campaign.book_xp(s, campaign.xp_table(s, key), f"{target} {res}", prot)
     crew = chart(z)[2] or 0
     if res == "Brewed Up":
         # review M35: crew steps become Casualties of their own side (keys as in combat.make_casualty)
@@ -674,6 +726,8 @@ def advance(s, prot):
             queue_vof(s, n, prot, step["label"])
         elif kind == "move":
             do_move(s, n, step["karte"], step["bereich"], prot)
+        elif kind == "tankmove":
+            tank_move_step(s, n, step, ak, prot)
         elif kind == "react":
             queue_reactions(s, n, prot)
         elif kind == "fire":
@@ -723,12 +777,15 @@ def resume(s, prot):
         prot.append("Next: " + describe(s, st["wahl"]))
     elif st.get("aktion") and not st["aktion"].get("ende"):
         n = st["aktion"]["einheit"]
+        # L454: the Arty Jeep has no gun; L459: AT Fire only against an opposing vehicle in LOS and range (10.6)
+        armed = n in s["einheiten"] and at_capable(s["einheiten"][n]) and bool(vehicle_targets(s, n))
+        fire_txt = f" | vehicle fire {n} <target> (Move then AT Fire)" if armed else ""
         if st["aktion"].get("slow"):  # L196: after a SLOW card only Move then AT Fire or done remain
-            prot.append(f"{n} may continue: fof.py vehicle fire {n} <target> (Move then AT Fire) | vehicle done {n}")
-        else:
             prot.append(
-                f"{n} may continue: fof.py vehicle move {n} <card> | vehicle fire {n} <target> (Move then AT Fire) | vehicle done {n}"
+                f"{n} may continue: fof.py vehicle {'fire ' + n + ' <target> (Move then AT Fire) | vehicle ' if armed else ''}done {n}"
             )
+        else:
+            prot.append(f"{n} may continue: fof.py vehicle move {n} <card>{fire_txt} | vehicle done {n}")
     else:
         prot.append(next_hint(s))
 
@@ -769,7 +826,11 @@ def _enemy_base(s):
     return [
         n
         for n, e in s["einheiten"].items()
-        if e["seite"] == "Feind" and activated(e) and not moved_fired(e) and at_capable(e) and vehicle_targets(s, n)
+        if e["seite"] == "Feind"
+        and activated(e)
+        and not moved_fired(e)
+        and at_capable(e)
+        and (vehicle_targets(s, n) or (is_vehicle(e) and tank_priorities(s)))  # L488: tanks act on their priority list
     ]
 
 
@@ -853,6 +914,11 @@ def do_move(s, n, kid, area, prot):
     e = s["einheiten"][n]
     from_ = e["karte"]
     commands.move_unit(s, n, kid, area, exposed=False, prot=prot)
+    for p in passengers(s, n):
+        prot.append(
+            f"{p} rides along on {n} to {kid} [10.8.1]"
+        )  # Exposed follows from move_unit (not within staging, 5.1.3)
+        commands.move_unit(s, p, kid, "offen", exposed=True, prot=prot)
     e["in_bewegung"] = True
     ak = at36(s)["aktion"]
     ak["bewegt"] = True
@@ -1088,6 +1154,15 @@ def vehicle_spot(s, rest, o):
     hidden = commands.unspotted_enemies(s, kid)
     if not hidden:
         raise rules.Violation(f"No Unspotted enemy on {kid}")
+    # L465 [RULE 8.5, 5.4 p.38]: the same LOS test as the infantry Spot (4.2.4a); smoke/Incoming on the vehicle's card
+    # blocks LOS out of it
+    if state.card(s, e["karte"]).get("staging"):
+        raise rules.Violation("No spotting from the Staging Area [8.5 Note]")
+    ok, reason = geometry.los(
+        s, e["karte"], kid, ha=geometry.height_bonus(s, e), hb=geometry.card_height_bonus(s, kid, "Feind")
+    )
+    if not ok:
+        raise rules.Violation(f"No LOS from {e['karte']} to {kid}: {reason} [8.5, 5.4]")
     if o.get("--erfolg") not in ("ja", "nein"):
         mods = comms.spot_modifiers(s, e, kid)
         k = max(1, 2 + sum(m for _, m in mods))
@@ -1127,6 +1202,8 @@ def vehicle_enemy(s, rest, o):
         n = actors[0]
     if n not in actors:
         raise rules.Violation(f"{n} cannot act now; eligible: {', '.join(actors)}")
+    if is_vehicle(s["einheiten"][n]) and tank_priorities(s):
+        return enemy_tank_action(s, st, n, o)
     targets = vehicle_targets(s, n)
     t = text_opt(o, "--ziel", "--target=<vehicle>")
     if not t:
@@ -1186,6 +1263,170 @@ def vehicle_react(s, rest, o):
     return prot
 
 
+# ---- L488 enemy tanks with a priority list (Naktong CSR 9 p.14, M1 MSR 3 p.19)
+AT_TEAM_WEAPONS = ("M1A1 Bazooka", "M20 Bazooka", "57mm RCL", "75mm RCL")
+
+
+def tank_priorities(s):
+    """L488: the mission's enemy tank priority list (sonderregeln.panzer_prioritaeten), or None."""
+    return (s.get("sonderregeln") or {}).get("panzer_prioritaeten")
+
+
+def _cc_low(c):
+    """C&C value used to compare cards for a tank (the lower value of a two-value card, open reading U38)."""
+    return c["cc2"] if c.get("cc2") is not None else c.get("cc", 0)
+
+
+def tank_cf_targets(s, n, pred):
+    """US units satisfying pred on the card the tank's VOF lies on (priority 2/4 'under VOF')."""
+    e = s["einheiten"][n]
+    if state.pinned(e) or not fire.is_firing(e):
+        return []
+    zt = fire.effective_fire_target(s, n)
+    return [m for m in state.units_on(s, zt, "US") if pred(s["einheiten"][m])]
+
+
+def tank_better_cards(s, n):
+    """Priority 3: the closest cards (vehicle moves, SLOW cards stop) with a better C&C value than the tank's card;
+    face-down cards count as unknown. Returns (distance, {card: path})."""
+    e = s["einheiten"][n]
+    start = e["karte"]
+    here = _cc_low(state.card(s, start))
+    frontier, seen, best = [(start, [])], {start}, {}
+    dist = 0
+    while frontier and not best:
+        dist += 1
+        nxt = []
+        for k, path in frontier:
+            if path and traffic(s, k) == "SLOW":
+                continue  # a SLOW card ends the move [10.5.2 C, 5.2.4]
+            for k2, c2 in s["karten"].items():
+                if k2 in seen or not geometry.adjacent(s, k, k2) or c2.get("staging") or geometry.face_down(c2):
+                    continue
+                t = traffic(s, k2)
+                if t is None or t is False:
+                    continue
+                if len([m for m in state.units_on(s, k2, "Feind") if is_vehicle(s["einheiten"][m])]) >= 4:
+                    continue
+                seen.add(k2)
+                nxt.append((k2, path + [k2]))
+                if _cc_low(c2) > here:
+                    best[k2] = path + [k2]
+        frontier = nxt
+    return dist, best
+
+
+def enemy_tank_action(s, st, n, o):
+    """L488 [Naktong M1 MSR 3 p.19, BGG 3529491]: the first priority that applies. 1 AT Fire at a visible US vehicle;
+    2 Concentrate Fire on a US Bazooka/RCL team under its VOF; 3 move to the closest card with a better C&C value (stop
+    and Move & Fire as soon as priority 1 applies); 4 Concentrate Fire on a US LMG/HMG under its VOF; else no action."""
+    e = s["einheiten"][n]
+    prot = []
+    targets = vehicle_targets(s, n)
+    if targets:
+        t = text_opt(o, "--ziel", "--target=<vehicle>")
+        if not t:
+            if len(targets) > 1:
+                raise rules.Violation(
+                    f"{n} priority 1, AT Fire: target randomly, R# column {len(targets)}: "
+                    + ", ".join(f"{i}={x}" for i, x in enumerate(targets, 1))
+                    + "; then --target=<vehicle> [MSR 3, CSR 9]"
+                )
+            t = targets[0]
+        if t not in targets:
+            raise rules.Violation(f"{t} not in LOS/range of {n}")
+        st["aktion"] = {
+            "einheit": n,
+            "plan": [make_step("vof", label=f"VOF on {e['karte']} before the action")],
+            "bewegt": False,
+        }
+        st["aktion"]["plan"] += [make_step("fire", ziel=t), make_step("react"), make_step("ende")]
+        st["naechste"] = "US"
+        return [f"{n}: priority 1, AT Fire at {t} [MSR 3]"]
+    for prio, pred, what in (
+        (2, lambda x: x.get("at_waffe") in AT_TEAM_WEAPONS, "Bazooka/RCL team"),
+        (4, lambda x: (combat.ammo(x) or {}).get("typ") == "MG", "LMG/HMG"),
+    ):
+        if prio == 4 and tank_better_cards(s, n)[1]:
+            break  # priority 3 comes first
+        cands = tank_cf_targets(s, n, pred)
+        if not cands:
+            continue
+        if o.get("--erfolg") not in ("ja", "nein"):
+            k = 2 + {"Green": -1, "Veteran": 1}.get(comms.experience(e), 0)
+            raise rules.Violation(
+                f"{n} priority {prio}: Concentrate Fire on a {what} under its VOF ({', '.join(cands)}): draw {k} Action cards, "
+                "Crosshairs = success (2+: Critical Hit); target randomly if several; then --success=yes|no [--unit=<target>] "
+                "[--critical=yes] [MSR 3, 10.5.2 B]"
+            )
+        ze = text_opt(o, "--einheit", "--unit=<target>") or (cands[0] if len(cands) == 1 else None)
+        if o["--erfolg"] == "ja" and ze not in cands:
+            raise rules.Violation(f"--unit=<one of {', '.join(cands)}>")
+        st["aktion"] = {
+            "einheit": n,
+            "plan": [make_step("vof", label=f"VOF on {e['karte']} before the action")],
+            "bewegt": False,
+        }
+        st["aktion"]["plan"] += [
+            make_step("cf", erfolg=o["--erfolg"] == "ja", ziel=ze, kritisch=o.get("--kritisch") == "ja"),
+            make_step("react"),
+            make_step("ende"),
+        ]
+        st["naechste"] = "US"
+        return [f"{n}: priority {prio}, Concentrate Fire action [MSR 3, 10.5.2 B]"]
+    dist, best = tank_better_cards(s, n)
+    if best:
+        k = text_opt(o, "--ziel", "--target=<card>")
+        if not k:
+            if len(best) > 1:
+                cards = sorted(best)
+                raise rules.Violation(
+                    f"{n} priority 3: closest cards with a better C&C value ({dist} card(s) away), choose randomly, R# column "
+                    f"{len(cards)}: "
+                    + ", ".join(f"{i}={x}" for i, x in enumerate(cards, 1))
+                    + "; then --target=<card> [MSR 3]"
+                )
+            k = next(iter(best))
+        if k not in best:
+            raise rules.Violation(f"{k} is not one of the closest better cards: {', '.join(sorted(best))}")
+        path = best[k]
+        st["aktion"] = {
+            "einheit": n,
+            "plan": [make_step("vof", label=f"VOF on {e['karte']} before the action")],
+            "bewegt": False,
+        }
+        st["aktion"]["plan"] += [make_step("tankmove", karte=x) for x in path] + [make_step("ende")]
+        st["naechste"] = "US"
+        return [
+            f"{n}: priority 3, moves toward {k} (route {', '.join(path)}; stops for AT Fire as soon as a US vehicle is in LOS) [MSR 3]"
+        ]
+    finish_shooter(s, n, prot)
+    e["hat_gehandelt"] = True
+    prot.append(f"{n}: no priority applies, stays where it is (BGG 3553563) [MSR 3]")
+    st["naechste"] = "US"
+    return prot
+
+
+def tank_move_step(s, n, step, ak, prot):
+    """L488: one card of a priority-3 move; afterwards the VOF on the new card and Reaction Fire (via do_move), then
+    Move & Fire if a US vehicle came into LOS (MSR 3 note)."""
+    if ak.get("slow"):
+        ak["plan"] = [x for x in ak["plan"] if _legacy_step(x)["art"] != "tankmove"]
+        return
+    do_move(s, n, step["karte"], None, prot)
+    if n not in s["einheiten"]:
+        return
+    targets = vehicle_targets(s, n)
+    if targets:
+        rest = [x for x in ak["plan"] if _legacy_step(x)["art"] not in ("tankmove", "ende")]
+        if len(targets) == 1:
+            ak["plan"] = rest + [make_step("fire", ziel=targets[0]), make_step("react"), make_step("ende")]
+        else:
+            at36(s)["wahl"] = make_item("wahl", schuetze=n, ziele=targets)
+            ak["plan"] = rest + [make_step("ende")]
+        prot.append(f"{n} stops: US vehicle in LOS, Move & Fire [MSR 3 note]")
+
+
 VEHICLE_SUBCOMMANDS = {
     "verkehr": vehicle_traffic,
     "traffic": vehicle_traffic,
@@ -1223,6 +1464,18 @@ def enter_3_6(s, prot):
             if not activated(e):
                 e["status"].append(rules.ACTIVATED)
                 prot.append(f"{n} ({w}) automatically Activated for AT Combat [CSR 7 p.15]")
+    if tank_priorities(s):
+        for n, e in s["einheiten"].items():
+            if e["seite"] == "Feind" and is_vehicle(e) and not activated(e) and not moved_fired(e):
+                e["status"].append(rules.ACTIVATED)
+                prot.append(f"{n} automatically Activated for Vehicle Movement & AT Combat [Naktong CSR 9 p.14]")
+    for n, e in s["einheiten"].items():
+        if e.get("arty_jeep") and passengers(s, n) and not activated(e) and not moved_fired(e):
+            e["status"].append(rules.ACTIVATED)
+            prot.append(
+                f"{n}: {', '.join(passengers(s, n))} on board, automatically Activated for Vehicle Movement "
+                "(exception to 10.8.1) [Normandy CSR 1 p.13]"
+            )
     st["naechste"] = "US" if s.get("typ") != "defensiv" else "Feind"
     if us_actors(s) or enemy_actors(s):
         prot.append(next_hint(s))
@@ -1259,7 +1512,7 @@ def leave_3_6(s, prot):
             state.save_state(
                 s, "; ".join(prot + ["End of 3.6: VOF against vehicles that did not act [10.5.1]"]), "10.5.1 p.72"
             )
-            raise rules.Violation("VOF against vehicles still to resolve: " + describe(s, st["queue"][0]))
+            raise rules.Pending("VOF against vehicles still to resolve: " + describe(s, st["queue"][0]))
     for n, e in s["einheiten"].items():
         if is_vehicle(e) and state.pinned(e) and n not in st["angegriffen"]:
             e["status"].remove(rules.PINNED)

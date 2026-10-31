@@ -19,6 +19,7 @@ paste the first prompt.
 | `tool/fof.py` | command-line entry point; `fof.py help` lists the commands, `fof.py help <command>` shows one |
 | `tool/fof/` | the engine as a package: `rules` (tables), `state`, `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
 | `tests/` | unit tests on a synthetic board (`python3 -m pytest tests`), no game data needed |
+| `tool/zug.py` | one call per game step: probe in a scratch copy, book only if every command is legal, then git commit |
 | `tool/build_rules_index.py` | builds the rule text index from your own rulebook PDF, used by `fof.py rule <no>` |
 | `templates/mission_template.json` | skeleton of a mission setup (fill it from your Mission Book) |
 | `templates/action_cards_template.json` | skeleton of an action card archive (optional, for ":NN" card lookups) |
@@ -34,6 +35,7 @@ paste the first prompt.
 4. **Status on demand.** `fof.py status` prints a full board briefing and writes `<game>/BRIEFING.md`.
    That file is what the AI reads after a context reset.
 5. **Probe, then book.** The AI tests each step in a scratch copy of the game folder first, then books it for real.
+   `tool/zug.py` does both in one call (commands on stdin) and commits the game folder if it is a git repository.
 
 ## Requirements
 - Python 3.9 or newer, no extra packages (pytest only for the tests, ruff only for formatting: `ruff format`, `ruff check`).
@@ -85,13 +87,16 @@ Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c I
 4.2.3a Rally, 4.2.4a Spot, 4.2.4c/4.2.4h Platoon Concentrate Fire/Grenade Attack (--success=<unit>:yes|no,..), 4.2.4d Grenade Attack, 4.2.4i Call for Fire, 4.2.4k Cease Fire, ...).
 
 ## Scope and limits
-- Built and tested on Field Manual 1 (platoon and company courses) and the Normandy campaign missions 1 to 6
+- Built and tested on Field Manual 1 (platoon and company courses) and the complete Normandy campaign, missions 1 to 7
   (offensive missions, night patrols, combat patrols, reattempts, counter attacks, tanks and AT guns, campaign
   experience). Several hundred turns of real play.
+- Korea (Naktong River, Mission 1): building blocks for face-down cards, attempt plans, Human Wave, no prisoners,
+  heat casualties, the Naktong counter attack and enemy tank priorities are in, tested on synthetic boards only.
+  Not yet played at the table.
 - One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
   `CHANGELOG.md` lists the changes.
 - Vehicles and AT combat (chapter 10) cover the WWII rows of the Vehicle and AT Weapons chart as used in Normandy
-  Mission 6. Not implemented: helicopters/air assault, urban combat (13.0), enemy reconstitution (6.5.2).
+  Missions 6 and 7, plus the Korea rows used in Naktong Mission 1 (T-34/85, SU-76M, M26, Quad .50, 57mm and 75mm RCL). Not implemented: helicopters/air assault, urban combat (13.0), enemy reconstitution (6.5.2).
   Other campaigns need their own setup data and may need code for their special rules.
 - Where the rules are unclear the tool uses a documented reading. `fof.py options` lists these, and output marks
   them as `[open Uxx]`. You can switch them in the setup's `optionen`.

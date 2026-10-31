@@ -135,7 +135,7 @@ def objective_status(s):
 
 def unit_text(n, e):
     t = n
-    if state.steps(e) != 1:
+    if state.steps(e) != 1 and not e.get("arty_jeep"):  # L454: the crewless jeep shows no steps
         t += f"({state.steps(e)}St)"
     st = list(e["status"])
     if e["seite"] == "Feind":
@@ -148,8 +148,18 @@ def unit_text(n, e):
         st.append("TARGET OPEN")
     if e.get("cf"):
         st.append(f"CF x{e['cf']}")
+    if e.get("an_bord"):
+        st.append(f"on board the {e['an_bord']}")
     if e.get("funk"):
-        st.append("Radio " + "/".join(g["typ"] + ("(destroyed)" if g.get("zerstoert") else "") for g in e["funk"]))
+        st.append(
+            "Radio "
+            + "/".join(
+                g["typ"]
+                + ("(destroyed)" if g.get("zerstoert") else "")
+                + (f"(mounted in {g['eingebaut']})" if g.get("eingebaut") else "")
+                for g in e["funk"]
+            )
+        )
     if e.get("traegt_casualties"):
         st.append(f"carries {e['traegt_casualties']} Casualty")
     if e.get("indirekt"):
@@ -403,8 +413,18 @@ def campaign_lines(s):
     return z
 
 
+def reveal_lines(s):
+    """L481: face-down cards now in LOS of friendly units (or of the Staging Area before turn 1)."""
+    return [
+        f"Reveal face-down card {k} (LOS from {', '.join(v)}): flip it and enter fof.py terrain {k} <type> [--hill=n if it is a Hill: draw a new card on top] [RULE 5.2 p.34, 2.2.1 p.9]"
+        for k, v in sorted(geometry.reveal_candidates(s).items())
+    ]
+
+
 def print_board(prot, s):
     for p in prot:
+        print(f"{messages.BOARD}: " + p)
+    for p in reveal_lines(s):
         print(f"{messages.BOARD}: " + p)
     for h in dict.fromkeys(s.pop("_hinweise", [])):
         print(f"{messages.NOTE}: " + h)

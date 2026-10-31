@@ -500,11 +500,29 @@ def cmd_mine(s, args):
 
 
 def mine_lock(s):
+    reveal_lock(s)
+    if s.get("hitze_offen"):
+        raise rules.Violation(
+            "First the Heat Casualties draws: "
+            + ", ".join(s["hitze_offen"])
+            + " (fof.py heat <unit> yes|no) [Naktong M1 p.17]"
+        )
     if s.get("minen_checks"):
         raise rules.Violation(
             "First resolve the pending mine checks: "
             + ", ".join(s["minen_checks"])
             + " (fof.py mine <unit> yes|no) [7.9.1 p.54, 8.7.1 p.67]"
+        )
+
+
+def reveal_lock(s):
+    """L481 [RULE 5.2 p.34]: the next step waits until the face-down cards in LOS are flipped (terrain entered)."""
+    open_ = geometry.reveal_candidates(s)
+    if open_:
+        raise rules.Violation(
+            "First reveal the face-down cards in LOS: "
+            + ", ".join(sorted(open_))
+            + " (fof.py terrain <card> <type>) [RULE 5.2 p.34]"
         )
 
 
@@ -680,7 +698,8 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
             "typ": u.get("typ", "Weapons Team"),
             "typname": t,
             "seite": "Feind",
-            "erfahrung": u.get("erfahrung", "Line"),
+            # L477: the attempt plan may set the enemy experience (Naktong M1 p.15: Veteran, Veteran, Line, Green)
+            "erfahrung": s.get("feind_erfahrung_versuch") or u.get("erfahrung", "Line"),
             "karte": place,
             "bereich": cid or "offen",
             "status": [],
@@ -696,6 +715,8 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
             "ziel": None,
             "kein_point_blank": u.get("cover") in rules.STRUCTURES,
         }
+        if pk.get("human_wave"):
+            e["human_wave"] = True  # L487 [RULE 8.14 p.68]
         for f in (
             "munition",
             "letzter_step_werte",
@@ -712,9 +733,16 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
             "rifle_grenades",
             "at_waffe",  # L187: AT weapon (Vehicle and AT Weapons Chart) and Panzerfaust shots (Normandy M6 p.40)
             "panzerfaust",
+            "fahrzeug",  # L488: enemy tank (Naktong M1 package 10)
+            "ambush",
         ):
             if u.get(f) is not None:
                 e[f] = copy.deepcopy(u[f])
+        from . import campaign  # local: campaign imports setup, which needs contact at import time
+
+        _pm = (s.get("paket_munition") or {}).get(campaign.package_ammo_key(e))
+        if _pm is not None and e.get("munition"):  # L477: package ammo per attempt (Naktong M1 p.18)
+            e["munition"]["punkte"] = e["munition"]["start"] = _pm
         if e.get("spotter") or u.get("typ") == "Spotter":
             e["spotter"] = True
             e["missionen"] = (var or {}).get("missionen", 2) - 1  # [BGG E19] the automatic first mission counts
@@ -953,14 +981,22 @@ def pc_contact_v4(s, kid, package, pk, o):
     else:
         units = copy.deepcopy(pk.get("einheiten", []))
     opt_units = [u for u in units if u.get("optional_r")]
-    if opt_units:
+    opt_markers = [
+        mk for mk in pk.get("marker", []) if mk.get("optional_r")
+    ]  # L452: e.g. Sniper 'On R#1/3 also place Mines'
+    if opt_units or opt_markers:
         z = o.get("--zusatz")
+        extra = opt_units[0]["einheit"] if opt_units else opt_markers[0]["typ"]
+        band = (opt_units or opt_markers)[0]["optional_r"]
         if z not in ("ja", "nein"):
             raise rules.Violation(
-                f"Package {package}: extra unit on R# {opt_units[0]['optional_r']} (random number column 2, BGG B4): --extra=yes|no"
+                f"Package {package}: extra {extra} on R# {band} (random number column {band.rsplit('/', 1)[-1] if '/' in band else 2}, BGG B4): --extra=yes|no"
             )
         if z == "nein":
             units = [u for u in units if not u.get("optional_r")]
+            pk = dict(pk, marker=[mk for mk in pk.get("marker", []) if not mk.get("optional_r")])
+        else:
+            prot.append(f"R# {band}: {extra} added [8.3 p.62]")
     # only if available (leader)
     for u in list(units):
         if u.get("nur_wenn_verfuegbar") and in_play_count(s, u["einheit"]) >= state.countermix_count(s, u["einheit"]):
@@ -988,6 +1024,10 @@ def pc_contact_v4(s, kid, package, pk, o):
     var = None
     if pk.get("varianten"):
         vn = o.get("--variante")
+        if vn is None and len(pk["varianten"]) == 1:
+            vn = next(
+                iter(pk["varianten"])
+            )  # L452: a single variant needs no draw (Normandy M7: Incoming only as Mortar)
         if vn not in pk["varianten"]:
             names = list(pk["varianten"])
             raise rules.Violation(
@@ -1069,7 +1109,7 @@ def pc_contact_v4(s, kid, package, pk, o):
     place_list = options.list_option(o, "--platz")
     places = []
     own = [u for u in units if u["platz"] in ("max", "close", "max_los")]
-    if len(set(direction_list)) < len(direction_list):
+    if len(set(direction_list)) < len(direction_list) and not pk.get("human_wave"):
         raise rules.Violation(
             "Duplicate direction: redraw (FM2 p.10, 8.4.3 'Redraw if an invalid Direction is chosen')"
         )

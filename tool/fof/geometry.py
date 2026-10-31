@@ -202,6 +202,34 @@ def los(s, a, b, radio=False, staging_frei=False, ha=0, hb=0):
     return r.ok, r.text
 
 
+def face_down(c):
+    """L481 [RULE 2.2.1 p.9, 5.2 p.34] a card laid face down (mission instructions, e.g. Naktong M1) and not yet revealed."""
+    return bool(c.get("verdeckt"))
+
+
+def reveal_candidates(s):
+    """L481 [RULE 5.2 p.34] 'reveal a hidden card when a friendly non-aircraft unit has LOS to it'; before turn 1 also the
+    cards in LOS of the Staging Area (mission setup, e.g. Naktong M1 p.15). Face-down cards count as elevation 1 with dark
+    borders (BGG 3503051, 3550060). Returns {card: [seen from, ..]} for the cards to flip now."""
+    hidden = [k for k, c in s["karten"].items() if face_down(c)]
+    if not hidden:
+        return {}
+    sources = {}
+    for n, e in s["einheiten"].items():
+        if e.get("seite") == "US" and e.get("karte") in s["karten"] and e.get("typ") != "Aircraft":
+            sources.setdefault(e["karte"], height_bonus(s, e))
+    if state.in_setup(s) or s.get("aufdecken_staging"):
+        for k, c in s["karten"].items():
+            if c.get("staging"):
+                sources.setdefault(k, 0)
+    out = {}
+    for b in hidden:
+        for a, ha in sorted(sources.items()):
+            if a != b and los(s, a, b, staging_frei=True, ha=ha)[0]:
+                out.setdefault(b, []).append(a)
+    return out
+
+
 def in_range(s, e, target):
     lo, hi = state.range_limits(s, e)
     return lo <= distance(s, e["karte"], target) <= hi

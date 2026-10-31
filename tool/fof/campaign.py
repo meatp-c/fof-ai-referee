@@ -530,6 +530,77 @@ def cmd_xp(s, args):
     print("Status now: " + txt)
 
 
+def attempt_plan(s):
+    """L477 [Naktong M1 p.15 'Duration and Visibility']: the plan of the current attempt from the setup (versuch_plan):
+    max_zuege, sicht {turns: {licht, wetter, text}}, feind_erfahrung, paket_munition {HMG|Mortar: points}."""
+    return (s.get("versuch_plan") or {}).get(str(s.get("kampagne", {}).get("versuch", 1))) or {}
+
+
+def _plan_entry(table, turn):
+    for key, v in (table or {}).items():
+        lo, _, hi = key.partition("-")
+        if int(lo) <= turn <= int(hi or lo):
+            return v
+    return None
+
+
+def apply_turn_visibility(s, prot):
+    """L477 [RULE 9.0 p.69 'Each Mission lists the visibility conditions, which may vary per turn']: light and weather of
+    the current turn from the attempt plan; announced when they change (and on turn 1)."""
+    v = _plan_entry(attempt_plan(s).get("sicht"), s["zug"])
+    if v is None:
+        return
+    li, we = v.get("licht", 0), v.get("wetter", 0)
+    if s["zug"] != 1 and (s.get("licht"), s.get("wetter")) == (li, we):
+        return
+    s["licht"], s["wetter"] = li, we
+    geometry.update_visibility(s)
+    prot.append(
+        f"Visibility turn {s['zug']}: {v.get('text') or ''} light {li:+d}, weather {we:+d} = {li + we:+d}"
+        + (" (Limited Visibility, 9.1)" if li + we >= 2 else "")
+        + " [9.0 p.69, mission chart]"
+    )
+
+
+def apply_attempt_plan(s, prot):
+    """L477: turns, enemy experience and package ammo of the attempt; enemy ammo on the board is resupplied to the new
+    values (3.9 step 12); then the visibility of turn 1."""
+    p = attempt_plan(s)
+    if not p:
+        return
+    v = s.get("kampagne", {}).get("versuch", 1)
+    if p.get("max_zuege"):
+        s["max_zuege"] = p["max_zuege"]
+    if p.get("feind_erfahrung"):
+        s["feind_erfahrung_versuch"] = p["feind_erfahrung"]
+    s["paket_munition"] = p.get("paket_munition") or {}
+    for n, e in s["einheiten"].items():
+        key = package_ammo_key(e)
+        if e["seite"] == "Feind" and key in s["paket_munition"] and e.get("munition"):
+            e["munition"]["punkte"] = e["munition"]["start"] = s["paket_munition"][key]
+            prot.append(f"{n}: ammo {s['paket_munition'][key]} for attempt {v} (3.9 step 12)")
+    prot.append(
+        f"Attempt {v}: {s['max_zuege']} turns"
+        + (f", new enemy units {p['feind_erfahrung']}" if p.get("feind_erfahrung") else "")
+        + (
+            ", package ammo " + ", ".join(f"{a} {b}" for a, b in s["paket_munition"].items())
+            if s["paket_munition"]
+            else ""
+        )
+        + " [mission chart]"
+    )
+    apply_turn_visibility(s, prot)
+
+
+def package_ammo_key(e):
+    """L477: which per-attempt package ammo line applies to an enemy unit (HMG Teams, Mortar Teams)."""
+    if state.is_mortar(e):
+        return "Mortar"
+    if "HMG" in (e.get("typname") or "") or e.get("tripod"):
+        return "HMG"
+    return None
+
+
 def cmd_reattempt(s, args):
     """[RULE 3.9 p.17/18] Reattempt preparation, steps 1-14: 'reattempt' resets the board, 'reattempt done' starts it."""
     if args and args[0] == "fertig":
@@ -654,6 +725,12 @@ def reattempt_start(s):
         replace_patrol_markers(s, prot)
     k["versuch"] = k.get("versuch", 1) + 1
     s["zug"], s["phase"] = 1, state.sop(s)[0][0]
+    s.pop("befestigung_gesetzt", None)
+    apply_attempt_plan(s, prot)  # L477
+    if s.get("befestigung_zwischen_versuchen"):
+        prot.append(
+            "Fortify: objective fortify <secured card> foxholes (2 Foxholes) and objective fortify <other secured card> deepbunker [Naktong M1 p.15]"
+        )
     s["reattempt_setup"] = True
     s.pop("missionsende", None)
     s["aktiver_hq"] = None
@@ -690,6 +767,15 @@ def remove_leaving_units(s, prot):
         if e["seite"] == "Feind" and e["typ"] in ("Paralyzed Team", "Litter Team"):
             del s["einheiten"][n]  # reattempt reset (3.9 step 6), not a removal from play
             prot.append(f"{n} removed (step 6)")
+        if e.get("nur_versuch") and e["seite"] == "US":
+            # L485: an event unit 'remains until the end of the current Attempt' (Naktong M1 p.17); it can come again
+            d = copy.deepcopy(e)
+            d.update(karte=None, status=[], ziel=None, bereich="offen")
+            d.pop("nur_versuch")
+            s.setdefault("ereignis_vorrat", {}).setdefault(e["nur_versuch"], {})[n] = d
+            del s["einheiten"][n]
+            prot.append(f"{n} leaves at the end of the attempt (event unit) [Naktong M1 p.17]")
+            continue
         if e.get("ebene") == "BN" and e["seite"] == "US":
             del s["einheiten"][n]  # the visiting BN HQ goes back off-map (it can return), not a removal from play
             s["kommandos"].pop(n, None)

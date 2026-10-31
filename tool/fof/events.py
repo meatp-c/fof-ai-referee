@@ -21,6 +21,35 @@ def find_event(s, item_list, r):
     return None
 
 
+def cmd_heat(s, args):
+    """L483 [Naktong M1 p.17] heat <unit> yes|no: the Heat Casualties draw (R#1/4) of a unit just marked Exposed."""
+    if len(args) < 2 or args[1] not in ("ja", "nein"):
+        raise rules.Violation('heat "<unit>" yes|no')
+    n = args[0]
+    if n not in (s.get("hitze_offen") or []):
+        raise rules.Violation(f"No Heat Casualties draw open for {n}")
+    s["hitze_offen"].remove(n)
+    if not s["hitze_offen"]:
+        s.pop("hitze_offen")
+    prot = []
+    if args[1] == "ja" and n in s["einheiten"]:
+        combat.reduce_unit(s, n, "C", prot)
+        prot.insert(0, f"Heat Casualties: {n} loses one step (R#1/4) [Naktong M1 p.17]")
+    else:
+        prot.append(f"Heat Casualties: {n} without loss")
+    state.save_state(s, "; ".join(prot), "Naktong M1 p.17")
+    briefing.print_board(prot, s)
+
+
+def planned_counter_attack(s):
+    """L484: (attempt, turn) if the attempt plan has a planned counter attack in this turn (versuch_plan.geplanter_gegenangriff)."""
+    p = campaign.attempt_plan(s)
+    t = p.get("geplanter_gegenangriff")
+    if t and t == s["zug"]:
+        return (s.get("kampagne", {}).get("versuch", 1), t)
+    return None
+
+
 def bn_leader(s):
     return [n for n, e in s["einheiten"].items() if e.get("ebene") == "BN" and e["seite"] == "US"]
 
@@ -43,7 +72,18 @@ def cmd_event(s, args):
     nr, icon = args[0], args[1]
     o = options.parse_opts(args[2:])
     prot = []
-    if icon == "nein":
+    planned = planned_counter_attack(s)
+    if not friend and planned:
+        # L484 [Naktong M1 MSR 1 p.19] 'do not draw for an Enemy Higher HQ Event on Turn 7; it is automatically a Counter Attack'
+        ev = next((x for x in tab["feind"] if x["id"] == "counter_attack"), None)
+        if ev is None:
+            raise rules.Violation("Planned Counter Attack, but the enemy event table has no counter_attack entry")
+        prot.append(f"No draw: Planned Counter Attack in attempt {planned[0]}, turn {planned[1]} [MSR 1]")
+        enemy_event(s, ev, o, prot)
+        icon = "geplant"
+    if icon == "geplant":
+        pass
+    elif icon == "nein":
         prot.append(
             f"Action card #{nr} without HQ radio symbol: no {'Friendly' if friend else 'Enemy'} Higher HQ Event"
         )
@@ -216,6 +256,36 @@ def friendly_event(s, ev, o, prot):
         prot.append(
             f"Mandatory (if Commands suffice): at least one unit toward Route Point {idx + 1} ({s['ereignis_route']['ziel']}); fulfilled = 1 Experience Point [Normandy M3 p.26]"
         )
+    elif i == "heat":
+        # L483 [Naktong M1 p.17] 'Until the end of next turn, each time a unit is marked Exposed, draw a card; on R#1/4,
+        # remove 1 step from the unit as a casualty. Ignore during Rain.'
+        if (s.get("wetter") or 0) >= 2:
+            prot.append("Heat Casualties: ignored during Rain [Naktong M1 p.17]")
+            return
+        s["hitze"] = {"bis_zug": s["zug"] + 1}
+        prot.append(
+            f"Heat Casualties through turn {s['zug'] + 1}: every time a friendly unit is marked Exposed, draw a card, R#1/4 = 1 step Casualty (fof.py heat <unit> yes|no) [Naktong M1 p.17]"
+        )
+    elif ev.get("vorrat"):
+        # L485 [Naktong M1 p.17] '.50 cal HMG Team: Place a .50 cal HMG team with 6 ammo in the Staging Area under the
+        # command of the HMG HQ. It remains until the end of the current Attempt'
+        pool = s.get("ereignis_vorrat", {}).get(ev["vorrat"], {})
+        if not pool:
+            prot.append(f"{ev['text'].split(':')[0]}: unit already in play or not available, event lapses")
+            return
+        k = o.get("--platz")
+        if not k or not state.card(s, k).get(ev.get("platz", "staging")):
+            raise rules.Violation(f"--place=<card of the Staging Area> [{ev.get('quelle', 'mission event')}]")
+        for n, d in pool.items():
+            e = copy.deepcopy(d)
+            e.update(karte=k, bereich="offen", status=[], ziel=None, nur_versuch=ev["vorrat"])
+            s["einheiten"][n] = e
+            prot.append(
+                f"{n} enters on {k}"
+                + (f" ({e['munition']['punkte']} {e['munition']['typ']} ammo)" if e.get("munition") else "")
+            )
+        s["ereignis_vorrat"][ev["vorrat"]] = {}
+        fire.open_fire(s, prot)
     elif i == "ammo_resupply":
         s["ereignis_munition"] = s["zug"]
         prot.append(
@@ -239,13 +309,20 @@ def enemy_event(s, ev, o, prot):
         test = {
             "displace_mortars": lambda e: state.is_mortar(e),
             "displace_leaders": lambda e: bool(e.get("leader")),
-            "displace_hmgs": lambda e: e.get("typname") == "German HMG",
+            "displace_hmgs": lambda e: "HMG" in (e.get("typname") or ""),  # L486: German HMG, NKPA HMG
         }[i]
         for n, e in list(s["einheiten"].items()):
             if e["seite"] == "Feind" and e["karte"] in without_us and test(e):
                 enemy.remove_enemy(s, n, prot, reason=ev["text"].split(":")[0])
         if len(prot) == 1:
             prot.append("no affected unit on a card without US troops")
+    elif i == "displace_tanks":
+        # L486 [Naktong M1 p.18] 'Displace Tanks: Remove all tanks.'
+        for n, e in list(s["einheiten"].items()):
+            if e["seite"] == "Feind" and e.get("fahrzeug"):
+                enemy.remove_enemy(s, n, prot, reason="Displace Tanks")
+        if len(prot) == 1:
+            prot.append("no enemy tank on the map")
     elif i == "rally":
         for n, e in s["einheiten"].items():
             if e["seite"] != "Feind" or not (state.pinned(e) or state.is_lat(e) or state.fire_team_side(e)):
@@ -328,19 +405,40 @@ def enemy_event(s, ev, o, prot):
                 and (state.option(s, "U17_gegenangriff_staging") or not state.card(s, e["karte"]).get("staging"))
             }
         )
-        if ga.get("modus") == "m4":
-            # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
-            # 'unrevealed PC' = a PC marker still on the board: its package is not drawn until a friendly unit resolves
-            # it [RULE 8.2.4]; the '?' side and the letter side both count (L279, review M24: the dead pc_aufgedeckt
-            # clause that nothing wrote is gone, the behaviour is unchanged)
-            unrevealed = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
+        if ga.get("modus") == "naktong":
+            # L484 [Naktong CSR 5 p.13] PC A on all US-occupied cards that are a) adjacent to a card with a PC marker
+            # (BGG 3516351: any PC marker), b) adjacent to a card not occupied by US forces, or c) in the top row; all cards
+            # are determined first and get their marker at the same time (BGG 3542710)
+            pcs = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
+            occupied = {e["karte"] for e in s["einheiten"].values() if e["seite"] == "US" and e.get("karte")}
+            top = state.top_row(s)
             us_cards = [
                 kk
                 for kk in us_cards
-                if state.card(s, kk)["reihe"]
-                == ga.get("reihe", 4)  # L189: last mission row from the setup (M6: card row 6)
-                or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
+                if state.card(s, kk)["reihe"] == top
+                or any(geometry.distance(s, kk, u) == 1 for u in pcs)
+                or any(
+                    geometry.distance(s, kk, u) == 1 and u not in occupied and not state.card(s, u).get("staging")
+                    for u in s["karten"]
+                )
             ]
+            ga = dict(ga, modus="m4")  # the marker placement below is the same as in the M4 mode
+            card_rule = "naktong"
+        else:
+            card_rule = "m4"
+        if ga.get("modus") == "m4":
+            if card_rule == "m4":
+                # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
+                # 'unrevealed PC' = a PC marker still on the board: its package is not drawn until a friendly unit
+                # resolves it [RULE 8.2.4]; the '?' side and the letter side both count (L279, review M24)
+                unrevealed = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
+                us_cards = [
+                    kk
+                    for kk in us_cards
+                    if state.card(s, kk)["reihe"]
+                    == ga.get("reihe", 4)  # L189: last mission row from the setup (M6: card row 6)
+                    or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
+                ]
             replaced = []
             for kk in us_cards:
                 cc = s["karten"][kk]
@@ -361,7 +459,12 @@ def enemy_event(s, ev, o, prot):
                 )
             until = start_counter_attack(s, ga)
             prot.append(
-                f"PC marker A on {', '.join(us_cards) or 'no card'} (US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]"
+                f"PC marker A on {', '.join(us_cards) or 'no card'} "
+                + (
+                    "(US cards next to a PC marker, next to a card without US troops, or on the top row) [Naktong CSR 5 p.13]"
+                    if card_rule == "naktong"
+                    else "(US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]"
+                )
             )
             prot.append(
                 f"enemy tactic Offensive Assault up to and including turn {until}; 'Counter Attack Ends' marker on turn {until + 1}; PC A with the Counter Attack list [MSR 4]"

@@ -8,6 +8,9 @@ import contextlib
 from . import geometry, rules, state
 
 
+RCL_WEAPONS = ("57mm RCL", "75mm RCL")  # L480
+
+
 def can_fire(e):
     if e.get("deep_bunker") and e.get("bereich") == e["deep_bunker"]:
         return False  # [CSR 5 p.14] Deep Bunker: units inside place no VOF
@@ -15,6 +18,8 @@ def can_fire(e):
         return False  # [RULE 7.3.1 p.53] no fire with Exposed; [RULE 7.3.2 p.53] Indirect Lay replaces Direct Lay
     if e.get("tripod") and rules.EXPOSED in e["status"] and not state.fire_team_side(e):
         return False  # [RULE 7.2.1 p.51] tripod MG does not fire with an Exposed marker
+    if e.get("at_waffe") in RCL_WEAPONS and e.get("vof_rating") == "H" and rules.EXPOSED in e["status"]:
+        return False  # L480 [RULE 7.4 p.54] H VOF rocket launchers/RCL 'cannot fire at all when marked with an Exposed marker'
     if e.get("vof_rating") == "G" and not state.fire_team_side(e) and not e.get("out_of_ammo"):
         return False  # [RULE 7.3.2 p.53, 6.3.6 p.45] G! units fire only via Grenade Attack (Mortar Team: own PDF, 'nur_pdf')
     return bool(e.get("vof_rating")) and e["typ"] not in ("Litter Team", "Paralyzed Team", "Runner")
@@ -256,6 +261,11 @@ def update_activity(s):
 
 def fire_position_forbidden(s, e):
     """Reason why a unit may not fire at all from its card, otherwise None."""
+    if e.get("at_waffe") in RCL_WEAPONS:
+        cv = geometry.cover_marker(s, e)
+        if cv and cv["typ"] in rules.NO_FIRE_FROM_COVER:
+            # L480 [RULE 7.4 p.54] 'No rocket launcher or recoilless rifle may fire from Building, Bunker, Cave or Pillbox cover'
+            return "Rocket launchers/RCL do not fire from Building/Bunker/Cave/Pillbox [RULE 7.4 p.54]"
     if state.is_mortar(e):
         c = state.card(s, e["karte"])
         if "Woods" in c.get("terrain", "") or c.get("moerser_verbot"):
@@ -373,6 +383,10 @@ def open_fire(s, prot, only=None):
         if not candidate:
             e.pop("ziel_offen", None)
             continue
+        if e["karte"] in candidate:
+            # L472 [RULE 6.2.1b p.42] "If units from both sides occupy a card, they fire at each other": Point Blank first,
+            # for both sides (the US 'closest card' rule gave this already; the enemy 'most steps' rule did not)
+            candidate = [e["karte"]]
         # L122 [RULE 6.1.1 p.39] "If a unit enters a card where there is firing already going on ... the entering unit joins in the existing fire"
         existing = sorted(
             {
@@ -452,6 +466,29 @@ def cease_fire(e):
         e.pop(k, None)
 
 
+def pdf_left_behind(s, n, e, origin):
+    """L461: what happens to the PDF marker the mover leaves on its origin card: it stays while another unit there still
+    fires at the same target, otherwise it is removed (or turned back to the single arrow if the fire was mutual)."""
+    target = e.get("ziel")
+    if origin is None or target is None or target == origin:
+        return " (adjust PDF/VOF)"
+    others = [
+        m
+        for m, x in s["einheiten"].items()
+        if m != n and x["karte"] == origin and x["seite"] == e["seite"] and x.get("ziel") == target and is_firing(x)
+    ]
+    if others:
+        return f"; PDF marker {origin} to {target} stays ({', '.join(others)} still fire{'s' if len(others) == 1 else ''} there)"
+    back = [
+        m
+        for m, x in s["einheiten"].items()
+        if x["karte"] == target and x["seite"] != e["seite"] and x.get("ziel") == origin and is_firing(x)
+    ]
+    if back:
+        return f"; PDF {origin} to {target}: turn the marker to the single arrow from {target} ({', '.join(back)} still fire{'s' if len(back) == 1 else ''} at {origin})"
+    return f"; remove PDF marker {origin} to {target} (nobody else on {origin} fires there)"
+
+
 def fire_after_move(s, n, prot, origin=None, open_all=True):
     """6.1.2: movement to another card = Cease Fire, then 6.1.1 again; firing opponents on the new card shift to Point Blank.
     origin: the card the unit came from; 6.3.4 'fire follows' only applies to opponents on that card (L226, review M34).
@@ -462,7 +499,7 @@ def fire_after_move(s, n, prot, origin=None, open_all=True):
     if carried:
         prot.append(f"{n}: these markers move along: {', '.join(carried)}")  # L109
     if e.get("ziel") is not None:
-        prot.append(f"{n} ceases fire due to the movement (adjust PDF/VOF) [6.1.2]")
+        prot.append(f"{n} ceases fire due to the movement{pdf_left_behind(s, n, e, origin)} [6.1.2]")
         cease_fire(e)
     # [RULE 8.5 p.65] "A card can never contain both Spotted and Unspotted enemy units" (L108)
     if e["seite"] == "Feind":

@@ -6,6 +6,7 @@ can refer to them and a different output language only has to change this module
 
 ALLOWED = "ALLOWED"  # an order or action passed every check and was booked
 VIOLATION = "VIOLATION"  # refused, nothing saved
+OPEN = "OPEN"  # saved, but the step waits for a draw before it can go on (L475)
 BOARD = "Board"  # a marker or counter to place, flip or remove on the physical board
 NOTE = "Note"  # non-binding hint
 CHECKSTAMP = "CHECKSTAMP"  # consistency line that closes every command

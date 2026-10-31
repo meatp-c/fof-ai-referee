@@ -251,7 +251,7 @@ def new_lat(e, lat, origin):
         "erfahrung": rules.LAT_EXPERIENCE[lat],
         "karte": e["karte"],
         "bereich": e.get("bereich", "offen"),
-        "status": [rules.PINNED],
+        "status": [] if e.get("human_wave") else [rules.PINNED],  # L487 [8.14] Human Waves are never Pinned
         "steps": 1,
         "herkunft": origin,
         "ziel": None,
@@ -260,6 +260,7 @@ def new_lat(e, lat, origin):
         "spotted": e.get("spotted", True),
         "typname": lat,
         **({"deep_bunker": e["deep_bunker"]} if e.get("deep_bunker") else {}),
+        **({"human_wave": True} if e.get("human_wave") else {}),  # L487 [8.14] the hit rule stays with the teams
     }  # [CSR 5 p.14] LATs in a Deep Bunker also have no VOF
 
 
@@ -325,6 +326,16 @@ def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None, c
     e = s["einheiten"][name]
     if state.is_hq(e) and e["seite"] == "US":
         s.setdefault("rfp_daten", {})[name] = {k: e.get(k) for k in ("ebene", "platoon", "ft_vof")}  # for 6.5.2
+    for m, x in s["einheiten"].items():  # L454: embarked units stay on the card when their vehicle leaves play
+        if x.get("an_bord") == name:
+            x.pop("an_bord")
+            prot.append(f"{m} dismounts on {e.get('karte')} ({name} is gone) [10.8.1, open reading]")
+    mounted = [g for g in e.get("funk", []) if g.get("eingebaut")]
+    if mounted:  # L454: a radio mounted in a vehicle does not drop onto the card as a manpack (CSR 1)
+        e["funk"] = [g for g in e["funk"] if not g.get("eingebaut")]
+        jeep = s["einheiten"].get(mounted[0]["eingebaut"])
+        if jeep is not None:
+            jeep.setdefault("funk", []).extend(mounted)
     if not captured:
         drop_assets(s, e, name, prot, as_casualty, successor)
     if not (
@@ -573,7 +584,18 @@ def cmd_hit(s, args):
     if e.pop("crew_hit_offen", None) and result != "HIT":
         raise rules.Violation(f"{name} is a vehicle crew team and takes a HIT [10.7 Knocked Out]")  # L187
     prot = []
-    if result == "MISS":
+    hw = bool(e.get("human_wave"))
+    if hw and result == "PIN":
+        # L487 [RULE 8.14 p.68] 'Human Waves are never Pinned'
+        result = "MISS"
+        prot.append(f"{name} is a Human Wave unit: never Pinned, PIN has no effect [8.14 p.68]")
+    if hw and result == "HIT" and effect:
+        # L487 [RULE 8.14 p.68] 'All Hit results are treated as C (Casualty). (For example a result of "PL" should be read as "CC".)'
+        prot.append(f"{name} is a Human Wave unit: {effect} counts as {'C' * len(effect)} [8.14 p.68]")
+        effect = "C" * len(effect)
+    if result == "MISS" and hw:
+        prot.append(f"{name}: no effect")
+    elif result == "MISS":
         if state.pinned(e):
             e["status"].remove(rules.PINNED)
             prot.append(f"{name}: MISS, remove Pinned marker [6.4.2A]")
@@ -627,6 +649,8 @@ def cmd_hit(s, args):
                     f"no 1-step side, last step becomes a generic {lat2} ({new2}); can be reconstituted from 2-3 teams [6.4.3 p.47, FM1 p.31]",
                     successor=new2,
                 )
+            elif e.get("human_wave"):
+                prot.append(f"{name} stays unpinned (Human Wave) [8.14 p.68]")
             else:
                 commands.mark(e, rules.PINNED)
                 prot.append(f"{name} Pinned (every HIT pins) [6.4.3]")
@@ -688,6 +712,10 @@ def out_of_ammo(s, n, e, prot):
     (VOF S, range Close). [RULE 7.18.1D p.60] SG! unit with rockets only loses the Close Range Grenade Attacks."""
     e.pop("munition_leer", None)
     m = ammo(e)
+    if e["seite"] == "Feind" and e.get("fahrzeug"):
+        # L488 (Stead BGG 3579993): 'An out of ammo tank is immediately removed from play'
+        enemy.remove_enemy(s, n, prot, reason="out of ammo, the tank leaves (BGG 3579993)")
+        return
     if m and m["typ"] == "RKT" and e.get("grenade_ranged") and e.get("vof_rating") == "S":
         e["grenade_ranged"] = False
         e["rkt_leer"] = True
@@ -968,6 +996,16 @@ def cmd_capture(s, args):
             f"{n_cas} enemy Casualties captured ({ge['karte']})",
             prot,
         )
+    # L468 [RULE 6.1.2, 6.3.3 p.43]: fire on the card whose only target were the prisoners: Cease Fire, then 6.1.1 anew
+    kid, side = ge["karte"], state.opponent_of_side(ge["seite"])
+    if not state.valid_target(s, kid, side):
+        for n, e in s["einheiten"].items():
+            if e["seite"] == side and fire.is_firing(e) and fire.effective_fire_target(s, n) == kid:
+                fire.cease_fire(e)
+                prot.append(
+                    f"{n}: no target left on {kid} after the capture: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
+                )
+        fire.open_fire(s, prot)
     m = fire.update_activity(s)
     if m:
         prot.append(m)
