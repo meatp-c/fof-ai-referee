@@ -90,9 +90,9 @@ Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c I
 - Built and tested on Field Manual 1 (platoon and company courses) and the complete Normandy campaign, missions 1 to 7
   (offensive missions, night patrols, combat patrols, reattempts, counter attacks, tanks and AT guns, campaign
   experience). Several hundred turns of real play.
-- Korea (Naktong River, Mission 1): building blocks for face-down cards, attempt plans, Human Wave, no prisoners,
-  heat casualties, the Naktong counter attack and enemy tank priorities are in, tested on synthetic boards only.
-  Not yet played at the table.
+- Korea (Naktong River, Mission 1): face-down cards, attempt plans, Human Wave, no prisoners, heat casualties, the
+  Naktong counter attack and enemy tank priorities, played at the table through attempt 1 and most of attempt 2
+  (including the planned counter attack with Human Waves and a T-34/85).
 - One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
   `CHANGELOG.md` lists the changes.
 - Vehicles and AT combat (chapter 10) cover the WWII rows of the Vehicle and AT Weapons chart as used in Normandy

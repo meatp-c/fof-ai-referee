@@ -3,14 +3,23 @@
 from . import briefing, geometry, rules, state
 
 
-def radios_of(e, type_=None, net=None):
+def radios_of(e, type_=None, net=None, s=None):
     """Radios carried by the unit (setup field 'funk': [{typ, netz}]); destroyed ones do not count. A radio mounted in a
-    vehicle (eingebaut, Arty Jeep CSR 1) only works while the unit is on board of that vehicle (L454)."""
+    vehicle (eingebaut, Arty Jeep CSR 1) works while the unit is on board of that vehicle (L454) or, given the game
+    state s, while the unit is on the same card as the vehicle (L526, Stead BGG 3747382: 'it has a phone line that the
+    FO takes with him when he gets off')."""
+
+    def mounted_ok(g):
+        if not g.get("eingebaut") or e.get("an_bord") == g["eingebaut"]:
+            return True
+        v = (s or {}).get("einheiten", {}).get(g["eingebaut"])
+        return bool(v) and v.get("karte") == e.get("karte") and e.get("karte") is not None
+
     return [
         g
         for g in e.get("funk", [])
         if not g.get("zerstoert")
-        and (not g.get("eingebaut") or e.get("an_bord") == g["eingebaut"])
+        and mounted_ok(g)
         and (type_ is None or g["typ"] == type_)
         and (net is None or g["netz"] == net)
     ]

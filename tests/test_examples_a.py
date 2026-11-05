@@ -95,7 +95,7 @@ def test_sniper_example_2nd_plt_hq_commands_and_orders(board, quiet):
     assert "Veteran +1" in s["protokoll"][-1]["text"] and "-3" in s["protokoll"][-1]["text"]
 
     # 1: ein Command, 1/2 in die Gully (Move to Adjacent Card)
-    commands.cmd_order(s, ["2nd PLT HQ", "1/2", "4.2.2a", "--target=21"])
+    commands.cmd_order(s, ["2nd PLT HQ", "1/2", "4.2.2a", "--target=21", "--plain=yes"])
     half = s["einheiten"]["1/2"]
     assert half["karte"] == "21" and "Exposed" in half["status"] and half["ziel"] == "32"  # PDF Gully zum Sniper
     assert fire.crossfire(s, "32", "Feind") is True  # Feuer aus zwei Karten: Crossfire-Marker auf dem Sniper

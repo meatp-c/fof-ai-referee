@@ -458,6 +458,44 @@ def _mortar_section(s, e):
     return None
 
 
+def last_step_conversion(s, name, prot, pin=True):
+    """After a step loss: a Mortar Section's last step becomes the final Mortar Team; a unit without a 1-step side
+    (squads) turns its last step into the generic team of 'letzter_step' [6.4.3 p.47]. True if one of them applied.
+    L499: shared by Combat Effects and Heat Casualties (Naktong M1)."""
+    e = s["einheiten"][name]
+    if breakdown_step(s, name, None, prot):
+        return True  # Mortar Section: the last step became the final Mortar Team
+    if not (state.steps(e) == 1 and e.get("letzter_step") and not state.is_lat(e)):
+        return False
+    lat2 = e["letzter_step"]
+    new2 = commands.new_name(s, lat2)
+    s["einheiten"][new2] = new_lat(e, lat2, name)
+    if not pin and rules.PINNED not in e["status"]:
+        # L500: a step lost outside combat (Heat Casualties) is no HIT: the team takes over the squad's Pinned state only
+        s["einheiten"][new2]["status"] = [m for m in s["einheiten"][new2]["status"] if m != rules.PINNED]
+    if e.get("letzter_step_werte"):
+        s["einheiten"][new2].update(e["letzter_step_werte"])  # Normandy p.48: A squad ends as an A-rated Fire Team
+        if e.get("munition"):
+            s["einheiten"][new2]["munition"] = copy.deepcopy(e["munition"])
+            # L177 [RULE 7.18.2 p.61]: the last ammo point fired this turn passes its Out of Ammo state to the team
+            for _k in ("munition_leer", "out_of_ammo"):
+                if e.get(_k):
+                    s["einheiten"][new2][_k] = True
+            if not e["munition"].get("punkte") and not e.get("out_of_ammo"):
+                s["einheiten"][new2]["munition_leer"] = True
+        prot.append(
+            f"{new2}: {' • '.join(str(v) for v in e['letzter_step_werte'].values()) if isinstance(e['letzter_step_werte'], dict) else e['letzter_step_werte']} with the remaining ammo [Normandy p.48, 7.18.1B]"
+        )
+    remove_from_play(
+        s,
+        name,
+        prot,
+        f"no 1-step side, last step becomes a generic {lat2} ({new2}); can be reconstituted from 2-3 teams [6.4.3 p.47, FM1 p.31]",
+        successor=new2,
+    )
+    return True
+
+
 def breakdown_step(s, name, code, prot):
     """Mortar Section breakdown, the one copy for reduce_unit and cmd_hit (review Struktur 9). Returns True if handled.
     code F/A: the hit step of a multi-step section becomes a named 1-step Mortar Team on its Fire Team side
@@ -621,34 +659,8 @@ def cmd_hit(s, args):
                 reduce_unit(s, name, code, prot)
         if name in s["einheiten"]:
             e = s["einheiten"][name]
-            if breakdown_step(s, name, None, prot):
-                pass  # Mortar Section: the last step became the final Mortar Team
-            elif state.steps(e) == 1 and e.get("letzter_step") and not state.is_lat(e):
-                lat2 = e["letzter_step"]
-                new2 = commands.new_name(s, lat2)
-                s["einheiten"][new2] = new_lat(e, lat2, name)
-                if e.get("letzter_step_werte"):
-                    s["einheiten"][new2].update(
-                        e["letzter_step_werte"]
-                    )  # Normandy p.48: A squad ends as an A-rated Fire Team
-                    if e.get("munition"):
-                        s["einheiten"][new2]["munition"] = copy.deepcopy(e["munition"])
-                        # L177 [RULE 7.18.2 p.61]: the last ammo point fired this turn passes its Out of Ammo state to the team
-                        for _k in ("munition_leer", "out_of_ammo"):
-                            if e.get(_k):
-                                s["einheiten"][new2][_k] = True
-                        if not e["munition"].get("punkte") and not e.get("out_of_ammo"):
-                            s["einheiten"][new2]["munition_leer"] = True
-                    prot.append(
-                        f"{new2}: {' • '.join(str(v) for v in e['letzter_step_werte'].values()) if isinstance(e['letzter_step_werte'], dict) else e['letzter_step_werte']} with the remaining ammo [Normandy p.48, 7.18.1B]"
-                    )
-                remove_from_play(
-                    s,
-                    name,
-                    prot,
-                    f"no 1-step side, last step becomes a generic {lat2} ({new2}); can be reconstituted from 2-3 teams [6.4.3 p.47, FM1 p.31]",
-                    successor=new2,
-                )
+            if last_step_conversion(s, name, prot):
+                pass  # L499
             elif e.get("human_wave"):
                 prot.append(f"{name} stays unpinned (Human Wave) [8.14 p.68]")
             else:

@@ -37,8 +37,12 @@ def series_rules(s):
 
 def under_fire(s, e):
     """[PLAYER AID Key 'Under Fire'] a VOF on the card without unactivated Mines and Pending (BGG E35); a mine hit counts
-    as an active VOF."""
-    return fire.vof_against(s, e["karte"], "Feind", ignore_mines=True) is not None or bool(e.get("mine_hit"))
+    as an active VOF. L510: a Grenade VOF marker on the unit (7.10, placed on the target, 6.2.1c) is an active VOF too."""
+    return (
+        fire.vof_against(s, e["karte"], "Feind", ignore_mines=True) is not None
+        or bool(e.get("mine_hit"))
+        or bool(e.get("grenade"))
+    )
 
 
 def fire_from_other_direction(s, kid, own_target):
@@ -378,6 +382,13 @@ class _Situation:
         return fire.is_firing(self.e)
 
     @functools.cached_property
+    def target_on_pdf(self):
+        """L517 [Enemy Activity Chart Z5 'has a valid target along its PDF'] firing at a card that still holds a visible
+        opponent (an emptied card during the turn is no valid target; Cease Fire follows in 3.8)."""
+        z = self.e.get("ziel")
+        return self.firing and bool(z) and bool(state.valid_target(self.s, z, self.e["seite"]))
+
+    @functools.cached_property
     def pinned(self):
         return state.pinned(self.e)
 
@@ -413,7 +424,9 @@ class _Situation:
     @functools.cached_property
     def quiet(self):
         """Z4: not under fire, no LOS to opponents, not firing."""
-        return not self.under_fire and not self.has_los and not self.firing
+        return (
+            not self.under_fire and not self.has_los and not self.target_on_pdf
+        )  # L517: fire at an emptied card does not count
 
     @functools.cached_property
     def casualty_in_los(self):
@@ -514,7 +527,7 @@ DEFENSIVE_ROWS = (
     ("Z4_fm1", lambda c: c.quiet and c.s.get("sonderregeln", {}).get("remove_pc_no_action")),
     ("Z4_u1", lambda c: c.quiet and "optionen" in c.s and state.option(c.s, "U1_remove_pc_no_action")),
     (ROW_Z4, lambda c: c.quiet),
-    ("Z5", lambda c: not c.under_fire and c.firing),
+    ("Z5", lambda c: not c.under_fire and c.target_on_pdf),
     (ROW_Z6, lambda c: c.under_fire and not c.cover),
     ("Z7", lambda c: c.under_fire and c.firing and fire_from_other_direction(c.s, c.kid, c.e["ziel"])),
     (
@@ -875,7 +888,8 @@ def _enemy_fall_back(s, ctx):
         if not best and restricted_mover(ctx.e):
             raise rules.Violation(
                 f"Fall Back of {ctx.n}: no adjacent card towards the enemy edge without VOF (Pinned/Paralyzed/Litter, 4.2.5, E90): "
-                f'no movement, book fof.py enemyaction "{ctx.n}" "No Action" [RULE 4.2.5 p.26, 8.6.1C p.66]'
+                f"no movement possible: draw the activity R# again and book that result (L515, Stead BGG 3514510 "
+                f"'Redraw if a move isn't possible') [RULE 4.2.5 p.26, 8.6.1C p.66]"
             )
         if best and target not in best:
             raise rules.Violation(
@@ -1051,7 +1065,8 @@ def _enemy_grenade_concentrate(s, ctx):
         and (ctx.e.get("vof_rating") == "G" or ctx.e.get("grenade_ranged"))
     ):
         combat.ammo_use(s, ctx.n, ctx.e, 1, "Grenade Attack at range", ctx.prot)
-    if state.is_v4(s) and ctx.o.get("--jam") == "ja" and not grenade_pb and commands.jam_prone(ctx.e):
+    jammed = state.is_v4(s) and ctx.o.get("--jam") == "ja" and not grenade_pb and commands.jam_prone(ctx.e)
+    if jammed:
         commands.jam(s, ctx.n, ctx.prot)
         ctx.o["--erfolg"] = "nein"
     cv = geometry.cover_marker(s, ctx.e)
@@ -1083,6 +1098,11 @@ def _enemy_grenade_concentrate(s, ctx):
         commands.grenade_back_notes(
             s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
         )
+    elif grenade_hit and not jammed:
+        # L513 [RULE 7.10.4 p.55 'If a Grenade Attack fails, place a Grenade Miss Modifier marker on the target card'] also
+        # for a ranged enemy Grenade Attack (G!, mortar, rifle grenade); not after a Jam (L246)
+        ctx.prot.append(f"{ctx.n}: attempt failed")
+        ctx.prot.append(commands.place_grenade_miss(s, zk))
     else:
         ctx.prot.append(f"{ctx.n}: attempt failed")
 

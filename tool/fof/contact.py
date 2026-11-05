@@ -105,7 +105,10 @@ def cmd_pc(s, args):
     if args and args[0] in ("aufdecken", "setzen") and cmd_pc_v4(s, args):
         return
     if not args:
-        open_ = [k for k, c in s["karten"].items() if c.get("pc") and state.units_on(s, k, "US")]
+        open_ = sorted(
+            (k for k, c in s["karten"].items() if c.get("pc") and state.units_on(s, k, "US")),
+            key=lambda k: (str(s["karten"][k]["pc"]), k),
+        )  # L516: by PC letter like the 3.7.2 list
         print(
             "PC markers with friendly units: "
             + (", ".join(f"{k} (PC {s['karten'][k]['pc']})" for k in open_) if open_ else "none")
@@ -505,7 +508,7 @@ def mine_lock(s):
         raise rules.Violation(
             "First the Heat Casualties draws: "
             + ", ".join(s["hitze_offen"])
-            + " (fof.py heat <unit> yes|no) [Naktong M1 p.17]"
+            + " (fof.py heat <unit> <R#/4 value>, only 1 is a loss) [Naktong M1 p.17]"
         )
     if s.get("minen_checks"):
         raise rules.Violation(
@@ -519,10 +522,13 @@ def reveal_lock(s):
     """L481 [RULE 5.2 p.34]: the next step waits until the face-down cards in LOS are flipped (terrain entered)."""
     open_ = geometry.reveal_candidates(s)
     if open_:
+        dep = geometry.reveal_dependencies(s, open_)
+        now = sorted(k for k in open_ if k not in dep) or sorted(open_)
         raise rules.Violation(
             "First reveal the face-down cards in LOS: "
-            + ", ".join(sorted(open_))
-            + " (fof.py terrain <card> <type>) [RULE 5.2 p.34]"
+            + ", ".join(now)
+            + (f" (then check again: {', '.join(sorted(dep))})" if dep and now != sorted(open_) else "")
+            + " (fof.py terrain <card> <type>) [RULE 5.2 p.34, 5.2.2 p.35]"
         )
 
 
@@ -601,21 +607,31 @@ def range_of(u, pk):
     return rules.RANGE_CARDS.get(r.split("-")[-1], 3)
 
 
-def building_cover(s, place, u, r8, value_opt):
-    """[CSR 8 p.15] Package in cover on Village/Farm/Cemetery/Church: R# on the building table; if the building value is equal to or better
-    than the package cover, the unit goes inside; a worse result stays behind as a marker (BGG E21)."""
+def building_table_ref(s, place):
+    """L494: R# column and source of the campaign's building table (Normandy CSR 8 p.15 column 8, Naktong CSR 6 p.14
+    column 5), taken from the table itself instead of a fixed Normandy text."""
     tab = s.get("gebaeude_tabelle", {}).get(state.card(s, place).get("gebaeude_tabelle"), {})
-    r8 = rules.int_value(r8, "--building (R# column 8)")  # L269 (review H12)
+    col = max((int(str(b).split("-")[-1]) for b in tab if str(b).split("-")[-1].isdigit()), default=8)
+    ref = (s.get("gebaeude_tabelle", {}).get("_quelle") or "CSR 8 S.15").split(",")[0].replace(" S.", " p.")
+    return col, ref
+
+
+def building_cover(s, place, u, r8, value_opt):
+    """[CSR 8 p.15 Normandy, CSR 6 p.14 Naktong] Package in cover on Village/Farm/Cemetery/Church: R# on the building table; if the
+    building value is equal to or better than the package cover, the unit goes inside; a worse result stays behind as a marker (BGG E21)."""
+    tab = s.get("gebaeude_tabelle", {}).get(state.card(s, place).get("gebaeude_tabelle"), {})
+    col, ref = building_table_ref(s, place)
+    r8 = rules.int_value(r8, f"--building (R# column {col})")  # L269 (review H12)
     type_ = next((t for b, t in tab.items() if events.r_matches(b, r8)), None)
     if type_ is None:
-        raise rules.Violation(f"R# {r8} not in the building table (column 8)")
+        raise rules.Violation(f"R# {r8} not in the building table (column {col}) [{ref}]")
     upper_ = type_.endswith("*")
     type_ = type_.rstrip("*")
     w = s.get("cover_werte", {}).get(type_)
     if w is None:
         if value_opt is None:
             raise rules.Violation(
-                f"{type_}: cover value not recorded (UNVERIFIED); read it from the marker and give --building-value=<n> [CSR 8 p.15]"
+                f"{type_}: cover value not recorded (UNVERIFIED); read it from the marker and give --building-value=<n> [{ref}]"
             )
         w = rules.int_value(value_opt, "--building-value")
     return type_, w, upper_
@@ -633,6 +649,8 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
         cid = None
         if u["platz"] == "mit_vorigem" and cid_before.get(idx - 1) and not u.get("eigene_deckung"):
             cid = cid_before[idx - 1]
+        elif u["platz"] == "mit_zufaelligem" and cid_before.get(u.get("_ref")) and not u.get("eigene_deckung"):
+            cid = cid_before[u["_ref"]]  # L522
         elif u.get("cover") and not u.get("ohne_deckung") and not u.get("infiltration"):
             cover_type = u["cover"]
             cover_value = u.get("cover_wert")
@@ -644,8 +662,9 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
                 )
             if state.card(s, place).get("gebaeude_tabelle") and cover_type not in rules.STRUCTURES:
                 if not building_list:
+                    col, ref = building_table_ref(s, place)
                     raise rules.Violation(
-                        f"{t} in cover on {state.card(s, place)['terrain']}: R# column 8 on the building table, --building=<R#>[,..] [CSR 8 p.15]"
+                        f"{t} in cover on {state.card(s, place)['terrain']}: R# column {col} on the building table, --building=<R#>[,..] [{ref}]"
                     )
                 gt, gw, upper_ = building_cover(s, place, u, building_list.pop(0), o.get("--gebaeude_wert"))
                 no_fire = u.get("moerser") and pk.get("place_vof", True) and gt in MORTAR_NO_FIRE_COVER
@@ -750,22 +769,27 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
             e["fm_wert"] = (var or {}).get("wert", -3)
             s.setdefault("feind_target", {})[t] = kid
         if u.get("infiltration"):
+            # L497: base 2 cards adjusted for Experience (4.2: Veteran +1, Green -1); source per campaign
+            # (Normandy CSR 6 p.14, Naktong CSR 3 p.13: 'drawing two cards (adjusted for Experience)')
+            ref = pk.get("infiltration_regel") or "CSR 6 p.14"
+            n_inf = 2 + {"Green": -1, "Veteran": 1}.get(e.get("erfahrung"), 0)
             if o.get("--erfolg") not in ("ja", "nein"):
                 raise rules.Violation(
-                    f"Patrol (CSR 6): Infiltrate Attempt, 2 cards (experience {e['erfahrung']}), Infiltrate symbol; --success=yes|no [CSR 6 p.14]"
+                    f"Infiltrate Attempt of the package: {n_inf} Action cards (2, experience {e['erfahrung']}), success on the "
+                    f"Infiltrate symbol; --success=yes|no [{ref}, 4.2 p.21]"
                 )
             if o["--erfolg"] == "ja":
                 free = state.free_cover(s, place, side="Feind")
                 if free:
                     e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
                 prot.append(
-                    "patrol successful: not Exposed"
-                    + (f", under {e['bereich']}" if e["bereich"] != "offen" else "")
-                    + " [CSR 6 p.14]"
+                    "Infiltrate Attempt successful: not Exposed"
+                    + (f", under {e['bereich']}" if e["bereich"] != "offen" else ", no free cover marker on the card")
+                    + f" [{ref}]"
                 )
             else:
                 commands.mark(e, rules.EXPOSED)
-                prot.append("Patrol failed: without cover and Exposed [CSR 6 p.14]")
+                prot.append(f"Infiltrate Attempt failed: without cover and Exposed [{ref}]")
         if u.get("exposed"):
             commands.mark(e, rules.EXPOSED)
             prot.append(f"{t}: Exposed, without cover [Normandy M3 p.27 'Squad marked Exposed out of cover']")
@@ -797,8 +821,11 @@ def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger,
         elif e.get("vof_rating") == "G":
             g = o.get("--granate")
             if g not in ("ja", "nein"):
+                n_cards = max(
+                    1, 2 + {"Green": -1, "Veteran": 1}.get(e.get("erfahrung"), 0)
+                )  # L519: 4.2 base 2 +/- experience
                 raise rules.Violation(
-                    f"{fname} (G!) opens with a Grenade Attack on {kid}: 2 cards (experience), Grenade symbol (watch for Jam); --grenade=yes|no [--unit=<target>] [8.4.3 p.63, 7.3.2]"
+                    f"{fname} (G!) opens with a Grenade Attack on {kid}: draw {n_cards} cards (base 2, experience {e.get('erfahrung')}), Grenade symbol (watch for Jam); --grenade=yes|no [--unit=<target>] [8.4.3 p.63, 7.3.2]"
                 )
             e["ziel"], e["nur_pdf"] = kid, True
             combat.ammo_use(s, fname, e, 1, "Grenade Attack at range", prot)
@@ -873,6 +900,24 @@ def contact_choose_places(s, own, units, kid, o, pk, places, place_list, prot, d
         if m in ("pb", "trigger"):
             places.append(kid)
             continue
+        if m == "mit_zufaelligem":
+            # L522 [Naktong S.18 'place Leader with one random squad'] the Leader joins a squad drawn by R#
+            squads = [i for i in range(idx) if units[i].get("typ") == "Squad"]
+            if not squads:
+                raise rules.Violation(f"{u.get('einheit')}: no squad in the package to join")
+            pick = o.get("--leader-squad")
+            if len(squads) == 1:
+                reference = squads[0]
+            elif pick and pick.isdigit() and 1 <= int(pick) <= len(squads):
+                reference = squads[int(pick) - 1]
+            else:
+                raise rules.Violation(
+                    f"{u.get('einheit')} joins a random squad: draw R# column {len(squads)} "
+                    f"(1-{len(squads)} = squad in the order of --direction); --leader-squad=<n>"
+                )
+            u["_ref"] = reference
+            places.append(places[reference])
+            continue
         if m in ("mit_vorigem", "bei_squad"):
             reference = 0
             if m == "bei_squad":
@@ -936,6 +981,10 @@ def contact_choose_places(s, own, units, kid, o, pk, places, place_list, prot, d
                     break
                 last = kk
                 los_ok = geometry.los(s, kk, kid, hb=geometry.card_height_bonus(s, kid, "US"))[0]
+                if not los_ok and not pk.get("place_vof", True) and not (u.get("spotter") or u.get("typ") == "Spotter"):
+                    # L525 [RULE 8.4.3 p.63 'Max LOS for these units refers to the LOS of the triggering unit', 5.4]
+                    # a package without PDF counts the trigger's view INTO the card (Incoming/Smoke only block the view out)
+                    los_ok = geometry.los(s, kid, kk, ha=geometry.card_height_bonus(s, kid, "US"))[0]
                 if not los_ok and d > 1:
                     break
                 if los_ok and not check_place_v4(s, u, kk, kid, pk) and not state.card(s, kk).get("staging"):
@@ -1030,6 +1079,13 @@ def pc_contact_v4(s, kid, package, pk, o):
             )  # L452: a single variant needs no draw (Normandy M7: Incoming only as Mortar)
         if vn not in pk["varianten"]:
             names = list(pk["varianten"])
+            bands = [pk["varianten"][x].get("r") for x in names]
+            if all(bands):
+                # L521: the mission table gives R# bands (Naktong S.18: R#1-4/10 Artillery, R#5-10/10 Mortar)
+                hint = ", ".join(f"R# {b} = {x}" for x, b in zip(names, bands))
+                raise rules.Violation(
+                    f"Package {package}: draw an Action card, {hint} (mission table); --variant=<{'|'.join(names)}>"
+                )
             raise rules.Violation(
                 f"Package {package}: draw a card, 1 = {names[0]}, 2 = {names[1]} (BGG B4); --variant=<{'|'.join(names)}>"
             )

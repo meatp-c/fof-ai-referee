@@ -495,9 +495,15 @@ def check_move(s, e, n, target_card, akt):
             )
     if e["typ"] == "Paralyzed Team" and akt != "4.2.2a":
         raise rules.Violation("Paralyzed Team: only Move to an Adjacent Card [RULE 4.2.5 p.26]")
-    if (state.pinned(e) or e["typ"] == "Paralyzed Team") and (comms.radios_of(e) or e.get("traegt_casualties")):
+    if (state.pinned(e) or e["typ"] == "Paralyzed Team") and (
+        comms.radios_of(e) or e.get("traegt_casualties") or e.get("assets")
+    ):  # L523: also the asset list (smoke, illumination, rifle grenades), 4.2.5 footnote 'must drop any assets'
+        load = [g["typ"] for g in comms.radios_of(e)] + list(e.get("assets") or [])
+        if e.get("traegt_casualties"):
+            load.append(f"{e['traegt_casualties']} Casualty")
         raise rules.Violation(
-            f"{n} is Pinned/Paralyzed and carries Assets or Casualties; drop them first (fof.py drop, no Command) [RULE 4.2.5 p.27, 5.1.6E p.33]"
+            f"{n} is Pinned/Paralyzed and carries Assets or Casualties ({', '.join(load)}); drop them first "
+            f"(fof.py drop, no Command) [RULE 4.2.5 p.27 'must drop any assets or casualties', 5.1.6E p.33]"
         )
     if akt in ("4.2.2c", "4.2.2d"):
         if (
@@ -512,6 +518,23 @@ def check_move(s, e, n, target_card, akt):
         if e.get("tripod") or e.get("vof_rating") == "H" or state.is_mortar(e):
             raise rules.Violation(f"{n} (tripod/H VOF) may not infiltrate [RULE 4.2.2c p.23]")
     diagonal_pdf_check(s, e, target_card)
+
+
+def infiltrate_possible(s, e, target_card):
+    """L509 [RULE 5.1.4 p.32]: a friendly Good Order unit or an Assault/Fire Team (4.2.5 LAT list), not Exposed, without
+    tripod/H/mortar, with a VOF marker (or a Grenade Miss marker) on the origin or the destination card."""
+    if e["seite"] != "US" or state.pinned(e) or state.fire_team_side(e) or rules.EXPOSED in e["status"]:
+        return False
+    if state.is_lat(e) and "4.2.2c" not in rules.LAT_ALLOWED.get(e["typ"], ()):
+        return False  # 4.2.5: Assault and Fire Teams may infiltrate, Paralyzed and Litter Teams may not
+    if e.get("tripod") or e.get("vof_rating") == "H" or state.is_mortar(e):
+        return False
+    return any(
+        fire.vof_against(s, k, "US") is not None  # K34: any VOF marker counts, also the own Point Blank VOF
+        or fire.vof_against(s, k, "Feind") is not None
+        or state.card(s, k).get("grenade_miss")
+        for k in (e["karte"], target_card)
+    )
 
 
 _UNSET = object()
@@ -785,7 +808,8 @@ def cff_precheck(s, z, name, o):
     if not isinstance(fm, dict) and fm != "unbegrenzt" and (fm or 0) <= 0:
         raise rules.Violation("No Fire Mission available any more [7.16.1]")
     observer = s.get("cff_beobachter", {})
-    if z["typ"] != "FO" and not z.get("beobachter") and name not in observer:
+    key = cff_observer_key(s, name, z)
+    if z["typ"] != "FO" and not z.get("beobachter") and key not in observer:
         raise rules.Violation(
             f"{name} is not an observer according to the mission [7.16.1]"
             + (f"; eligible: {', '.join(observer)}" if observer else "")
@@ -827,7 +851,7 @@ def cff_precheck(s, z, name, o):
             raise rules.Violation(f"Artillery Displacing: {sp['gruppe']} not available this turn [Normandy M1 p.18]")
         # Connection to the firing unit [RULE 7.16.1 p.58]
         if z["typ"] == "FO":
-            fd = [g for g in comms.radios_of(z) if "FD" in g.get("netz", "")]
+            fd = [g for g in comms.radios_of(z, s=s) if "FD" in g.get("netz", "")]  # L526: jeep radio on the same card
             if not fd and state.radio_active(s) and not state.option(s, "U2_fo_fd_funk"):
                 raise rules.Violation(
                     f"{name} has no FD radio, no connection to the firing unit [RULE 7.16.1 p.58]"
@@ -837,22 +861,44 @@ def cff_precheck(s, z, name, o):
                 s.setdefault("_hinweise", []).append(
                     f"{name} calls over its FD net (device implicit under option U2){state.open_reading(s, 'U2_fo_fd_funk')}"
                 )
+        elif key == "PLT HQ":
+            # L512 [RULE 7.16.1 p.58 'When PLT HQs are eligible, they use the CO TAC Net ... the CO HQ relays'] the PLT
+            # HQ needs communication with the CO HQ
+            co = s.get("co_hq")
+            if not co or co == name:
+                raise rules.Violation(f"{name}: no CO HQ to relay the Call for Fire [RULE 7.16.1 p.58]")
+            try:
+                comms.communication(s, co, name)
+            except rules.Violation as v:
+                raise rules.Violation(
+                    f"{name} calls over the CO TAC Net, the CO HQ relays; no connection to {co}: {v} [RULE 7.16.1 p.58]"
+                ) from None
         elif z.get("ebene") == "CO" and state.radio_active(s) and not s.get("co_immer_in_kommunikation"):
             if not comms.radios_of(z, "SCR300", "BN TAC"):
                 raise rules.Violation(f"{name} calls over the BN TAC Net and needs its SCR300 [RULE 7.16.1 p.58]")
     tab = s.get("cff_tabelle") or {}
     if agency in tab:
-        if name not in tab[agency]:
+        if key not in tab[agency]:
             raise rules.Violation(
                 f"{name} may not call {agency}; eligible: {', '.join(tab[agency])} [Normandy M2 p.22]"
             )
-        base = tab[agency][name]  # [Normandy M2 p.22] number of cards per firing unit and observer
+        base = tab[agency][key]  # [Normandy M2 p.22] number of cards per firing unit and observer
     else:
-        base = observer.get(name, s.get("cff_karten", 2))
+        base = observer.get(key, s.get("cff_karten", 2))
     extra = (
         1 if agency and s.get("target_marker", {}).get(target_marker_key(s, agency)) == zt else 0
     )  # [RULE 7.16.5 p.59]
     return base, extra, agency
+
+
+def cff_observer_key(s, name, z):
+    """L512 [RULE 7.16.1 p.58 'Some Missions allow for CO HQs (and even PLT HQs) to Call for Fire'] a 'PLT HQ' column of
+    the Fire Support Available Table covers every PLT HQ (also the HMG PLT HQ); otherwise the unit name is the key."""
+    observer = s.get("cff_beobachter", {})
+    columns = set(observer) | {k for tab in (s.get("cff_tabelle") or {}).values() for k in tab}
+    if name not in columns and z.get("typ") == "HQ" and z.get("ebene") == "PLT" and "PLT HQ" in columns:
+        return "PLT HQ"
+    return name
 
 
 def target_marker_key(s, agency):
@@ -1375,6 +1421,12 @@ def _order_move(s, ctx):
         raise rules.Violation("--target=<card> missing")
     state.card(s, target_card)
     check_move(s, ctx.z, ctx.target_name, target_card, ctx.akt)
+    if ctx.akt == "4.2.2a" and not ctx.o.get("--normal") and infiltrate_possible(s, ctx.z, target_card):
+        # L509: a Move where an Infiltrate would be possible is never better (a failed attempt is the same Move)
+        raise rules.Violation(
+            f"{ctx.target_name} could infiltrate to {target_card} (VOF on the origin or destination card) [RULE 5.1.4 p.32]: "
+            "order 4.2.2c with --success=yes|no (2 cards, Infiltrate icon), or --plain=yes for an intended Move; nothing booked"
+        )
     engineer = ctx.akt == "4.2.2c" and contact.engineers_clear(s, ctx.z) and bool(contact.mines_on(s, target_card))
     if engineer:
         s["_pionier_check"] = (ctx.target_name, target_card, 1 if ctx.success == "ja" else 3)
@@ -1404,6 +1456,9 @@ def platoon_move_members(s, orig_name, orig, akt):
             continue  # L454: vehicles and units on board move in phase 3.6, not with the platoon
         if akt == "4.2.2d" and (e.get("tripod") or e.get("vof_rating") == "H"):
             continue
+        single = "4.2.2a" if akt == "4.2.2b" else "4.2.2c"
+        if single in (s.get("impuls_aktionen") or {}).get(n, []):
+            continue  # L511: already moved/infiltrated in this impulse (4.2 p.21)
         candidate.append(n)
     return candidate
 
@@ -1414,6 +1469,9 @@ def _order_move_platoon(s, ctx):
     if not target_card:
         raise rules.Violation("--target=<card> missing")
     state.card(s, target_card)
+    # L511 [RULE 4.2 p.21, 4.2.2b/d 'Have each unit in the platoon perform a Move/an Attempt to Infiltrate'] every member
+    # has made the single action too and may not repeat it in this impulse
+    ctx.also_book = "4.2.2a" if ctx.akt == "4.2.2b" else "4.2.2c"
     result = parse_per_unit(ctx.success)  # L230 (review H8): yes/no and ja/nein per unit
     candidate = (
         ctx.candidates if ctx.candidates is not None else platoon_move_members(s, ctx.orig_name, ctx.orig, ctx.akt)
@@ -1691,6 +1749,14 @@ def _order_flip_to_front(s, ctx):
     """Order handler for: akt == '4.2.3f'"""
     if not state.fire_team_side(ctx.z) or state.pinned(ctx.z):
         raise rules.Violation(f"{ctx.target_name} must be Unpinned on its Fire Team side [RULE 4.2.3f p.24]")
+    m = combat.ammo(ctx.z)
+    if ctx.z.get("ooa_flip") and m and not m.get("punkte") and ctx.o.get("--ooa-flip") != "ja":
+        # L524 [open U45] on the Fire Team side only because Out of Ammo (7.18.2): the front side would have no ammo;
+        # resupply (7.18.3) undoes the flip. Allowed only on purpose with --ooa-flip=yes.
+        raise rules.Violation(
+            f"{ctx.target_name} is on its Fire Team side only because it is Out of Ammo (7.18.2); resupply it (7.18.3) "
+            f"instead, the front side would have 0 ammo. Deliberately anyway: --ooa-flip=yes [open U45]"
+        )
     if fire.vof_against(s, ctx.z["karte"], ctx.z["seite"]) is None or ctx.success == "ja":
         ctx.z["status"].remove(rules.FIRE_TEAM_SIDE)
         ctx.prot.append(
@@ -1723,8 +1789,14 @@ def _order_detach_team(s, ctx):
     ctx.z["steps"] = state.steps(ctx.z) - 1
     new = new_name(s, team)
     s["einheiten"][new] = combat.new_lat(ctx.z, team, ctx.target_name)
+    # L514 (replaces L496/E103) [Stead BGG 3493975, 3727147, 2nd printing] the detached team is placed without an Exposed
+    # marker; the squad stays Exposed
     s["einheiten"][new]["status"] = []
-    ctx.prot.append(f"{ctx.target_name} down to {ctx.z['steps']} steps, place {new} on {ctx.z['karte']}")
+    exposed = rules.EXPOSED in ctx.z["status"]
+    ctx.prot.append(
+        f"{ctx.target_name} down to {ctx.z['steps']} steps, place {new} on {ctx.z['karte']}"
+        + (" (not Exposed; the squad stays Exposed, Stead BGG 3727147)" if exposed else "")
+    )
 
 
 def _order_supplement_squad(s, ctx):

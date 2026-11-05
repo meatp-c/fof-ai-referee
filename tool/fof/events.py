@@ -22,9 +22,12 @@ def find_event(s, item_list, r):
 
 
 def cmd_heat(s, args):
-    """L483 [Naktong M1 p.17] heat <unit> yes|no: the Heat Casualties draw (R#1/4) of a unit just marked Exposed."""
+    """L483 [Naktong M1 p.17] heat <unit> yes|no: the Heat Casualties draw (R#1/4) of a unit just marked Exposed.
+    L502: also heat <unit> <R#/4 value 1-4>; 1 is the loss, 2-4 none (a read-off value was once taken for yes)."""
+    if len(args) >= 2 and args[1] in ("1", "2", "3", "4"):
+        args = [args[0], "ja" if args[1] == "1" else "nein", *args[2:]]
     if len(args) < 2 or args[1] not in ("ja", "nein"):
-        raise rules.Violation('heat "<unit>" yes|no')
+        raise rules.Violation('heat "<unit>" <R#/4 value 1-4>|yes|no (only R#/4 = 1 is a loss)')
     n = args[0]
     if n not in (s.get("hitze_offen") or []):
         raise rules.Violation(f"No Heat Casualties draw open for {n}")
@@ -34,6 +37,9 @@ def cmd_heat(s, args):
     prot = []
     if args[1] == "ja" and n in s["einheiten"]:
         combat.reduce_unit(s, n, "C", prot)
+        if n in s["einheiten"]:
+            combat.last_step_conversion(s, n, prot, pin=False)  # L499/L500: a 2-step squad ends as a generic Fire Team
+        fire.open_fire(s, prot)  # L499 [RULE 6.1.1 p.39]: a new team (or a freed target) opens fire at once
         prot.insert(0, f"Heat Casualties: {n} loses one step (R#1/4) [Naktong M1 p.17]")
     else:
         prot.append(f"Heat Casualties: {n} without loss")
@@ -183,7 +189,7 @@ def friendly_event(s, ev, o, prot):
             "ft_vof": "S",
             "funk": [],
             "bis_zug": s["zug"] + 1,
-            "hinweis": "Higher HQ Staff (Line, 4.1.1); no BN TAC radio, activates the CO HQ only by Visual-Verbal (BGG E30)",
+            "hinweis": "Higher HQ Staff (Line, 4.1.1); no radio, activates the CO HQ only by Visual-Verbal (BGG 3549109, 3234087: 'BN HQ isn't equipped with a radio')",
         }
         s["kommandos"][name] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
         prot.append(
@@ -264,7 +270,7 @@ def friendly_event(s, ev, o, prot):
             return
         s["hitze"] = {"bis_zug": s["zug"] + 1}
         prot.append(
-            f"Heat Casualties through turn {s['zug'] + 1}: every time a friendly unit is marked Exposed, draw a card, R#1/4 = 1 step Casualty (fof.py heat <unit> yes|no) [Naktong M1 p.17]"
+            f"Heat Casualties through turn {s['zug'] + 1}: every time a friendly unit is marked Exposed, draw a card, R#/4 = 1 (only 1) = 1 step Casualty (fof.py heat <unit> <R#/4>) [Naktong M1 p.17]"
         )
     elif ev.get("vorrat"):
         # L485 [Naktong M1 p.17] '.50 cal HMG Team: Place a .50 cal HMG team with 6 ammo in the Staging Area under the

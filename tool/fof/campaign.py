@@ -34,6 +34,16 @@ def is_secured(s, k):
     return is_cleared(s, k) and bool(state.units_on(s, k, "US"))
 
 
+def secured_for_reattempt(s, k):
+    """L506 [RULE 3.9 step 5, Lesart U42]: the secured cards of the reattempt are those secured at the end of the attempt
+    (snapshot 'reattempt_gesichert'), not the momentary occupation: LATs used up in step 3 and units repositioned in
+    step 5 would otherwise make the result depend on the order of the setup commands. Without a snapshot: momentary."""
+    snap = s.get("reattempt_gesichert")
+    if snap is None:
+        return is_secured(s, k)
+    return k in snap and is_cleared(s, k)
+
+
 def objective_status_v4(s):
     z = s.get("ziele", {})
     zr = s["ziel_regeln"]
@@ -630,7 +640,7 @@ def reattempt_done(s):
         if e["seite"] == "US"
         and e.get("karte")
         and not state.card(s, e["karte"]).get("staging")
-        and not is_secured(s, e["karte"])
+        and not secured_for_reattempt(s, e["karte"])
         and not (
             s.get("patrouille_mission")
             and (state.card(s, e["karte"])["reihe"] == 1 or e["karte"] == s.get("ziele", {}).get("cop"))
@@ -643,7 +653,9 @@ def reattempt_done(s):
     if s.get("patrouille_mission"):
         check_patrol_ready(s)
         patrol_reserve(s, prot)
+    enemy_into_cover(s, prot)  # L505
     s["reattempt_setup"] = False
+    s.pop("reattempt_gesichert", None)
     s["aufstellung_fertig"] = True
     fire.open_fire(s, prot)
     ak = fire.update_activity(s)
@@ -710,6 +722,8 @@ def reattempt_start(s):
     k = s.get("kampagne", {})
     check_reattempt_allowed(s, k)
     prot = [f"Experience so far {sum(x['punkte'] for x in s.get('xp', []))} (step 1; cards not counted twice)"]
+    s["reattempt_gesichert"] = sorted(k for k in s["karten"] if is_secured(s, k))  # L506: snapshot for step 5
+    prot.append("Secured cards for the setup (step 5): " + ", ".join(s["reattempt_gesichert"]))
     for n, e in s["einheiten"].items():
         if e["seite"] == "US" and state.fire_team_side(e):
             e["status"] = [x for x in e["status"] if x != rules.FIRE_TEAM_SIDE]
@@ -798,14 +812,22 @@ REATTEMPT_DROPPED_FIELDS = (
 )
 
 
-def reset_units(s, prot):
-    """Steps 8-12: enemies under cover, Pinned/Exposed and fire off, ammo, spotter missions and radios replenished."""
+def enemy_into_cover(s, prot):
+    """[RULE 3.9 step 8] An enemy unit out of cover goes under the best cover marker on its card that is free for use.
+    L505: run again in 'reattempt done', because step 3 (LATs used up) and step 5 (units repositioned) come before
+    step 8 and can free a cover marker that a friendly unit still held at the reset."""
     for n, e in s["einheiten"].items():
         if e["seite"] == "Feind" and e.get("bereich", "offen") == "offen":
             free = state.free_cover(s, e["karte"], "Feind")  # covers without US units under them
             if free:
                 e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
                 prot.append(f"{n} under {e['bereich']} (step 8; if there is too little cover, distribute randomly)")
+
+
+def reset_units(s, prot):
+    """Steps 8-12: enemies under cover, Pinned/Exposed and fire off, ammo, spotter missions and radios replenished."""
+    enemy_into_cover(s, prot)
+    for n, e in s["einheiten"].items():
         e["status"] = [x for x in e["status"] if x not in (rules.PINNED, rules.EXPOSED)]
         e["ziel"] = None
         for f in REATTEMPT_DROPPED_FIELDS:
@@ -829,14 +851,27 @@ def reset_units(s, prot):
 
 def reset_pools_and_events(s, prot):
     """Commands, fire missions, Target markers and the asset pool from the start; turn-based events end (L58)."""
+    if any(kk.get("gespart") for kk in s["kommandos"].values()):  # L503: the board instruction was missing
+        prot.append("Saved Commands removed: all Command markers to 0 (step 11)")
     for kk in s["kommandos"].values():
         kk.update(verfuegbar=0, gespart=0, aktiviert=False, fertig=False)
     s["feuermissionen"] = copy.deepcopy(s.get("fm_start", s.get("feuermissionen")))
     s["target_marker"] = {}
     s["assets_pool"] = copy.deepcopy(s.get("assets_start", s.get("assets_pool", {})))
     # L58: turn-based event flags apply only in the attempt in which they were drawn (turn counter restarts, 3.9 step 13)
-    for _f in ("hold_up", "ereignis_pflicht", "ereignis_flanke", "ereignis_route", "fm_gesperrt", "ereignis_erledigt"):
-        s.pop(_f, None)
+    # L508: Heat Casualties (Naktong, 'hitze' until turn n) ended with the attempt too; turn 1 of the new attempt re-armed it
+    for _f in (
+        "hold_up",
+        "ereignis_pflicht",
+        "ereignis_flanke",
+        "ereignis_route",
+        "fm_gesperrt",
+        "ereignis_erledigt",
+        "hitze",
+        "hitze_offen",
+    ):
+        if s.pop(_f, None) and _f == "hitze":
+            prot.append("Heat Casualties end with the attempt [L58, Naktong M1 p.17]")
     if s.get("gegenangriff"):
         s["feind_taktik"] = s["gegenangriff"].get("taktik_vorher", s.get("feind_taktik"))
         s.pop("gegenangriff")

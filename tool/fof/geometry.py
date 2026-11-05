@@ -230,6 +230,25 @@ def reveal_candidates(s):
     return out
 
 
+def reveal_dependencies(s, candidates=None):
+    """L493 [RULE 5.2.2 p.35]: a face-down card seen only over another face-down card (a higher unit looks over the
+    hidden card, which counts as elevation 1) depends on that card: once it is revealed, a Hill there can close the
+    line. Returns {card: [face-down cards it waits for]} for the candidates that have no LOS free of hidden cards."""
+    cand = reveal_candidates(s) if candidates is None else candidates
+    out = {}
+    for b, sources in cand.items():
+        waits, free = set(), False
+        for a in sources:
+            hidden = [z for z in (line_between(s, a, b) or []) if face_down(state.card(s, z))]
+            if hidden:
+                waits.update(hidden)
+            else:
+                free = True
+        if not free and waits:
+            out[b] = sorted(waits)
+    return out
+
+
 def in_range(s, e, target):
     lo, hi = state.range_limits(s, e)
     return lo <= distance(s, e["karte"], target) <= hi

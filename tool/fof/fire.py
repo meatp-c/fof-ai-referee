@@ -545,6 +545,25 @@ def fire_after_move(s, n, prot, origin=None, open_all=True):
                     prot.append(
                         f"{m}: last Point Blank target left {f['karte']}, cannot follow: Cease Fire, opens fire anew per 6.1.1 [6.3.4, 6.3.3]"
                     )
+    # L518 [RULE 6.3.4 p.44] "if the last unit with an opposing unit's VOF on its card moves to a further away card in
+    # LOS, within Range, and along the same PDF ... the VOF will move with the unit to the new card"
+    if origin and state.is_visible(e) and e.get("karte") in s["karten"] and origin in s["karten"]:
+        for m, f in s["einheiten"].items():
+            if (
+                f["seite"] != e["seite"]
+                and f.get("karte") in s["karten"]
+                and is_firing(f)
+                and f["ziel"] == origin
+                and f["karte"] != origin
+                and not state.valid_target(s, origin, f["seite"])
+                and geometry.direction(s, f["karte"], origin) == geometry.direction(s, f["karte"], e["karte"])
+                and geometry.distance(s, f["karte"], e["karte"]) == geometry.distance(s, f["karte"], origin) + 1
+                and origin in (geometry.line_between(s, f["karte"], e["karte"]) or [])
+                and e["karte"] in fire_candidates(s, m)
+            ):
+                f["ziel"] = e["karte"]
+                f.pop("konzentriert", None)
+                prot.append(f"{m}: fire follows {n} along the same PDF to {e['karte']} [6.3.4 p.44]")
     for m, f in s["einheiten"].items():
         if (
             f["seite"] != e["seite"]

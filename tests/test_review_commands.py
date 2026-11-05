@@ -246,7 +246,7 @@ def test_event_fulfilled_line_reaches_the_protocol_once(board, quiet):
     s["ereignis_flanke"] = {"id": "company_ahead", "zug": 1, "reihe": 1}
     plt_hq(s, kid="12")
     s["einheiten"]["1/1"] = unit("12", platoon="1")
-    commands.cmd_order(s, ["1st PLT HQ", "1/1", "4.2.2a", "--target=22", "--area=offen"])
+    commands.cmd_order(s, ["1st PLT HQ", "1/1", "4.2.2a", "--target=22", "--area=offen", "--plain=yes"])
     text = s["protokoll"][-1]["text"]
     assert text.count("fulfilled") == 1 and s["ereignis_flanke"]["erfuellt"] is True
     s["ereignis_flanke"] = {"id": "company_ahead", "zug": 1, "reihe": 1}

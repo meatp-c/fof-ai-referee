@@ -4,6 +4,7 @@ from . import rules
 
 
 OPT_ALIASES = {
+    "--plain": "--normal",
     "--target": "--ziel",
     "--success": "--erfolg",
     "--unit": "--einheit",
@@ -71,6 +72,7 @@ VALUE_ALIASES = {
 # accepted every quoted word). English-only keys (--hq, --originator, --skill, --team, --squad, ...) are listed as well.
 KNOWN_OPTIONS = frozenset(
     {
+        "--normal",
         "--agentur",
         "--asset",
         "--aus",
@@ -131,6 +133,8 @@ KNOWN_OPTIONS = frozenset(
         "--typ",
         "--typ-neu",
         "--variante",
+        "--leader-squad",
+        "--ooa-flip",
         "--vof",
         "--von",
         "--waffe",
@@ -149,6 +153,7 @@ assert set(OPT_ALIASES.values()) <= KNOWN_OPTIONS, "every alias target must be a
 # free text (--grund, --was, --skill, --typ, ...) is passed through untouched (L222)
 ENUM_VALUE_OPTIONS = frozenset(
     {
+        "--normal",
         "--erfolg",
         "--jam",
         "--short",
@@ -167,6 +172,7 @@ ENUM_VALUE_OPTIONS = frozenset(
         "--typ-neu",
         "--jeep",
         "--fahrzeuge",
+        "--ooa-flip",  # L524
         "--zusatz",  # L467: --extra=yes|no (L452) needs the value alias too
     }
 )

@@ -204,7 +204,11 @@ def _enter_3_7_1(s, prot):
 
 
 def _enter_3_7_2(s, prot):
-    open_reading = [k for k, c in s["karten"].items() if c.get("pc") and state.units_on(s, k, "US")]
+    # L516 [RULE 8.2.4 p.62] listed alphabetically by PC letter (A before B before C), card number only within a letter
+    open_reading = sorted(
+        (k for k, c in s["karten"].items() if c.get("pc") and state.units_on(s, k, "US")),
+        key=lambda k: (str(s["karten"][k]["pc"]), k),
+    )
     if any(c.get("pc") == "?" for c in s["karten"].values()):
         prot.append("Reveal PC markers with '?' on cards with friendly units before resolving [8.2.4, E39]")
     if open_reading:
@@ -583,12 +587,23 @@ def check_capture(s, prot):
                     if state.is_v4(s):
                         s.setdefault("capture_offen", []).append(n)  # L208: phase next waits for fof.py capture
                         prot.append(
-                            f'{kid}: {n} ({e["typ"]}, {e["seite"]}) is captured (both sides take prisoners, Normandy p.13): fof.py capture "{n}" <guard> [3.5.1, 8.15]'
+                            f'{kid}: {n} ({e["typ"]}, {e["seite"]}) is captured ({prisoner_source(s)}): fof.py capture "{n}" <guard> [3.5.1, 8.15]'
                         )
                     else:
                         prot.append(
                             f"{kid}: {n} ({e['typ']}, {e['seite']}) is captured: one guard step with VOF value goes along (both Removed from Play); enemies take no prisoners, US team then becomes a Casualty. Afterwards fof.py enemy/order to correct [8.15]"
                         )
+
+
+def prisoner_source(s):
+    """L520: wording for the capture note from the setup ('gefangene_nehmen'), not a fixed Normandy text."""
+    g = s.get("gefangene_nehmen")
+    if not g:
+        return "both sides take prisoners, Normandy p.13"
+    who = [side for side in ("US", "Feind") if g.get(side, True)]
+    if len(who) == 2:
+        return "both sides take prisoners"
+    return f"only {who[0]} takes prisoners (campaign rules)" if who else "no side takes prisoners"
 
 
 def takes_prisoners(s, side):
@@ -771,6 +786,11 @@ def cmd_end_turn(s, args):
     s["zug"] += 1
     s["phase"] = state.sop(s)[0][0]
     campaign.apply_turn_visibility(s, prot)  # L477
+    # L498 [RULE 9.1 p.70, 6.1.2]: the new turn's visibility can shorten LOS (Moon: adjacent cards only); PDFs that now
+    # reach beyond it lapse, and units open fire anew on what they can still see
+    fire.cease_fire_on_los_loss(s, prot)
+    fire.enemy_cease_fire(s, prot)
+    fire.open_fire(s, prot)
     ak = fire.update_activity(s)
     if ak:
         prot.append(ak)

@@ -54,7 +54,9 @@ def cmd_setup(s, args):
             check_patrol_setup(s, n, e, k, o)
         elif s.get("aufstellung_feld") and not s.get("reattempt_setup"):
             check_field_setup(s, n, e, k, o)
-        elif not state.card(s, k).get("staging") and not (s.get("reattempt_setup") and campaign.is_secured(s, k)):
+        elif not state.card(s, k).get("staging") and not (
+            s.get("reattempt_setup") and campaign.secured_for_reattempt(s, k)
+        ):
             raise rules.Violation(
                 f"{k} is not a staging card; offensive mission: setup in the Staging Area [RULE 2.3.5 p.10]"
                 + ("; in a reattempt also secured cards (3.9 step 5)" if s.get("reattempt_setup") else "")
@@ -65,7 +67,8 @@ def cmd_setup(s, args):
             "setup <unit> <staging card> and/or --platoon=<no>|none"
             + (" | --net= --mortar= --jeep= --asset= --lines= --pyro= --device=" if state.is_v4(s) else "")
         )
-    if s.get("reattempt_setup") or s.get("patrouille_mission"):
+    if kz and (s.get("reattempt_setup") or s.get("patrouille_mission")):
+        # L504: only after a placement; handing out assets/pyro/platoons moves nobody, fire waits for 3.9 step 14
         # L181 [6.1.1, 6.1.2, 8.1]: after repositioning, fire and the Activity level follow the new positions
         fire.cease_fire_on_los_loss(s, prot)
         fire.enemy_cease_fire(s, prot)
@@ -655,7 +658,7 @@ def objective_fortify(s, z, args, prot):
         raise rules.Violation(OBJECTIVE_USAGE_FORTIFY)
     from . import campaign
 
-    if not campaign.is_secured(s, kid):
+    if not campaign.secured_for_reattempt(s, kid):  # L506
         raise rules.Violation(f"{kid} is not a secured card [Naktong M1 p.15]")
     done = s.setdefault("befestigung_gesetzt", {})
     if what in done:
@@ -779,10 +782,9 @@ def setup_net(s, n, e, o, prot):
     old = s.get("co_tac_mittel")
     s["co_tac_mittel"] = o["--netz"]
     type_new, type_old = ("EE8", "SCR536") if o["--netz"] == "telefon" else ("SCR536", "EE8")
-    for m, x in s["einheiten"].items():
-        for g in x.get("funk", []):
-            if g["netz"] == "CO TAC" and g["typ"] == type_old:
-                g["typ"] = type_new
+    for g in [g for x in s["einheiten"].values() for g in x.get("funk", [])] + s.get("funk_frei", []):
+        if g["netz"] == "CO TAC" and g["typ"] == type_old:
+            g["typ"] = type_new  # L492: the free pool device follows the CSR 1 choice too
     if o["--netz"] == "telefon":
         s["leitungen_pool"] = s.get("telefon_leitungen", 4) - sum(
             x.get("leitungen", 0) for x in s["einheiten"].values()
@@ -876,16 +878,28 @@ def setup_jeep(s, n, e, o, prot):
 
 
 def setup_device(s, n, e, o, prot):
-    """--device=<type>: the Mortar Section's radio to any unit once teams were chosen [CSR 2 p.13]."""
-    free = s.get("mtr_sec_funk_frei", [])
-    g = [x for x in free if x["typ"] == o["--geraet"]]
-    if not g:
-        raise rules.Violation(
-            "Only the Mortar Section's device can be assigned freely, and only if teams were chosen [CSR 2 p.13]"
-        )
-    free.remove(g[0])
-    e.setdefault("funk", []).append(g[0])
-    prot.append(f"{n} receives {g[0]['typ']} {g[0]['netz']} (Section device, CSR 2)")
+    """--device=<type>: a freely assignable radio to any unit: the Mortar Section's radio once teams were chosen
+    [CSR 2 p.13], or a device from the mission's free pool 'funk_frei' (Naktong p.12: 'SCR536 radios x6: one for
+    each HQ, the rest to any other units as desired', L492)."""
+    for key, label in (("mtr_sec_funk_frei", "Section device, CSR 2"), ("funk_frei", "free device from the TO&E")):
+        free = s.get(key, [])
+        g = [x for x in free if x["typ"] == o["--geraet"]]
+        if g:
+            if any(x["netz"] == g[0]["netz"] for x in e.get("funk", [])):
+                raise rules.Violation(f"{n} already has a {g[0]['netz']} device")
+            free.remove(g[0])
+            e.setdefault("funk", []).append(g[0])
+            # L507: the reattempt reset restores radios from aufbau_einheiten; a device handed out here stays with the unit
+            orig = s.get("aufbau_einheiten", {}).get(n)
+            if orig is not None:
+                orig["funk"] = copy.deepcopy(e["funk"])
+            prot.append(f"{n} receives {g[0]['typ']} {g[0]['netz']} ({label}) [2.3.4 p.10]")
+            return
+    pool = [x["typ"] for k in ("mtr_sec_funk_frei", "funk_frei") for x in s.get(k, [])]
+    raise rules.Violation(
+        f"No free {o['--geraet']}: free devices {', '.join(pool) or 'none'} (Mortar Section radio only after teams were "
+        "chosen, CSR 2 p.13; mission pool 'funk_frei')"
+    )
 
 
 def setup_assets(s, n, e, o, prot):
@@ -900,14 +914,23 @@ def setup_assets(s, n, e, o, prot):
             if e["typ"] != "Squad" and not state.is_lat(e):
                 s.setdefault("_hinweise", []).append("Rifle Grenade: intended for Rifle Squads (Unit Guide p.11)")
             pl = e.get("platoon")
+            # L491: Normandy p.13 one 1-shot counter per platoon; Naktong p.12 one 2-shot counter per platoon
+            # (setup key rifle_grenade_je_platoon = 2, one entry per shot, both on the unit holding the counter)
+            limit = s.get("rifle_grenade_je_platoon", 1)
             already = [
                 m
                 for m, x in s["einheiten"].items()
-                if "Rifle Grenade" in x.get("assets", []) and x.get("platoon") == pl
+                for a in x.get("assets", [])
+                if a == "Rifle Grenade" and x.get("platoon") == pl
             ]
-            if pl and already:
+            if pl and len(already) >= limit:
                 raise rules.Violation(
-                    f"Rifle Grenades: at most 1 per platoon, platoon {pl} already has one ({already[0]}) [Normandy p.13]"
+                    f"Rifle Grenades: at most {limit} per platoon, platoon {pl} already has {len(already)} ({already[0]})"
+                    + (" [Normandy p.13]" if limit == 1 else " [Naktong p.12: one 2-shot counter per platoon]")
+                )
+            if pl and limit > 1 and already and already[0] != n:
+                raise rules.Violation(
+                    f"Rifle Grenades: the {limit}-shot counter of platoon {pl} stays with one unit ({already[0]}) [Naktong p.12]"
                 )
         pool[type_] -= 1
         e.setdefault("assets", []).append(type_)
@@ -975,6 +998,12 @@ def setup_notes_v4(s):
     without = sorted(distributed - set(s.get("pyro_belegung") or {}))
     if without:
         h.append("signals without an order: " + ", ".join(without) + " (setup <unit> --pyro=<type>:<code>, 4.4.1)")
+    if s.get("funk_frei"):  # L492
+        h.append(
+            "free radios: "
+            + ", ".join(f"{g['typ']} {g['netz']}" for g in s["funk_frei"])
+            + " (setup <unit> --device=<type>, 2.3.4)"
+        )
     if "ccp" in s.get("ziele", {}) and not (s.get("ccp") or s["ziele"].get("ccp")):  # objective ccp writes s["ccp"]
         h.append("CCP: objective ccp <card> (5.1.7)")
     return h

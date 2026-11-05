@@ -183,6 +183,17 @@ def mutual_pdfs(s):
     return {tuple(sorted(p)) for p in pdf if (p[1], p[0]) in pdf}
 
 
+def sniper_vof_cards(s):
+    """L495 [RULE 7.15 p.57]: cards that carry a Sniper VOF marker (-3): a firing S! unit that is not Pinned and not on
+    its Fire Team side places it on its target card, next to the Small Arms VOF. {card: [snipers]}."""
+    out = {}
+    for n, e in s.get("einheiten", {}).items():
+        if e.get("vof_rating") != "S!" or not e.get("ziel") or pinned(e) or fire_team_side(e):
+            continue
+        out.setdefault(e["ziel"], []).append(n)
+    return out
+
+
 def marker_changes(old, new):
     """Board lines for every card whose VOF marker or Crossfire marker changed between two states (L111)."""
 
@@ -227,6 +238,14 @@ def marker_changes(old, new):
                 lines.append(f"{k}: VOF marker{where} {name(x)} becomes {name(y)}{rule}")
         if ca != cb:
             lines.append(f"{k}: {'place' if cb else 'remove'} the Crossfire marker [6.2.4]")
+    sa, sb = sniper_vof_cards(old), sniper_vof_cards(new)
+    for k in sorted(set(sa) | set(sb)):
+        if k in sb and k not in sa:
+            lines.append(
+                f"{k}: place the Sniper VOF marker (-3) from {', '.join(sb[k])} next to the Small Arms VOF [7.15 p.57]"
+            )
+        elif k in sa and k not in sb:
+            lines.append(f"{k}: remove the Sniper VOF marker (-3) [7.15 p.57]")
     return lines
 
 
@@ -245,7 +264,7 @@ def heat_check(s):
         if e.pop("_neu_exposed", None) and active:
             s.setdefault("hitze_offen", []).append(n)
             s.setdefault("_hinweise", []).append(
-                f'Heat Casualties: {n} marked Exposed, draw a card, R#1/4 = one step Casualty: fof.py heat "{n}" yes|no [Naktong M1 p.17]'
+                f'Heat Casualties: {n} marked Exposed, draw a card, R#/4 = 1 (only 1) = one step Casualty: fof.py heat "{n}" <R#/4 value> [Naktong M1 p.17]'
             )
     if heat and s.get("zug", 0) > heat["bis_zug"]:
         s.pop("hitze")

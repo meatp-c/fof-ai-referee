@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-11-05 (seventh release)
+Engine updates from the first game of the Korea campaign at the table (Naktong River Mission 1, attempt 1 and most of
+attempt 2, counter attack included) and from a BGG research pass on open rules questions:
+- Setup: rifle grenades as one 2-shot counter per platoon where the mission says so; free radios from the TO&E
+  (`setup <unit> --device=<type>`); packages with a random number of units or a leader that joins a randomly drawn
+  squad (`--leader-squad=<n>`); package variants with R# bands from the mission table (Naktong package 1:
+  Artillery or Mortar). L491, L492, L521, L522
+- Face-down cards: a card seen only across another face-down card is announced as WAIT until the nearer card is
+  revealed (5.2.2). L493
+- Contacts: building table column and source taken from the campaign; G! first fire names the number of cards;
+  enemy package infiltration draws 2 cards adjusted for experience; Max LOS of a package without PDF counts the
+  trigger's view into a card with Incoming or Smoke (5.4, 8.4.3). L494, L497, L519, L525
+- Fire: the Sniper VOF marker (-3) is announced like every other marker; LOS and range are checked again after the
+  visibility change at the end of a turn; the fire follows the last unit under a VOF that moves one card further along
+  the same PDF (6.3.4); a failed ranged enemy Grenade Attack places a Grenade Miss marker (7.10.4). L495, L498, L513,
+  L518
+- Orders: a Move is refused while Infiltrate is possible (book it on purpose with `--plain=yes`); a Platoon Move or
+  Infiltrate counts as the single action of every member (4.2); a detached team is placed without an Exposed marker
+  (2nd printing; replaces L496); a Pinned or Paralyzed unit must drop radios, assets and casualties before it moves
+  (4.2.5); Flip to Front of a unit that flipped only because it ran out of ammo needs `--ooa-flip=yes` (open U45);
+  Call for Fire by PLT HQs where the fire support table has a PLT HQ column (7.16.1, CO TAC relay); a jeep-mounted
+  radio also works for the dismounted observer on the jeep's card. L496, L509, L509a, L511, L512, L514, L523, L524,
+  L526
+- Enemy: Grenade VOF on a unit counts as Under Fire; row Z5 needs a visible target on the PDF card; Fall Back of a
+  Pinned unit or LAT without a legal card asks for a redraw (Stead: "Redraw if a move isn't possible"). L510, L515,
+  L517
+- Events and campaign: heat casualties read R#/4 = 1 only, end with the attempt, and convert the last step like a
+  hit (the new Fire Team is not pinned); the reattempt removes saved Commands, puts enemies into freed cover, uses
+  the secured cards at the end of the attempt, and keeps free radios; the capture note names the campaign's prisoner
+  rule; the 3.7.2 list is sorted by PC letter. L499-L508, L516, L520
+- `fof.py` refuses options that belong to `zug.py` (`--probe`, `--all`, `--msg`). L501
+- Tests: 459 tests in the full project (the kit skips those that need mission data).
+
 ## 2026-10-31 (sixth release)
 Engine updates from Normandy Mission 7 (campaign complete) and first building blocks for the Korea campaign:
 - Game step runner: new `tool/zug.py`, one call per game step (commands on stdin), probe in a scratch copy, booking

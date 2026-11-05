@@ -414,11 +414,23 @@ def campaign_lines(s):
 
 
 def reveal_lines(s):
-    """L481: face-down cards now in LOS of friendly units (or of the Staging Area before turn 1)."""
-    return [
-        f"Reveal face-down card {k} (LOS from {', '.join(v)}): flip it and enter fof.py terrain {k} <type> [--hill=n if it is a Hill: draw a new card on top] [RULE 5.2 p.34, 2.2.1 p.9]"
-        for k, v in sorted(geometry.reveal_candidates(s).items())
-    ]
+    """L481: face-down cards now in LOS of friendly units (or of the Staging Area before turn 1).
+    L493: a card seen only over another face-down card is announced as 'wait': reveal the nearer card first,
+    the tool checks the line again (a Hill there can block it, 5.2.2)."""
+    cand = geometry.reveal_candidates(s)
+    dep = geometry.reveal_dependencies(s, cand)
+    z = []
+    for k, v in sorted(cand.items()):
+        if k in dep:
+            z.append(
+                f"WAIT with face-down card {k}: LOS from {', '.join(v)} passes over face-down {', '.join(dep[k])}; reveal "
+                f"{', '.join(dep[k])} first, then the line is checked again (a Hill there can block it) [RULE 5.2.2 p.35]"
+            )
+        else:
+            z.append(
+                f"Reveal face-down card {k} (LOS from {', '.join(v)}): flip it and enter fof.py terrain {k} <type> [--hill=n if it is a Hill: draw a new card on top] [RULE 5.2 p.34, 2.2.1 p.9]"
+            )
+    return z
 
 
 def print_board(prot, s):

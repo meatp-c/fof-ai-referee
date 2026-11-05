@@ -114,7 +114,13 @@ COMMANDS = [
         "Higher HQ events (3.1, 3.4.1)",
     ),
     ("endturn", "rundenende", "phase.cmd_end_turn", "endturn", "3.8 Clean Up and the next turn"),
-    ("heat", "hitze", "events.cmd_heat", "heat <unit> yes|no", "Heat Casualties draw R#1/4 (Naktong M1 event)"),
+    (
+        "heat",
+        "hitze",
+        "events.cmd_heat",
+        "heat <unit> <R#/4 1-4>|yes|no",
+        "Heat Casualties draw, R#/4 = 1 is a loss (Naktong M1 event)",
+    ),
     # friendly command phase
     ("activate", "aktivieren", "commands.cmd_activate", "activate <hq>", "4.2.1a in the BN HQ / CO HQ impulse"),
     ("hq", "hq", "commands.cmd_hq", "hq <hq>", "choose the active HQ of the impulse"),
@@ -478,6 +484,13 @@ def main(argv=None):
     try:
         if cmd not in BY_GERMAN:
             raise rules.Violation(f"Unknown command {cmd}; fof.py help lists the commands")
+        # L501: zug.py options given to fof.py were silently ignored and the step was booked for real
+        runner_opts = [a for a in args if a.partition("=")[0] in ("--probe", "--all", "--msg", "--partie")]
+        if runner_opts:
+            raise rules.Violation(
+                f"{', '.join(runner_opts)} is an option of zug.py, not of fof.py (fof.py books directly); "
+                "nothing booked. Probe with: python3 werkzeuge/zug.py --probe <<'EOF' ... EOF"
+            )
         check_min_args(cmd, args)
         if cmd == "hilfe":
             return cmd_help(args)
