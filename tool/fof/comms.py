@@ -166,6 +166,21 @@ def chain_of_command(s, hq_name, target_name):
     hq, z = state.unit(s, hq_name), state.unit(s, target_name)
     if hq_name == target_name or state.is_lat(z):
         return True
+    from . import vehicles
+
+    if vehicles.crewless_jeep(z) and not z.get("platoon"):
+        # L528 [RULE 10.8.1 p.76] the jeep follows whoever drives it: an HQ eligible to order a unit on board
+        on_board = vehicles.passengers(s, target_name)
+        if not on_board or hq_name in on_board:
+            return True
+        for p in on_board:
+            try:
+                return chain_of_command(s, hq_name, p)
+            except rules.Violation:
+                pass
+        raise rules.Violation(
+            f"{hq_name} may order none of the units on board the {target_name} ({', '.join(on_board)}) [RULE 10.8.1 p.76, 4.0 p.18]"
+        )
     if hq["typ"] == "Staff" or hq.get("ebene") in ("CO", "BN"):
         if hq["typ"] == "Staff" and z.get("ebene") in ("CO", "BN"):
             raise rules.Violation("Staff may not order a higher HQ [RULE 4.0 p.18]")

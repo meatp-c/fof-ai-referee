@@ -350,6 +350,10 @@ def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None, c
     if _mk:  # L70: markers on the removed counter, otherwise only named in Clean Up
         prot.append(f"remove {' and '.join(_mk)} of {name} on {e.get('karte')} (counter off the board) [3.8 p.17]")
     del s["einheiten"][name]
+    if e.get("an_bord"):  # L528 [10.8.8] the jeep's experience follows the units still on board
+        from . import vehicles
+
+        vehicles.update_jeep_experience(s, e["an_bord"])
     s.setdefault("removed_from_play", []).append(name)
     if name in s["kommandos"]:
         s["kommandos"][name]["gespart"] = 0

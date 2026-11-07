@@ -84,6 +84,47 @@ def passengers(s, name):
     return [n for n, e in s["einheiten"].items() if e.get("an_bord") == name]
 
 
+# L528 [Naktong p.12 'Company Vehicle Assets: Jeep (no crew) (10.8.1)'] the company jeep asset
+COMPANY_JEEP = "Jeep"
+_EXP_ORDER = {"Green": 0, "Line": 1, "Veteran": 2}
+
+
+def crewless_jeep(e):
+    """Arty Jeep or company Jeep: no crew (10.8.8), whatever unit is embarked drives it (10.8.1)."""
+    return bool(e.get("arty_jeep") or e.get("kompanie_jeep"))
+
+
+def company_jeep_unit(karte=None):
+    """L528 company Jeep asset: no crew (10.8.8), capacity per the chart, Exp as per driver/passenger (Naktong p.12)."""
+    return {
+        "seite": "US",
+        "typ": "Vehicle",
+        "fahrzeug": "Jeep",
+        "kompanie_jeep": True,
+        "karte": karte,
+        "bereich": "offen",
+        "status": [],
+        "steps": 0,
+        "ziel": None,
+        "vof_rating": None,
+        "reichweite": None,
+        "erfahrung": None,
+        "platoon": None,
+        "attached_an": [],
+        "hinweis": "Company Jeep asset (no crew, 10.8.8): carries 2 steps of infantry; embarked HQ/Staff activate it themselves, "
+        "other passengers through an HQ in Visual-Verbal communication or GI; passengers Exposed when it moves (10.8.1)",
+    }
+
+
+def update_jeep_experience(s, name):
+    """[RULE 10.8.8 p.77] a crewless vehicle uses the highest Experience Level of the units on board."""
+    j = s["einheiten"].get(name)
+    if j is None or not j.get("kompanie_jeep"):
+        return
+    exp = [comms.experience(s["einheiten"][m]) for m in passengers(s, name)]
+    j["erfahrung"] = max(exp, key=_EXP_ORDER.get) if exp else None
+
+
 def arty_jeep_unit(fo):
     """The ARTY FD Net Jeep counter (E79): no crew (10.8.8), Jeep chart line, embarked units drive it (10.8.1)."""
     return {
@@ -1548,6 +1589,8 @@ def order_4_2_1i(s, ctx):
         )
     if activated(z):
         raise rules.Violation(f"{ctx.target_name} is already Activated")
+    if crewless_jeep(z) and not passengers(s, ctx.target_name):
+        raise rules.Violation(f"{ctx.target_name} has no crew and nobody on board to drive it [10.8.1, 10.8.8]")  # L528
     z["status"].append(rules.ACTIVATED)
     ctx.prot.append(f"{ctx.target_name}: place the Activated marker [4.2.1i, 10.4]")
 
@@ -1564,6 +1607,12 @@ def order_check(s, hq_name, target_name, akt):
         )
     if not is_vehicle(z):
         return False
+    if crewless_jeep(z) and not z.get("platoon") and hq_name not in ("GI", target_name):
+        # L528 [RULE 10.8.1 p.76] embarked HQ/Staff activate themselves; anyone else only in Visual-Verbal communication
+        if hq_name in passengers(s, target_name) and state.is_hq(hq):
+            return True
+        comms.visual_verbal(s, hq_name, target_name, akt)
+        return True
     akt = akt or "4.2.1a"
     if (
         akt not in VEHICLE_ORDERS

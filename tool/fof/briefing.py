@@ -135,7 +135,9 @@ def objective_status(s):
 
 def unit_text(n, e):
     t = n
-    if state.steps(e) != 1 and not e.get("arty_jeep"):  # L454: the crewless jeep shows no steps
+    if state.steps(e) != 1 and not (
+        e.get("arty_jeep") or e.get("kompanie_jeep")
+    ):  # L454/L528: crewless jeeps show no steps
         t += f"({state.steps(e)}St)"
     st = list(e["status"])
     if e["seite"] == "Feind":

@@ -193,7 +193,7 @@ def place_unit(s, n, e, k, o, prot):
         if x is not e and (e.get("an_bord") == m or x.get("an_bord") == n):
             x["karte"] = k
             prot.append(
-                f"{m} {'carries' if x.get('arty_jeep') else 'on board of'} {n if x.get('arty_jeep') else m}: also on {k}"
+                f"{m} {'carries' if (x.get('arty_jeep') or x.get('kompanie_jeep')) else 'on board of'} {n}: also on {k}"
             )
     if o.get("--bereich") and (s.get("reattempt_setup") or s.get("patrouille_mission") or s.get("aufstellung_feld")):
         commands.set_area(s, e, options.text_opt(o, "--bereich", _usage("setup")))

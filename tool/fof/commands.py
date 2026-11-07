@@ -1652,28 +1652,56 @@ def _order_pick_up(s, ctx):
 
 
 def embark_jeep(s, ctx):
-    """L454 [4.2.2h p.23, 10.8.1, Normandy CSR 1 p.13] get on or off the Arty Jeep; it carries a single step, the Arty FO."""
+    """L454/L528 [4.2.2h p.23, 10.8.1, 10.8.8, Normandy CSR 1 p.13, Naktong p.12] get on or off a crewless jeep.
+    The Arty Jeep carries a single step, the Arty FO; the company Jeep carries infantry up to its chart capacity."""
     from . import vehicles
 
     z, n = ctx.z, ctx.target_name
     if z.get("an_bord"):
         jeep = z.pop("an_bord")
-        ctx.prot.append(
-            f"{n} gets off the {jeep} on {z['karte']}; the SCR610 stays mounted in the jeep and works only on board [Normandy CSR 1 p.13]"
-        )
+        if s["einheiten"].get(jeep, {}).get("arty_jeep"):
+            ctx.prot.append(
+                f"{n} gets off the {jeep} on {z['karte']}; the SCR610 stays mounted in the jeep and works only on board [Normandy CSR 1 p.13]"
+            )
+        else:
+            vehicles.update_jeep_experience(s, jeep)
+            ctx.prot.append(f"{n} gets off the {jeep} on {z['karte']} [4.2.2h, 10.8.1]")
         return
-    jeeps = [m for m in state.units_on(s, z["karte"], "US") if s["einheiten"][m].get("arty_jeep")]
+    jeeps = [m for m in state.units_on(s, z["karte"], "US") if vehicles.crewless_jeep(s["einheiten"][m])]
     if not jeeps:
-        raise rules.Violation(f"No Arty Jeep on {z['karte']} [Normandy CSR 1 p.13]")
-    if not any(g.get("eingebaut") == jeeps[0] for g in z.get("funk", [])):
+        raise rules.Violation(f"No jeep on {z['karte']} [10.8.1]")
+    arty = [m for m in jeeps if s["einheiten"][m].get("arty_jeep")]
+    company = [m for m in jeeps if s["einheiten"][m].get("kompanie_jeep")]
+    if arty and any(g.get("eingebaut") == arty[0] for g in z.get("funk", [])):
+        if vehicles.passengers(s, arty[0]):
+            raise rules.Violation(f"{arty[0]} is already occupied [Normandy CSR 1 p.13]")
+        z["an_bord"] = arty[0]
+        z["bereich"] = "offen"
+        ctx.prot.append(f"{n} gets on the {arty[0]} [4.2.2h, 10.8.1]")
+        return
+    if not company:
         raise rules.Violation(
-            f"The {jeeps[0]} can only carry a single step, the Arty FO [Normandy CSR 1 p.13 'this Jeep can only carry a single step (the Arty FO)']"
+            f"The {arty[0]} can only carry a single step, the Arty FO [Normandy CSR 1 p.13 'this Jeep can only carry a single step (the Arty FO)']"
         )
-    if vehicles.passengers(s, jeeps[0]):
-        raise rules.Violation(f"{jeeps[0]} is already occupied [Normandy CSR 1 p.13]")
-    z["an_bord"] = jeeps[0]
+    if vehicles.is_vehicle(z):
+        raise rules.Violation(f"{n} is a vehicle; only infantry rides on the jeep [10.8.1]")
+    cap = vehicles.chart(s["einheiten"][company[0]])[8]
+    free = [
+        m
+        for m in company
+        if sum(state.steps(s["einheiten"][p]) for p in vehicles.passengers(s, m)) + state.steps(z) <= cap
+    ]
+    if not free:
+        aboard = "; ".join(f"{m}: {', '.join(vehicles.passengers(s, m)) or 'empty'}" for m in company)
+        raise rules.Violation(
+            f"{n} ({state.steps(z)} step(s)) does not fit: a jeep carries {cap} steps ({aboard}) [10.8.1, Vehicle and Anti-Tank Weapons Chart]"
+        )
+    z["an_bord"] = free[0]
     z["bereich"] = "offen"
-    ctx.prot.append(f"{n} gets on the {jeeps[0]} [4.2.2h, 10.8.1]")
+    vehicles.update_jeep_experience(s, free[0])
+    ctx.prot.append(
+        f"{n} gets on the {free[0]} [4.2.2h, 10.8.1]; passengers fire and are fired upon like infantry, Exposed whenever the jeep moves"
+    )
 
 
 def pick_up_item(s, ctx, part):
