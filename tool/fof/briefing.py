@@ -230,7 +230,10 @@ def briefing(s, errors=None):
     z.append("")
     z.append(_check_stamp(s, errors))
     txt = "\n".join(z) + "\n"
-    (state.game_dir() / "BRIEFING.md").write_text(txt, encoding="utf-8")
+    try:
+        state.write_atomic(state.game_dir() / "BRIEFING.md", txt)  # L551 (review K13)
+    except OSError as err:  # the entry is saved already; the briefing file is a convenience
+        print(f"NOTE: BRIEFING.md not written ({err}); fof.py status shows the same text")
     return txt
 
 

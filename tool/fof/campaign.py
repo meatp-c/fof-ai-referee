@@ -298,6 +298,7 @@ def units_after_reattempt(s):
         for n, e in s["einheiten"].items()
         if not (e.get("ebene") == "BN" and e["seite"] == "US")
         and not (e["seite"] == "Feind" and e["typ"] in ("Paralyzed Team", "Litter Team"))
+        and not (e["seite"] == "US" and e.get("nur_versuch"))  # L551 (review K11): as remove_leaving_units
     }
     for n, x in (s.get("patrouille_reserve") or {}).items():
         units[n] = x["einheit"]
@@ -818,7 +819,7 @@ def enemy_into_cover(s, prot):
     step 8 and can free a cover marker that a friendly unit still held at the reset."""
     for n, e in s["einheiten"].items():
         if e["seite"] == "Feind" and e.get("bereich", "offen") == "offen":
-            free = state.free_cover(s, e["karte"], "Feind")  # covers without US units under them
+            free = state.free_cover(s, e["karte"], "Feind", steps=state.steps(e))  # no US units under them, room (L534)
             if free:
                 e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
                 prot.append(f"{n} under {e['bereich']} (step 8; if there is too little cover, distribute randomly)")
@@ -944,6 +945,8 @@ def cmd_reconstitute(s, args):
     lats = options.list_option(o, "--aus")
     if not lats:
         raise rules.Violation("Specify --from=<LAT>[,<LAT>..]")
+    if len(set(lats)) != len(lats):  # L529 (review K4): a LAT named twice counted twice, then a KeyError
+        raise rules.Violation(f"--from names a LAT more than once: {', '.join(lats)}")
     for t in lats:
         te = state.unit(s, t)
         if te["seite"] != "US" or not state.is_lat(te):
@@ -979,6 +982,8 @@ def cmd_reconstitute(s, args):
             + (", Green (new HQs are always Green)" if state.is_hq(e) else "")
         )
     level = options.text_opt(o, "--erfahrung", _usage("reconstitute"))
+    if level:
+        level = rules.experience_value(level, "--experience")  # L529
     if level and not state.is_hq(e):
         e["erfahrung"] = level
         prot.append(f"Experience {level} (12.6 table, promotions via xp spend)")

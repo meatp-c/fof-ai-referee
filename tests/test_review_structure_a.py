@@ -9,6 +9,7 @@ import pytest
 from conftest import unit
 
 from fof import briefing, commands, contact, enemy, rules, state, vehicles
+from fof import grenades  # L556: split from commands
 
 SRC = pathlib.Path(commands.__file__).resolve().parent
 
@@ -61,9 +62,9 @@ def test_point_blank_grenade_needs_a_spotted_enemy(board):
     z = s["einheiten"]["1/1"] = unit("23")
     s["einheiten"]["E1"] = unit("23", side="Feind", spotted=False)
     with pytest.raises(rules.Violation, match=r"No Spotted enemy on 23 \[7.10\]"):
-        commands.check_grenade(s, z, "1/1", {})
+        grenades.check_grenade(s, z, "1/1", {})
     s["einheiten"]["E1"]["spotted"] = True
-    assert commands.check_grenade(s, z, "1/1", {}) == "23"
+    assert grenades.check_grenade(s, z, "1/1", {}) == "23"
 
 
 # ---------------------------------------------------------------- Struktur 10: OrderCtx / EnemyActionCtx

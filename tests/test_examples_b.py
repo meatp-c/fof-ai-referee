@@ -7,6 +7,7 @@ import pytest
 from conftest import unit
 
 from fof import briefing, combat, commands, enemy, fire, geometry, rules, state
+from fof import pickup  # L556: split from commands
 
 
 @pytest.fixture
@@ -53,10 +54,10 @@ def test_transport_capacity_demo_team_and_co_hq(board):
     with pytest.raises(rules.Violation, match="at most 3 RKT"):
         combat.ammo_pick_up(s, demo, "Demo Team", "RKT:1", prot)
     for a in ("Smoke", "WP Smoke"):
-        commands.pick_up(s, demo, "Demo Team", a, prot)
+        pickup.pick_up(s, demo, "Demo Team", a, prot)
     assert demo["assets"] == ["Smoke", "WP Smoke"]
     for a in ("RSP", "GSP", "Red Smoke", "Green Smoke"):
-        commands.pick_up(s, co, "CO HQ", a, prot)
+        pickup.pick_up(s, co, "CO HQ", a, prot)
     assert len(co["assets"]) == 4 and len(co["funk"]) == 2
 
 
@@ -536,10 +537,5 @@ def test_hit_effects_cf_on_japanese_squad_and_lc_on_bazooka_team(board, quiet):
 # ---------------------------------------------------------------- 6.5.2 Reconstitution
 
 
-def test_reconstitute_a_rated_and_s_rated_german_fire_teams():
-    """[RULE 6.5.2 p.49] Zeile 5295: Ein A-rated und ein S-rated deutsches Fire Team rekonstituieren zu einem 2-Step
-    A-rated Squad (oder S-rated, wenn alle A-Squads auf der Karte sind); zwei S-rated Fire Teams nur zu einem S-Squad."""
-    pytest.skip(
-        "nicht nachbaubar: das Werkzeug kennt keine Rekonstitution feindlicher Squads aus Fire Teams "
-        "(4.2.3i gilt nur fuer US-Einheiten und vergibt immer VOF S ohne Blick auf die Teams)"
-    )
+# L552 (review T2): the example of 6.5.2 (German A and S Fire Teams reconstitute into a squad) was an unconditional
+# skip, a test that could never fail. The gap is recorded in normandy/luecken_fof_v4.md instead.

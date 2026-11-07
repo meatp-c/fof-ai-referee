@@ -14,6 +14,8 @@ Usage (commands on stdin, one fof command line per line; '#' lines are ignored):
 
 Exit code 0 booked (or probe ok), 2 a VIOLATION in the probe (nothing booked), 1 other error.
 L470: replaces the probe/book/commit/lock-cleanup sequence of three to four separate calls.
+L529: the verdict comes from fof.py's exit code (0 legal, 2 VIOLATION, anything else an error such as a traceback or
+'No game state'), not from the word VIOLATION in the text: informational lines, help texts and notes may contain it.
 """
 
 import json
@@ -57,11 +59,21 @@ def read_commands(text):
 
 
 def run(cmd, game_dir):
+    """Run one fof command against game_dir; returns (exit code, output)."""
     env = dict(os.environ, FOF_PARTIE=str(game_dir), PYTHONUTF8="1")
     p = subprocess.run(
         [sys.executable, str(FOF), *cmd], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8"
     )
-    return (p.stdout + p.stderr).rstrip("\n")
+    return p.returncode, (p.stdout + p.stderr).rstrip("\n")
+
+
+def verdict(rc, out):
+    """L529: 'ok', 'violation' (exit 2, cli.main) or 'error' (any other exit code, or a traceback in the output)."""
+    if rc == 2:
+        return "violation"
+    if rc != 0 or "Traceback (most recent call last)" in out:
+        return "error"
+    return "ok"
 
 
 def shorten(out, show_all):
@@ -116,27 +128,34 @@ def main():
     real = ROOT / partie
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="fofzug_"))
     try:
-        probe = scratch / partie
+        probe = scratch / pathlib.Path(partie).name  # L529: an absolute --partie must not resolve to the real folder
         # L474: undo needs the snapshots, so the probe copies verlauf only then
         needs_history = any(c and c[0] in ("undo", "zurueck") for c in cmds)
         shutil.copytree(real, probe, ignore=None if needs_history else shutil.ignore_patterns("verlauf"))
         (probe / "verlauf").mkdir(exist_ok=True)
         for c in cmds:
-            out = run(c, probe)
-            if "VIOLATION" in out:
-                print(f"PROBE {' '.join(c)}\n{shorten(out, opts['all'])}\nNOT BOOKED (probe)")
-                sys.exit(2)
+            rc, out = run(c, probe)
+            v = verdict(rc, out)
+            if v != "ok":
+                why = "probe" if v == "violation" else f"probe, error exit {rc}"
+                print(f"PROBE {' '.join(c)}\n{shorten(out, opts['all'])}\nNOT BOOKED ({why})")
+                sys.exit(2 if v == "violation" else 1)
             if opts["probe"]:
                 print(f"PROBE {' '.join(c)}\n{shorten(out, opts['all'])}")
         if opts["probe"]:
             return
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    for c in cmds:
-        out = run(c, real)
+        if scratch.exists():
+            print(f"NOTE: scratch folder {scratch} could not be removed")
+    for i, c in enumerate(cmds):
+        rc, out = run(c, real)
         print(f"> {' '.join(c)}\n{shorten(out, opts['all'])}")
-        if "VIOLATION" in out:  # should not happen after a clean probe; stop and report
-            print("STOPPED: violation in the real run")
+        if verdict(rc, out) != "ok":  # should not happen after a clean probe; stop and report
+            done = f"commands 1-{i} are booked but not committed" if i else "nothing was booked"
+            print(
+                f"STOPPED: {'violation' if rc == 2 else f'error exit {rc}'} in the real run of command {i + 1}; {done}"
+            )
             sys.exit(1)
     msg = opts["msg"] or f"{partie} T{turn_of(real)}: {' '.join(cmds[0])}"
     print(commit(partie, msg))

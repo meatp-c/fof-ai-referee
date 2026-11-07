@@ -1,9 +1,13 @@
 """Communication: visual-verbal, radio, telephone, runners, chain of command (4.3)."""
 
+from __future__ import annotations
+
 from . import briefing, geometry, rules, state
 
 
-def radios_of(e, type_=None, net=None, s=None):
+def radios_of(
+    e: state.Unit, type_: str | None = None, net: str | None = None, s: state.GameState | None = None
+) -> list[dict]:
     """Radios carried by the unit (setup field 'funk': [{typ, netz}]); destroyed ones do not count. A radio mounted in a
     vehicle (eingebaut, Arty Jeep CSR 1) works while the unit is on board of that vehicle (L454) or, given the game
     state s, while the unit is on the same card as the vehicle (L526, Stead BGG 3747382: 'it has a phone line that the
@@ -25,7 +29,7 @@ def radios_of(e, type_=None, net=None, s=None):
     ]
 
 
-def radio_los(s, a, b):
+def radio_los(s: state.GameState, a: str, b: str) -> tuple[bool, str]:
     """SCR536 LOS: [RULE 2.5 p.12] within staging and to adjacent cards of row 1; otherwise 5.2.1/5.2.2 [RULE 4.3.5 p.29]."""
     ka, kb = state.card(s, a), state.card(s, b)
     if ka.get("staging") and kb.get("staging"):
@@ -48,7 +52,9 @@ def radio_los(s, a, b):
     return ok, g
 
 
-def radio_direct(s, a_name, b_name, type_="SCR536", net="CO TAC"):
+def radio_direct(
+    s: state.GameState, a_name: str, b_name: str, type_: str = "SCR536", net: str = "CO TAC"
+) -> tuple[bool, str]:
     """Direct radio link between two units: both carry a device of the net, SCR536 not under a cover marker and only with LOS."""
     a, b = s["einheiten"][a_name], s["einheiten"][b_name]
     if not radios_of(a, type_, net):
@@ -69,7 +75,7 @@ def radio_direct(s, a_name, b_name, type_="SCR536", net="CO TAC"):
     return True, f"{type_} {net} [RULE 4.3.5 p.29]"
 
 
-def radio_link(s, a_name, b_name):
+def radio_link(s: state.GameState, a_name: str, b_name: str) -> tuple[bool | None, str]:
     """CO TAC Net [RULE 4.3.3 p.27]: the CO HQ is the hub; (None, '') if neither unit has a radio."""
     a, b = s["einheiten"][a_name], s["einheiten"][b_name]
     if not (radios_of(a) or radios_of(b)) or not state.radio_active(s):
@@ -81,7 +87,7 @@ def radio_link(s, a_name, b_name):
             return False, f"{n} has no SCR536 CO TAC (FOs may not join the CO TAC Net, [RULE 4.3.3 p.28])" if e[
                 "typ"
             ] == "FO" else f"{n} has no SCR536 CO TAC"
-    co = s.get("co_hq")
+    co: str = s.get("co_hq") or ""
     if co in (a_name, b_name):
         return radio_direct(s, a_name, b_name)
     if co not in s["einheiten"]:
@@ -97,7 +103,7 @@ def radio_link(s, a_name, b_name):
     return False, f"via the hub {co}: " + (g1 if not ok1 else g2) + state.open_reading(s, "U11_plt_mtr_ueber_hub")
 
 
-def bn_link(s):
+def bn_link(s: state.GameState) -> tuple[bool, str]:
     """[RULE 4.1.1 p.18] BN HQ off-map activates the CO HQ if it is in communication via BN TAC."""
     co = s.get("co_hq")
     if co not in s["einheiten"]:
@@ -109,7 +115,7 @@ def bn_link(s):
     return True, "SCR300 BN TAC, works everywhere [RULE 4.3.5 p.29]"
 
 
-def visual_verbal(s, hq_name, target_name, akt=None):
+def visual_verbal(s: state.GameState, hq_name: str, target_name: str, akt: str | None = None) -> bool:
     hq, z = state.unit(s, hq_name), state.unit(s, target_name)
     if hq["karte"] != z["karte"]:
         raise rules.Violation(
@@ -128,7 +134,7 @@ def visual_verbal(s, hq_name, target_name, akt=None):
     return True
 
 
-def communication(s, hq_name, target_name, akt=None):
+def communication(s: state.GameState, hq_name: str, target_name: str, akt: str | None = None) -> bool:
     """4.3.1 Visual-Verbal: same card, same area, both Unpinned. Exception: Rally/Exhort to Pinned.
     Radio: field 'netz' (v2) or radios 'funk' (v3: SCR536 CO TAC with LOS, not under cover, CO HQ as hub)."""
     hq, z = state.unit(s, hq_name), state.unit(s, target_name)
@@ -161,7 +167,7 @@ def communication(s, hq_name, target_name, akt=None):
         raise rules.Violation(f"{vv}; radio: {reason}") from None
 
 
-def chain_of_command(s, hq_name, target_name):
+def chain_of_command(s: state.GameState, hq_name: str, target_name: str) -> bool:
     """4.0 p.18 Command Reference Table: PLT HQ orders its own platoon units and any LAT; CO HQ/Staff everything except higher HQs."""
     hq, z = state.unit(s, hq_name), state.unit(s, target_name)
     if hq_name == target_name or state.is_lat(z):
@@ -196,7 +202,7 @@ def chain_of_command(s, hq_name, target_name):
     return True
 
 
-def action_allowed(z, target_name, akt):
+def action_allowed(z: state.Unit, target_name: str, akt: str) -> None:
     """4.2.5: Pinned takes precedence, then LAT lists, Fire Team side like Fire Team."""
     name = rules.ACTIONS[akt][0]
     cc = akt.startswith("4.2.1")
@@ -231,7 +237,7 @@ def action_allowed(z, target_name, akt):
         )
 
 
-def experience(e):
+def experience(e: state.Unit) -> str:
     if state.is_lat(e):
         return rules.LAT_EXPERIENCE[e["typ"]]
     if state.fire_team_side(e):
@@ -239,13 +245,15 @@ def experience(e):
     return e.get("erfahrung", "Line")
 
 
-def enemy_rally_cards(e):
+def enemy_rally_cards(e: state.Unit) -> tuple[int, str | None]:
     """[RULE 6.5.1 p.48] Rally under VOF: 2 cards, modified by the experience of the commander; for the enemy the unit itself (L fix 08.10.2026)."""
     ez = e.get("erfahrung")
-    return max(1, 2 + {"Green": -1, "Veteran": 1}.get(ez, 0)), ez
+    return max(1, 2 + {"Green": -1, "Veteran": 1}.get(ez or "", 0)), ez
 
 
-def card_count(s, akt, orig, z, extra=0, base_cff=None):
+def card_count(
+    s: state.GameState, akt: str, orig: state.Unit, z: state.Unit, extra: int = 0, base_cff: int | None = None
+) -> tuple[int, state.Unit, int]:
     """4.2 p.21: base 2 (Seek Cover: card; Call for Fire: mission); experience of the recipient (movement/combat) or of the originator (Rally).
     Clarification 1: 0 cards = not possible (except Spotting: minimum 1)."""
     if akt == "4.2.2e":
@@ -318,7 +326,7 @@ def spot_modifiers(s, sp, target_card_):
     return mods
 
 
-def phone_nodes(s):
+def phone_nodes(s: state.GameState) -> set[str]:
     """Cards that are part of the phone line network: intact line, phone in use (implicit line, BGG E28), Staging (integrated)."""
     kn = set()
     for k, c in s["karten"].items():
@@ -358,13 +366,13 @@ def phone_net_connected(s, a, b, diag=None):
     return False
 
 
-def phone_link(s, a_name, b_name):
+def phone_link(s: state.GameState, a_name: str, b_name: str) -> tuple[bool, str]:
     """CO TAC by telephone: both with EE8 CO TAC, the CO HQ is the hub; cover, Pinned, areas do not matter (4.3.4 p.28)."""
     a, b = s["einheiten"][a_name], s["einheiten"][b_name]
     for n, e in ((a_name, a), (b_name, b)):
         if not radios_of(e, "EE8", "CO TAC"):
             return False, f"{n} has no EE8 CO TAC"
-    co = s.get("co_hq")
+    co: str = s.get("co_hq") or ""
     if co not in (a_name, b_name):
         if co not in s["einheiten"]:
             return False, "CO HQ (hub of the CO TAC Net) not in play [4.3.3 p.27]"
@@ -459,15 +467,15 @@ def line_checks_3_7_4(s, prot):
         )
 
 
-def runner_box(s):
+def runner_box(s: state.GameState) -> list[str]:
     return s.setdefault("runner_box", [])
 
 
-def runner_count(s):
+def runner_count(s: state.GameState) -> int:
     return len(runner_box(s)) + len([n for n, e in s["einheiten"].items() if e["typ"] == "Runner"])
 
 
-def deliver_runner(s, prot):
+def deliver_runner(s: state.GameState, prot: state.Prot) -> None:
     """[RULE 4.3.2 p.27] In the CO HQ impulse of the following turn: Runner not Pinned, HQ still on the card and not on its Fire Team side:
     HQ activated, Runner back to the Assets box. Otherwise it returns at the start of the first CO HQ impulse in Good Order."""
     for n, e in list(s["einheiten"].items()):

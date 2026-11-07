@@ -1,7 +1,5 @@
 """L514-L526 (05.11.2026): tool gaps from the aborted Naktong run 1 and the BGG research of 05.11.2026."""
 
-import inspect
-
 import pytest
 
 from conftest import unit
@@ -17,11 +15,21 @@ def quiet(monkeypatch, tmp_path):
 
 
 # ---- L515 Pinned/LAT enemy Fall Back without a card: redraw (Stead BGG 3514510), not No Action
-def test_restricted_fall_back_says_redraw():
-    from fof import enemy
+def test_restricted_fall_back_says_redraw(board):
+    """L552 (review T3): behaviour: no card without VOF towards the enemy edge: redraw, the team stays."""
+    from fof import combat, enemy, rules
 
-    src = inspect.getsource(enemy)
-    assert "draw the activity R# again" in src and "Redraw if a move isn't possible" in src
+    s = board
+    s.update(zug=2, phase="3.4.2", feind_taktik="Hasty", aktivitaet="Contact", kampagne={})
+    for k in ("31", "32"):
+        s["karten"][k]["extern"].append({"typ": "Incoming", "wert": -3, "quelle": "x"})
+    s["einheiten"]["U1"] = unit("11")
+    pt = unit("21", side="Feind", typ="Paralyzed Team", steps=1, vof=None, check_offen=True)
+    combat.set_lat_values(pt, "Paralyzed Team")
+    s["einheiten"]["PT"] = pt
+    with pytest.raises(rules.Violation, match="draw the activity R# again"):
+        enemy.cmd_enemy_action(s, ["PT", "Fall Back", "--ziel=31"])
+    assert pt["karte"] == "21"
 
 
 # ---- L516 3.7.2 list sorted by PC letter
@@ -69,10 +77,42 @@ def test_fire_follows_along_same_pdf(board):
 
 
 # ---- L519 G! first fire on placement names the card count
-def test_g_first_fire_card_count_text():
+def _g_contact(board, erfahrung, o):
+    import copy
+
     from fof import contact
 
-    assert "base 2, experience" in inspect.getsource(contact)
+    s = board
+    s.update(kampagne={}, aktivitaet="No Contact")
+    s["karten"]["11"]["pc"] = "A"
+    s["einheiten"]["1/1"] = unit("11")
+    pk = {
+        "name": "G! team",
+        "spotted": True,
+        "place_vof": True,
+        "einheiten": [
+            {
+                "einheit": "Rifle Grenade Team",
+                "typ": "Weapons Team",
+                "vof_rating": "G",
+                "reichweite": "L",
+                "steps": 1,
+                "platz": "max",
+                "grenade_ranged": True,
+                "erfahrung": erfahrung,
+            }
+        ],
+    }
+    contact.pc_contact_v4(s, "11", "A1", copy.deepcopy(pk), {"--richtung": "Front", **o})
+    return s
+
+
+def test_g_first_fire_card_count_text(board):
+    """L552 (review T3): the prompt counts base 2 adjusted for Experience."""
+    from fof import rules
+
+    with pytest.raises(rules.Violation, match=r"draw 3 cards \(base 2, experience Veteran\)"):
+        _g_contact(board, "Veteran", {})
 
 
 # ---- L520 capture note from the setup
@@ -87,10 +127,22 @@ def test_prisoner_source_text():
 
 
 # ---- L521 package variant with R# bands from the mission table
-def test_variant_bands_in_hint():
-    from fof import contact
+def test_variant_bands_in_hint(board):
+    """L552 (review T3): the variant prompt names the R# bands of the mission table."""
+    from fof import contact, rules
 
-    assert "(mission table)" in inspect.getsource(contact)
+    s = board
+    s["kampagne"] = {}
+    s["karten"]["11"]["pc"] = "A"
+    s["einheiten"]["1/1"] = unit("11")
+    pk = {
+        "name": "Incoming",
+        "spotted": True,
+        "einheiten": [],
+        "varianten": {"Artillery": {"r": "1-4/10", "wert": -4}, "Mortar": {"r": "5-10/10", "wert": -3}},
+    }
+    with pytest.raises(rules.Violation, match=r"R# 1-4/10 = Artillery, R# 5-10/10 = Mortar \(mission table\)"):
+        contact.pc_contact_v4(s, "11", "A1", pk, {})
 
 
 # ---- L522 Leader with a random squad (--leader-squad)
@@ -142,9 +194,30 @@ def test_ooa_flip_rally_blocked(board):
 
 # ---- L525 Max LOS of a package without PDF counts the trigger's view into an Incoming card
 def test_max_los_no_pdf_uses_trigger_view():
+    """L552 (review T3): a package without PDF looks INTO an Incoming card from the trigger (8.4.3): Max LOS reaches
+    the Incoming card itself; with a PDF the unit needs LOS out of the card, so it stops one card short."""
+    from conftest import card
     from fof import contact
 
-    assert "L525" in inspect.getsource(contact)
+    def place(place_vof):
+        s = {
+            "sicht": "tag",
+            "typ": "offensiv",
+            "zug": 1,
+            "phase": "3.7.2",
+            "einheiten": {},
+            "kommandos": {},
+            "karten": {f"{r}{c}": card(r, c) for r in (1, 2, 3, 4) for c in (1, 2, 3)},
+            "protokoll": [],
+            "optionen": {},
+        }
+        s["karten"]["31"]["extern"].append({"typ": "Incoming", "wert": -3, "quelle": "x"})
+        u = {"einheit": "S", "typname": "S", "typ": "Squad", "platz": "max", "reichweite": "L"}
+        places = []
+        contact.contact_choose_places(s, [u], [u], "11", {}, {"place_vof": place_vof}, places, [], [], ["Front"], {})
+        return places
+
+    assert place(False) == ["31"] and place(True) == ["21"]
 
 
 # ---- L526 jeep radio usable on the same card as the jeep (Stead BGG 3747382)

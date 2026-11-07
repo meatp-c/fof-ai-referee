@@ -114,387 +114,460 @@ def cmd_event(s, args):
     briefing.print_board(prot, s)
 
 
-def friendly_event(s, ev, o, prot):
-    i = ev["id"]
+def _friendly_situation_report(s, ev, o, prot, i):
     co = s.get("co_hq")
-    if i in ("situation_report", "comm_trouble"):
-        n = 3 if i == "situation_report" else 2
-        s["ereignis_pflicht"] = {"id": i, "commands": n, "zug": s["zug"], "stern": ev.get("stern")}
-        if i == "comm_trouble":
-            s["bn_nicht_verfuegbar"] = s["zug"]
-            prot.append(f"BN HQ does not activate {co} this turn; {co} draws Initiative in 3.3.2a [4.1.1 p.19]")
-        prot.append(
-            f"{co} must spend its first {n} Commands on it; the tool deducts them at {co}'s first card draw"
-            + state.open_reading(s, "U16_erste_commands_mit_gespart")
-            + "; no penalty if Commands are short [Normandy M1 p.18]"
-        )
-    elif i == "tank_support":
-        # L188 [Normandy M6 p.39] 'Enter a tank platoon (4 tanks + tank HQ) of M5s on to any cards of your choice on Row 1. Each has 5 ammo.'
-        pool = s.get("ereignis_vorrat", {}).get("tank_support", {})
-        if not pool:
-            prot.append("Tank Support: no tank platoon defined for this mission, event lapses")
-            return
-        cards = [x.strip() for x in (o.get("--platz") or "").split(",") if x.strip()]
-        row1 = geometry.first_card_row(s)
-        if len(cards) == 1:
-            cards = cards * len(pool)
-        if len(cards) != len(pool):
-            raise rules.Violation(
-                f"Tank Support: --place=<card>[,<card>..] on row {row1}, one card for all or one per vehicle in this order: {', '.join(pool)} [Normandy M6 p.39]"
-            )
-        for k in cards:
-            if state.card(s, k)["reihe"] != row1 or state.card(s, k).get("staging"):
-                raise rules.Violation(f"{k} is not on row {row1} [Normandy M6 p.39]")
-        for (n, d), k in zip(pool.items(), cards):
-            e = copy.deepcopy(d)
-            e.update(karte=k, bereich="offen", status=[], ziel=None)
-            s["einheiten"][n] = e
-            if state.is_hq(e):
-                s["kommandos"][n] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
-            prot.append(
-                f"Tank Support: {n} ({e.get('fahrzeug')}, ammo {(e.get('munition') or {}).get('punkte')}) enters on {k}"
-            )
-        s["ereignis_vorrat"]["tank_support"] = {}
-        fire.open_fire(s, prot)
-    elif i.endswith("_displacing"):
-        # artillery_displacing, cannon_displacing, mortar_displacing: the firing agency of the event is unavailable
-        # (L277: the Cannon Co and Mortar Plt events used to fall through silently)
-        s["fm_gesperrt"] = {"zug": s["zug"], "gruppe": ev.get("gruppe", "15th FA")}
-        prot.append(f"{ev.get('gruppe', '15th FA')} not available this turn (no Call for Fire)")
-    elif i == "checking_up":
-        who = o.get("--wer")
-        if who not in ("Rgt", "Bn"):
-            raise rules.Violation(
-                "Checking Up: choose Higher HQ Staff by R#/2 (Rgt Cmdr or Bn Cmdr) and --who=Rgt|Bn [Normandy M1 p.18]"
-            )
-        if co not in s["einheiten"]:
-            prot.append(f"{co} not in play: event not possible, no event [3.1 p.15]")
-            return
-        name = "Rgt Cmdr" if who == "Rgt" else "Bn Cmdr"
-        c = s["einheiten"][co]
-        s["einheiten"][name] = {
-            "typ": "HQ",
-            "ebene": "BN",
-            "platoon": None,
-            "seite": "US",
-            "erfahrung": "Line",
-            "karte": c["karte"],
-            "bereich": c.get("bereich", "offen"),
-            "status": [],
-            "steps": 1,
-            "vof_rating": None,
-            "reichweite": "L",
-            "ziel": None,
-            "fire_team_seite": True,
-            "ft_vof": "S",
-            "funk": [],
-            "bis_zug": s["zug"] + 1,
-            "hinweis": "Higher HQ Staff (Line, 4.1.1); no radio, activates the CO HQ only by Visual-Verbal (BGG 3549109, 3234087: 'BN HQ isn't equipped with a radio')",
-        }
-        s["kommandos"][name] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
-        prot.append(
-            f"{name} on {c['karte']} (with {co}) through turn {s['zug'] + 1}; BN HQ counts as 'on the map': in the BN HQ impulse {name} receives "
-            f"{rules.MAX_PER_IMPULSE[s['sicht']]} Commands and must activate {co} itself (communication required) [4.1.1 p.18/19]"
-        )
-    elif i == "trouble_flank":
-        s["ereignis_flanke"] = {"id": i, "zug": s["zug"]}
-        prot.append(
-            f"No unit may move this turn onto a new row ahead of the foremost US unit (now row {state.us_front(s)})"
-        )
-    elif i in ("company_ahead", "screaming"):
-        if state.us_front(s) >= state.top_row(s):
-            prot.append("already on row 3: event lapses [Normandy M1 p.18]")
-            return
-        if i == "screaming" and not any(
-            c.get("pc") for c in s["karten"].values() if c["reihe"] == state.us_front(s) + 1
-        ):
-            s.setdefault("_hinweise", []).append(
-                "Screaming for Action: check whether a PC marker in the next row is reachable; otherwise the event lapses"
-            )
-        s["ereignis_flanke"] = {
-            "id": i,
-            "zug": s["zug"],
-            "reihe": state.us_front(s),
-            "stern": ev.get("stern"),
-            "erfuellt": False,
-        }
-        prot.append(
-            f"Mandatory (if Commands suffice): at least one unit onto a new row {state.us_front(s) + 1}"
-            + (" with a PC marker" if i == "screaming" else "")
-            + "; fulfilled = 1 Experience Point [Normandy M1 p.18]"
-        )
-    elif i == "hold_up":
-        s["hold_up"] = s["zug"]
-        prot.append("Hold up!: no friendly unit may move onto an unoccupied card this turn [Normandy M3 p.26]")
-    elif i == "raining":
-        s["wetter"], s["wetter_nur_zug"] = 2, True
-        geometry.update_visibility(s)
-        prot.append(
-            f"Rain marker: visibility +2 this turn (total {sum(geometry.light_weather(s)):+d}), Limited Visibility; no card counts as illuminated (9.2.1); remove in Clean Up [Normandy M3 p.26]"
-        )
-    elif i == "lost_dark":
-        who, to_ = o.get("--wer"), o.get("--nach")
-        with_ = campaign.patrol(s).get("mitglieder", [])
-        if not who or not to_:
-            raise rules.Violation(
-                f"Lost in the Dark: choose a patrol unit by R# ({', '.join(m for m in with_ if m in s['einheiten'])}), direction by R#8, --who=<unit> --to=<card> "
-                "(if the card lies outside: first extend <row> <column> <type> and pc set <card> <letter of the row, row 5 = A>) [Normandy M3 p.26]"
-            )
-        if who not in with_:
-            raise rules.Violation(f"{who} is not part of the patrol")
-        state.card(s, to_)
-        if not geometry.adjacent(s, s["einheiten"][who]["karte"], to_):
-            raise rules.Violation(f"{to_} is not adjacent to {s['einheiten'][who]['karte']}")
-        commands.move_unit(s, who, to_, "offen", True, prot)
-        prot.append("Lost in the Dark: unit moved one card in a random direction and Exposed [Normandy M3 p.26]")
-    elif i == "screaming_route":
-        z = s.get("ziele", {})
-        idx = campaign.patrol(s).get("route_index", 0)
-        if idx >= 4:
-            prot.append("All four Route Points visited: event lapses [Normandy M3 p.26]")
-            return
-        s["ereignis_route"] = {
-            "zug": s["zug"],
-            "ziel": z.get("route", {}).get(str(idx + 1)),
-            "stern": ev.get("stern"),
-            "erfuellt": False,
-        }
-        prot.append(
-            f"Mandatory (if Commands suffice): at least one unit toward Route Point {idx + 1} ({s['ereignis_route']['ziel']}); fulfilled = 1 Experience Point [Normandy M3 p.26]"
-        )
-    elif i == "heat":
-        # L483 [Naktong M1 p.17] 'Until the end of next turn, each time a unit is marked Exposed, draw a card; on R#1/4,
-        # remove 1 step from the unit as a casualty. Ignore during Rain.'
-        if (s.get("wetter") or 0) >= 2:
-            prot.append("Heat Casualties: ignored during Rain [Naktong M1 p.17]")
-            return
-        s["hitze"] = {"bis_zug": s["zug"] + 1}
-        prot.append(
-            f"Heat Casualties through turn {s['zug'] + 1}: every time a friendly unit is marked Exposed, draw a card, R#/4 = 1 (only 1) = 1 step Casualty (fof.py heat <unit> <R#/4>) [Naktong M1 p.17]"
-        )
-    elif ev.get("vorrat"):
-        # L485 [Naktong M1 p.17] '.50 cal HMG Team: Place a .50 cal HMG team with 6 ammo in the Staging Area under the
-        # command of the HMG HQ. It remains until the end of the current Attempt'
-        pool = s.get("ereignis_vorrat", {}).get(ev["vorrat"], {})
-        if not pool:
-            prot.append(f"{ev['text'].split(':')[0]}: unit already in play or not available, event lapses")
-            return
-        k = o.get("--platz")
-        if not k or not state.card(s, k).get(ev.get("platz", "staging")):
-            raise rules.Violation(f"--place=<card of the Staging Area> [{ev.get('quelle', 'mission event')}]")
-        for n, d in pool.items():
-            e = copy.deepcopy(d)
-            e.update(karte=k, bereich="offen", status=[], ziel=None, nur_versuch=ev["vorrat"])
-            s["einheiten"][n] = e
-            prot.append(
-                f"{n} enters on {k}"
-                + (f" ({e['munition']['punkte']} {e['munition']['typ']} ammo)" if e.get("munition") else "")
-            )
-        s["ereignis_vorrat"][ev["vorrat"]] = {}
-        fire.open_fire(s, prot)
-    elif i == "ammo_resupply":
-        s["ereignis_munition"] = s["zug"]
-        prot.append(
-            "Four ammo of one type onto a card of mission row 1 of your choice: fof.py ammo depot <card> MG|MTR|RKT 4 [Normandy M1 p.18]"
-        )
-    else:
-        raise rules.Violation(f"Friendly event id '{i}' is not implemented; nothing booked (L277)")
+    n = 3 if i == "situation_report" else 2
+    s["ereignis_pflicht"] = {"id": i, "commands": n, "zug": s["zug"], "stern": ev.get("stern")}
+    if i == "comm_trouble":
+        s["bn_nicht_verfuegbar"] = s["zug"]
+        prot.append(f"BN HQ does not activate {co} this turn; {co} draws Initiative in 3.3.2a [4.1.1 p.19]")
+    prot.append(
+        f"{co} must spend its first {n} Commands on it; the tool deducts them at {co}'s first card draw"
+        + state.open_reading(s, "U16_erste_commands_mit_gespart")
+        + "; no penalty if Commands are short [Normandy M1 p.18]"
+    )
 
 
-def enemy_event(s, ev, o, prot):
+def _friendly_tank_support(s, ev, o, prot, i):
+    # L188 [Normandy M6 p.39] 'Enter a tank platoon (4 tanks + tank HQ) of M5s on to any cards of your choice on Row 1. Each has 5 ammo.'
+    pool = s.get("ereignis_vorrat", {}).get("tank_support", {})
+    if not pool:
+        prot.append("Tank Support: no tank platoon defined for this mission, event lapses")
+        return
+    cards = [x.strip() for x in (o.get("--platz") or "").split(",") if x.strip()]
+    row1 = geometry.first_card_row(s)
+    if len(cards) == 1:
+        cards = cards * len(pool)
+    if len(cards) != len(pool):
+        raise rules.Violation(
+            f"Tank Support: --place=<card>[,<card>..] on row {row1}, one card for all or one per vehicle in this order: {', '.join(pool)} [Normandy M6 p.39]"
+        )
+    for k in cards:
+        if state.card(s, k)["reihe"] != row1 or state.card(s, k).get("staging"):
+            raise rules.Violation(f"{k} is not on row {row1} [Normandy M6 p.39]")
+    for (n, d), k in zip(pool.items(), cards):
+        e = copy.deepcopy(d)
+        e.update(karte=k, bereich="offen", status=[], ziel=None)
+        s["einheiten"][n] = e
+        if state.is_hq(e):
+            s["kommandos"][n] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
+        prot.append(
+            f"Tank Support: {n} ({e.get('fahrzeug')}, ammo {(e.get('munition') or {}).get('punkte')}) enters on {k}"
+        )
+    s["ereignis_vorrat"]["tank_support"] = {}
+    fire.open_fire(s, prot)
+
+
+def _friendly_displacing(s, ev, o, prot, i):
+    # artillery_displacing, cannon_displacing, mortar_displacing: the firing agency of the event is unavailable
+    # (L277: the Cannon Co and Mortar Plt events used to fall through silently)
+    s["fm_gesperrt"] = {"zug": s["zug"], "gruppe": ev.get("gruppe", "15th FA")}
+    prot.append(f"{ev.get('gruppe', '15th FA')} not available this turn (no Call for Fire)")
+
+
+def _friendly_checking_up(s, ev, o, prot, i):
+    co = s.get("co_hq")
+    who = o.get("--wer")
+    if who not in ("Rgt", "Bn"):
+        raise rules.Violation(
+            "Checking Up: choose Higher HQ Staff by R#/2 (Rgt Cmdr or Bn Cmdr) and --who=Rgt|Bn [Normandy M1 p.18]"
+        )
+    if co not in s["einheiten"]:
+        prot.append(f"{co} not in play: event not possible, no event [3.1 p.15]")
+        return
+    name = "Rgt Cmdr" if who == "Rgt" else "Bn Cmdr"
+    c = s["einheiten"][co]
+    s["einheiten"][name] = {
+        "typ": "HQ",
+        "ebene": "BN",
+        "platoon": None,
+        "seite": "US",
+        "erfahrung": "Line",
+        "karte": c["karte"],
+        "bereich": c.get("bereich", "offen"),
+        "status": [],
+        "steps": 1,
+        "vof_rating": None,
+        "reichweite": "L",
+        "ziel": None,
+        "fire_team_seite": True,
+        "ft_vof": "S",
+        "funk": [],
+        "bis_zug": s["zug"] + 1,
+        "hinweis": "Higher HQ Staff (Line, 4.1.1); no radio, activates the CO HQ only by Visual-Verbal (BGG 3549109, 3234087: 'BN HQ isn't equipped with a radio')",
+    }
+    s["kommandos"][name] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
+    prot.append(
+        f"{name} on {c['karte']} (with {co}) through turn {s['zug'] + 1}; BN HQ counts as 'on the map': in the BN HQ impulse {name} receives "
+        f"{rules.MAX_PER_IMPULSE[s['sicht']]} Commands and must activate {co} itself (communication required) [4.1.1 p.18/19]"
+    )
+
+
+def _friendly_trouble_flank(s, ev, o, prot, i):
+    s["ereignis_flanke"] = {"id": i, "zug": s["zug"]}
+    prot.append(
+        f"No unit may move this turn onto a new row ahead of the foremost US unit (now row {state.us_front(s)})"
+    )
+
+
+def _friendly_company_ahead(s, ev, o, prot, i):
+    if state.us_front(s) >= state.top_row(s):
+        prot.append(f"already on row {state.top_row(s)}: event lapses [Normandy M1 p.18]")  # L551 (review E14)
+        return
+    if i == "screaming" and not any(c.get("pc") for c in s["karten"].values() if c["reihe"] == state.us_front(s) + 1):
+        s.setdefault("_hinweise", []).append(
+            "Screaming for Action: check whether a PC marker in the next row is reachable; otherwise the event lapses"
+        )
+    s["ereignis_flanke"] = {
+        "id": i,
+        "zug": s["zug"],
+        "reihe": state.us_front(s),
+        "stern": ev.get("stern"),
+        "erfuellt": False,
+    }
+    prot.append(
+        f"Mandatory (if Commands suffice): at least one unit onto a new row {state.us_front(s) + 1}"
+        + (" with a PC marker" if i == "screaming" else "")
+        + "; fulfilled = 1 Experience Point [Normandy M1 p.18]"
+    )
+
+
+def _friendly_hold_up(s, ev, o, prot, i):
+    s["hold_up"] = s["zug"]
+    prot.append("Hold up!: no friendly unit may move onto an unoccupied card this turn [Normandy M3 p.26]")
+
+
+def _friendly_raining(s, ev, o, prot, i):
+    s["wetter"], s["wetter_nur_zug"] = 2, True
+    geometry.update_visibility(s)
+    prot.append(
+        f"Rain marker: visibility +2 this turn (total {sum(geometry.light_weather(s)):+d}), Limited Visibility; no card counts as illuminated (9.2.1); remove in Clean Up [Normandy M3 p.26]"
+    )
+
+
+def _friendly_lost_dark(s, ev, o, prot, i):
+    who, to_ = o.get("--wer"), o.get("--nach")
+    with_ = campaign.patrol(s).get("mitglieder", [])
+    if not who or not to_:
+        raise rules.Violation(
+            f"Lost in the Dark: choose a patrol unit by R# ({', '.join(m for m in with_ if m in s['einheiten'])}), direction by R#8, --who=<unit> --to=<card> "
+            "(if the card lies outside: first extend <row> <column> <type> and pc set <card> <letter of the row, row 5 = A>) [Normandy M3 p.26]"
+        )
+    if who not in with_:
+        raise rules.Violation(f"{who} is not part of the patrol")
+    state.card(s, to_)
+    if not geometry.adjacent(s, s["einheiten"][who]["karte"], to_):
+        raise rules.Violation(f"{to_} is not adjacent to {s['einheiten'][who]['karte']}")
+    commands.move_unit(s, who, to_, "offen", True, prot)
+    prot.append("Lost in the Dark: unit moved one card in a random direction and Exposed [Normandy M3 p.26]")
+
+
+def _friendly_screaming_route(s, ev, o, prot, i):
+    z = s.get("ziele", {})
+    idx = campaign.patrol(s).get("route_index", 0)
+    if idx >= 4:
+        prot.append("All four Route Points visited: event lapses [Normandy M3 p.26]")
+        return
+    s["ereignis_route"] = {
+        "zug": s["zug"],
+        "ziel": z.get("route", {}).get(str(idx + 1)),
+        "stern": ev.get("stern"),
+        "erfuellt": False,
+    }
+    prot.append(
+        f"Mandatory (if Commands suffice): at least one unit toward Route Point {idx + 1} ({s['ereignis_route']['ziel']}); fulfilled = 1 Experience Point [Normandy M3 p.26]"
+    )
+
+
+def _friendly_heat(s, ev, o, prot, i):
+    # L483 [Naktong M1 p.17] 'Until the end of next turn, each time a unit is marked Exposed, draw a card; on R#1/4,
+    # remove 1 step from the unit as a casualty. Ignore during Rain.'
+    if (s.get("wetter") or 0) >= 2:
+        prot.append("Heat Casualties: ignored during Rain [Naktong M1 p.17]")
+        return
+    s["hitze"] = {"bis_zug": s["zug"] + 1}
+    prot.append(
+        f"Heat Casualties through turn {s['zug'] + 1}: every time a friendly unit is marked Exposed, draw a card, R#/4 = 1 (only 1) = 1 step Casualty (fof.py heat <unit> <R#/4>) [Naktong M1 p.17]"
+    )
+
+
+def _friendly_units_enter(s, ev, o, prot, i):
+    # L485 [Naktong M1 p.17] '.50 cal HMG Team: Place a .50 cal HMG team with 6 ammo in the Staging Area under the
+    # command of the HMG HQ. It remains until the end of the current Attempt'
+    pool = s.get("ereignis_vorrat", {}).get(ev["vorrat"], {})
+    if not pool:
+        prot.append(f"{ev['text'].split(':')[0]}: unit already in play or not available, event lapses")
+        return
+    k = o.get("--platz")
+    if not k or not state.card(s, k).get(ev.get("platz", "staging")):
+        raise rules.Violation(f"--place=<card of the Staging Area> [{ev.get('quelle', 'mission event')}]")
+    for n, d in pool.items():
+        e = copy.deepcopy(d)
+        e.update(karte=k, bereich="offen", status=[], ziel=None, nur_versuch=ev["vorrat"])
+        s["einheiten"][n] = e
+        prot.append(
+            f"{n} enters on {k}"
+            + (f" ({e['munition']['punkte']} {e['munition']['typ']} ammo)" if e.get("munition") else "")
+        )
+    s["ereignis_vorrat"][ev["vorrat"]] = {}
+    fire.open_fire(s, prot)
+
+
+def _friendly_ammo_resupply(s, ev, o, prot, i):
+    s["ereignis_munition"] = s["zug"]
+    prot.append(
+        "Four ammo of one type onto a card of mission row 1 of your choice: fof.py ammo depot <card> MG|MTR|RKT 4 [Normandy M1 p.18]"
+    )
+
+
+FRIENDLY_EVENTS = (
+    (lambda i, ev: i in ("situation_report", "comm_trouble"), _friendly_situation_report),
+    (lambda i, ev: i == "tank_support", _friendly_tank_support),
+    (lambda i, ev: i.endswith("_displacing"), _friendly_displacing),
+    (lambda i, ev: i == "checking_up", _friendly_checking_up),
+    (lambda i, ev: i == "trouble_flank", _friendly_trouble_flank),
+    (lambda i, ev: i in ("company_ahead", "screaming"), _friendly_company_ahead),
+    (lambda i, ev: i == "hold_up", _friendly_hold_up),
+    (lambda i, ev: i == "raining", _friendly_raining),
+    (lambda i, ev: i == "lost_dark", _friendly_lost_dark),
+    (lambda i, ev: i == "screaming_route", _friendly_screaming_route),
+    (lambda i, ev: i == "heat", _friendly_heat),
+    (lambda i, ev: ev.get("vorrat"), _friendly_units_enter),
+    (lambda i, ev: i == "ammo_resupply", _friendly_ammo_resupply),
+)
+
+
+def friendly_event(s, ev, o, prot):
+    """Dispatch to the handler of the event id (FRIENDLY_EVENTS); L557 (review E4): one function per event."""
     i = ev["id"]
-    without_us = [k for k in s["karten"] if not state.units_on(s, k, "US")]
-    s["ereignis_einheiten"] = []
-    if i == "evacuate":
-        for k in without_us:
-            c = s["karten"][k]
-            if c.get("casualties_feind"):
-                prot.append(f"{k}: {c['casualties_feind']} enemy Casualties removed")
-                c["casualties_feind"] = 0
-    elif i in ("displace_mortars", "displace_leaders", "displace_hmgs"):
-        test = {
-            "displace_mortars": lambda e: state.is_mortar(e),
-            "displace_leaders": lambda e: bool(e.get("leader")),
-            "displace_hmgs": lambda e: "HMG" in (e.get("typname") or ""),  # L486: German HMG, NKPA HMG
-        }[i]
-        for n, e in list(s["einheiten"].items()):
-            if e["seite"] == "Feind" and e["karte"] in without_us and test(e):
-                enemy.remove_enemy(s, n, prot, reason=ev["text"].split(":")[0])
-        if len(prot) == 1:
-            prot.append("no affected unit on a card without US troops")
-    elif i == "displace_tanks":
-        # L486 [Naktong M1 p.18] 'Displace Tanks: Remove all tanks.'
-        for n, e in list(s["einheiten"].items()):
-            if e["seite"] == "Feind" and e.get("fahrzeug"):
-                enemy.remove_enemy(s, n, prot, reason="Displace Tanks")
-        if len(prot) == 1:
-            prot.append("no enemy tank on the map")
-    elif i == "rally":
-        for n, e in s["einheiten"].items():
-            if e["seite"] != "Feind" or not (state.pinned(e) or state.is_lat(e) or state.fire_team_side(e)):
-                continue
-            s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
-            if fire.vof_against(s, e["karte"], "Feind") is None:
-                if state.pinned(e):
-                    e["status"].remove(rules.PINNED)
-                    prot.append(f"{n}: Pinned removed (no VOF, automatic) [6.5.1]")
-                elif state.is_lat(e) and e["typ"] in ("Paralyzed Team", "Litter Team", "Fire Team"):
-                    nearest = {
-                        "Paralyzed Team": "Litter Team",
-                        "Litter Team": "Fire Team",
-                        "Fire Team": "Assault Team",
-                    }[e["typ"]]
-                    e["typ"] = nearest
-                    combat.set_lat_values(e, nearest)
-                    prot.append(f"{n} becomes {nearest} (no VOF, automatic) [6.5.1]")
-                elif state.fire_team_side(e):
-                    e["status"].remove(rules.FIRE_TEAM_SIDE)
-                    prot.append(f"{n}: back to the front side (no VOF) [4.2.3f]")
-                elif e["typ"] == "Assault Team":
-                    prot.append(
-                        f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]"
-                    )
-            elif e["typ"] == "Assault Team" and not state.pinned(e):
+    for match, handler in FRIENDLY_EVENTS:
+        if match(i, ev):
+            return handler(s, ev, o, prot, i)
+    raise rules.Violation(f"Friendly event id '{i}' is not implemented; nothing booked (L277)")
+
+
+def _enemy_evacuate(s, ev, o, prot, i, without_us):
+    for k in without_us:
+        c = s["karten"][k]
+        if c.get("casualties_feind"):
+            prot.append(f"{k}: {c['casualties_feind']} enemy Casualties removed")
+            c["casualties_feind"] = 0
+
+
+def _enemy_displace(s, ev, o, prot, i, without_us):
+    test = {
+        "displace_mortars": lambda e: state.is_mortar(e),
+        "displace_leaders": lambda e: bool(e.get("leader")),
+        "displace_hmgs": lambda e: "HMG" in (e.get("typname") or ""),  # L486: German HMG, NKPA HMG
+    }[i]
+    for n, e in list(s["einheiten"].items()):
+        if e["seite"] == "Feind" and e["karte"] in without_us and test(e):
+            enemy.remove_enemy(s, n, prot, reason=ev["text"].split(":")[0])
+    if len(prot) == 1:
+        prot.append("no affected unit on a card without US troops")
+
+
+def _enemy_displace_tanks(s, ev, o, prot, i, without_us):
+    # L486 [Naktong M1 p.18] 'Displace Tanks: Remove all tanks.'
+    for n, e in list(s["einheiten"].items()):
+        if e["seite"] == "Feind" and e.get("fahrzeug"):
+            enemy.remove_enemy(s, n, prot, reason="Displace Tanks")
+    if len(prot) == 1:
+        prot.append("no enemy tank on the map")
+
+
+def _enemy_rally(s, ev, o, prot, i, without_us):
+    for n, e in s["einheiten"].items():
+        if e["seite"] != "Feind" or not (state.pinned(e) or state.is_lat(e) or state.fire_team_side(e)):
+            continue
+        s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
+        if fire.vof_against(s, e["karte"], "Feind") is None:
+            if state.pinned(e):
+                e["status"].remove(rules.PINNED)
+                prot.append(f"{n}: Pinned removed (no VOF, automatic) [6.5.1]")
+            elif state.is_lat(e) and e["typ"] in ("Paralyzed Team", "Litter Team", "Fire Team"):
+                nearest = {
+                    "Paralyzed Team": "Litter Team",
+                    "Litter Team": "Fire Team",
+                    "Fire Team": "Assault Team",
+                }[e["typ"]]
+                e["typ"] = nearest
+                combat.set_lat_values(e, nearest)
+                prot.append(f"{n} becomes {nearest} (no VOF, automatic) [6.5.1]")
+            elif state.fire_team_side(e):
+                e["status"].remove(rules.FIRE_TEAM_SIDE)
+                prot.append(f"{n}: back to the front side (no VOF) [4.2.3f]")
+            elif e["typ"] == "Assault Team":
                 prot.append(
                     f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]"
                 )
-            else:
-                s.setdefault("rally_offen", []).append(n)
-                prot.append(
-                    f'{n}: Rally under VOF: {comms.enemy_rally_cards(e)[0]} cards (base 2, experience {e.get("erfahrung")}), word Rally; fof.py enemyaction "{n}" Rally --success=yes|no'
+        elif e["typ"] == "Assault Team" and not state.pinned(e):
+            prot.append(
+                f"{n}: Assault Team is already the highest LAT, no upgrade [6.5.1 'Rallying Generic LATs', L165]"
+            )
+        else:
+            s.setdefault("rally_offen", []).append(n)
+            prot.append(
+                f'{n}: Rally under VOF: {comms.enemy_rally_cards(e)[0]} cards (base 2, experience {e.get("erfahrung")}), word Rally; fof.py enemyaction "{n}" Rally --success=yes|no'
+            )
+    prot.append(f"These units make no further Activity Check in {enemy.enemy_segments(s)[1]} [3.4.1 p.16]")
+
+
+def _enemy_fall_back(s, ev, o, prot, i, without_us):
+    for n, e in list(s["einheiten"].items()):
+        if e["seite"] != "Feind" or state.pinned(e):
+            continue
+        if e.get("unbeweglich"):
+            prot.append(f"{n} is immobile (AT gun), stays [8.12 p.68]")
+            continue
+        c = state.card(s, e["karte"])
+        target = geometry.card_at(s, c["reihe"] + 1, c["spalte"])
+        s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
+        if target is None:
+            if state.option(s, "U18_fall_back_rand_offmap"):
+                enemy.remove_enemy(
+                    s,
+                    n,
+                    prot,
+                    reason="Fall Back over the map edge" + state.open_reading(s, "U18_fall_back_rand_offmap"),
                 )
-        prot.append(f"These units make no further Activity Check in {enemy.enemy_segments(s)[1]} [3.4.1 p.16]")
-    elif i == "fall_back":
-        for n, e in list(s["einheiten"].items()):
-            if e["seite"] != "Feind" or state.pinned(e):
-                continue
-            if e.get("unbeweglich"):
-                prot.append(f"{n} is immobile (AT gun), stays [8.12 p.68]")
-                continue
-            c = state.card(s, e["karte"])
-            target = geometry.card_at(s, c["reihe"] + 1, c["spalte"])
-            s["ereignis_einheiten"].append(n)  # no Activity Check in the check segment (prepare_enemy_check, L60)
-            if target is None:
-                if state.option(s, "U18_fall_back_rand_offmap"):
-                    enemy.remove_enemy(
-                        s,
-                        n,
-                        prot,
-                        reason="Fall Back over the map edge" + state.open_reading(s, "U18_fall_back_rand_offmap"),
-                    )
-                else:
-                    prot.append(f"{n}: no card behind {e['karte']}, stays (map edge) [8.6.3]")  # L278 (review M22)
-                continue
-            if enemy.restricted_mover(e) and fire.vof_against(s, target, "Feind") is not None:
-                # L278 (review M22) = L213/E90 [RULE 4.2.5 p.26]: Paralyzed/Litter Teams only onto a card without VOF
-                prot.append(f"{n} ({e['typ']}): VOF on {target}, no Fall Back possible, stays [RULE 4.2.5 p.26, E90]")
-                continue
-            # L264/L278: the one enemy move path (ammo surplus, Deep Bunker left, best free cover, Exposed, mine check)
-            enemy.move_enemy(s, n, target, prot, how="falls straight back", rule="8.6.1C, Normandy M1 p.18")
-    elif i == "shifting_lines":
+            else:
+                prot.append(f"{n}: no card behind {e['karte']}, stays (map edge) [8.6.3]")  # L278 (review M22)
+            continue
+        if enemy.restricted_mover(e) and fire.vof_against(s, target, "Feind") is not None:
+            # L278 (review M22) = L213/E90 [RULE 4.2.5 p.26]: Paralyzed/Litter Teams only onto a card without VOF
+            prot.append(f"{n} ({e['typ']}): VOF on {target}, no Fall Back possible, stays [RULE 4.2.5 p.26, E90]")
+            continue
+        # L264/L278: the one enemy move path (ammo surplus, Deep Bunker left, best free cover, Exposed, mine check)
+        enemy.move_enemy(s, n, target, prot, how="falls straight back", rule="8.6.1C, Normandy M1 p.18")
+
+
+def _enemy_shifting_lines(s, ev, o, prot, i, without_us):
+    top = state.top_row(s)
+    ks = sorted(k for k, c in s["karten"].items() if c["reihe"] == top and c.get("pc") and not c.get("ausserhalb"))
+    for k in ks:
+        s["karten"][k]["pc"] = "?"
+    prot.append(
+        f"Shifting Lines: remove unresolved PC markers of row 4 ({', '.join(ks) or 'none'}), redraw randomly from A, B and C, '?' side up; "
+        "letter when revealed: pc reveal <card> <A|B|C> [Normandy M3 p.26]"
+    )
+
+
+def _enemy_counter_attack(s, ev, o, prot, i, without_us):
+    ga = s.get("sonderregeln", {}).get("gegenangriff", {})
+    us_cards = sorted(
+        {
+            e["karte"]
+            for e in s["einheiten"].values()
+            if e["seite"] == "US"
+            and e.get("karte") in s["karten"]
+            and (state.option(s, "U17_gegenangriff_staging") or not state.card(s, e["karte"]).get("staging"))
+        }
+    )
+    if ga.get("modus") == "naktong":
+        # L484 [Naktong CSR 5 p.13] PC A on all US-occupied cards that are a) adjacent to a card with a PC marker
+        # (BGG 3516351: any PC marker), b) adjacent to a card not occupied by US forces, or c) in the top row; all cards
+        # are determined first and get their marker at the same time (BGG 3542710)
+        pcs = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
+        occupied = {e["karte"] for e in s["einheiten"].values() if e["seite"] == "US" and e.get("karte")}
         top = state.top_row(s)
-        ks = sorted(k for k, c in s["karten"].items() if c["reihe"] == top and c.get("pc") and not c.get("ausserhalb"))
-        for k in ks:
-            s["karten"][k]["pc"] = "?"
-        prot.append(
-            f"Shifting Lines: remove unresolved PC markers of row 4 ({', '.join(ks) or 'none'}), redraw randomly from A, B and C, '?' side up; "
-            "letter when revealed: pc reveal <card> <A|B|C> [Normandy M3 p.26]"
-        )
-    elif i == "counter_attack":
-        ga = s.get("sonderregeln", {}).get("gegenangriff", {})
-        us_cards = sorted(
-            {
-                e["karte"]
-                for e in s["einheiten"].values()
-                if e["seite"] == "US"
-                and e.get("karte") in s["karten"]
-                and (state.option(s, "U17_gegenangriff_staging") or not state.card(s, e["karte"]).get("staging"))
-            }
-        )
-        if ga.get("modus") == "naktong":
-            # L484 [Naktong CSR 5 p.13] PC A on all US-occupied cards that are a) adjacent to a card with a PC marker
-            # (BGG 3516351: any PC marker), b) adjacent to a card not occupied by US forces, or c) in the top row; all cards
-            # are determined first and get their marker at the same time (BGG 3542710)
-            pcs = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
-            occupied = {e["karte"] for e in s["einheiten"].values() if e["seite"] == "US" and e.get("karte")}
-            top = state.top_row(s)
+        us_cards = [
+            kk
+            for kk in us_cards
+            if state.card(s, kk)["reihe"] == top
+            or any(geometry.distance(s, kk, u) == 1 for u in pcs)
+            or any(
+                geometry.distance(s, kk, u) == 1 and u not in occupied and not state.card(s, u).get("staging")
+                for u in s["karten"]
+            )
+        ]
+        ga = dict(ga, modus="m4")  # the marker placement below is the same as in the M4 mode
+        card_rule = "naktong"
+    else:
+        card_rule = "m4"
+    if ga.get("modus") == "m4":
+        if card_rule == "m4":
+            # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
+            # 'unrevealed PC' = a PC marker still on the board: its package is not drawn until a friendly unit
+            # resolves it [RULE 8.2.4]; the '?' side and the letter side both count (L279, review M24)
+            unrevealed = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
             us_cards = [
                 kk
                 for kk in us_cards
-                if state.card(s, kk)["reihe"] == top
-                or any(geometry.distance(s, kk, u) == 1 for u in pcs)
-                or any(
-                    geometry.distance(s, kk, u) == 1 and u not in occupied and not state.card(s, u).get("staging")
-                    for u in s["karten"]
-                )
+                if state.card(s, kk)["reihe"]
+                == ga.get("reihe", 4)  # L189: last mission row from the setup (M6: card row 6)
+                or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
             ]
-            ga = dict(ga, modus="m4")  # the marker placement below is the same as in the M4 mode
-            card_rule = "naktong"
-        else:
-            card_rule = "m4"
-        if ga.get("modus") == "m4":
-            if card_rule == "m4":
-                # L74 [Normandy M4 MSR 4 p.30] PC A on US cards next to a card with an unrevealed PC or on Row 4
-                # 'unrevealed PC' = a PC marker still on the board: its package is not drawn until a friendly unit
-                # resolves it [RULE 8.2.4]; the '?' side and the letter side both count (L279, review M24)
-                unrevealed = [kk for kk, cc in s["karten"].items() if cc.get("pc")]
-                us_cards = [
-                    kk
-                    for kk in us_cards
-                    if state.card(s, kk)["reihe"]
-                    == ga.get("reihe", 4)  # L189: last mission row from the setup (M6: card row 6)
-                    or any(geometry.distance(s, kk, u) == 1 for u in unrevealed)
-                ]
-            replaced = []
-            for kk in us_cards:
-                cc = s["karten"][kk]
-                if cc.get("pc") == "?":
-                    cc["pc2"] = "A"  # face down: compare only when revealed (8.2.3)
-                elif cc.get("pc") == "A":
-                    pass  # already A: a second A marker would be the lower one of the same level, nothing changes (8.2.3)
-                elif cc.get("pc"):
-                    replaced.append(
-                        f"{kk} ({cc['pc']} removed)"
-                    )  # L88 [RULE 8.2.3 p.62] both face up: the lower letter is removed at once
-                    cc["pc"] = "A"
-                else:
-                    cc["pc"] = "A"
-            if replaced:
-                prot.append(
-                    "two face-up PC markers: the lower one is removed on " + ", ".join(replaced) + " [RULE 8.2.3 p.62]"
-                )
-            until = start_counter_attack(s, ga)
-            prot.append(
-                f"PC marker A on {', '.join(us_cards) or 'no card'} "
-                + (
-                    "(US cards next to a PC marker, next to a card without US troops, or on the top row) [Naktong CSR 5 p.13]"
-                    if card_rule == "naktong"
-                    else "(US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]"
-                )
-            )
-            prot.append(
-                f"enemy tactic Offensive Assault up to and including turn {until}; 'Counter Attack Ends' marker on turn {until + 1}; PC A with the Counter Attack list [MSR 4]"
-            )
-            return
-        for k in us_cards:
-            c = s["karten"][k]
-            if c.get("pc"):
-                c["pc2"] = "?"
+        replaced = []
+        for kk in us_cards:
+            cc = s["karten"][kk]
+            if cc.get("pc") == "?":
+                cc["pc2"] = "A"  # face down: compare only when revealed (8.2.3)
+            elif cc.get("pc") == "A":
+                pass  # already A: a second A marker would be the lower one of the same level, nothing changes (8.2.3)
+            elif cc.get("pc"):
+                replaced.append(
+                    f"{kk} ({cc['pc']} removed)"
+                )  # L88 [RULE 8.2.3 p.62] both face up: the lower letter is removed at once
+                cc["pc"] = "A"
             else:
-                c["pc"] = "?"
+                cc["pc"] = "A"
+        if replaced:
+            prot.append(
+                "two face-up PC markers: the lower one is removed on " + ", ".join(replaced) + " [RULE 8.2.3 p.62]"
+            )
         until = start_counter_attack(s, ga)
         prot.append(
-            f"Draw PC markers randomly from all not yet placed, '?' side up, onto {', '.join(us_cards) or 'no card'}"
-            + ("" if state.option(s, "U17_gegenangriff_staging") else state.open_reading(s, "U17_gegenangriff_staging"))
-            + "; if one is already there, the lower one is removed after revealing (8.2.3 p.62)"
+            f"PC marker A on {', '.join(us_cards) or 'no card'} "
+            + (
+                "(US cards next to a PC marker, next to a card without US troops, or on the top row) [Naktong CSR 5 p.13]"
+                if card_rule == "naktong"
+                else "(US cards next to an unrevealed PC or on Row 4) [Normandy M4 MSR 4 p.30]"
+            )
         )
         prot.append(
-            f"Enemy tactic Offensive Assault through turn {until}; 'Counter Attack Ends' marker on turn {until + 1}; PC A with the Counter Attack list"
-            + state.open_reading(s, "U28_gegenangriff_alle_pc_a")
-            + " [Normandy M1 MSR 1 p.19]"
+            f"enemy tactic Offensive Assault up to and including turn {until}; 'Counter Attack Ends' marker on turn {until + 1}; PC A with the Counter Attack list [MSR 4]"
         )
-    else:
-        raise rules.Violation(f"Enemy event id '{i}' is not implemented; nothing booked (L277)")
+        return
+    for k in us_cards:
+        c = s["karten"][k]
+        if c.get("pc"):
+            c["pc2"] = "?"
+        else:
+            c["pc"] = "?"
+    until = start_counter_attack(s, ga)
+    prot.append(
+        f"Draw PC markers randomly from all not yet placed, '?' side up, onto {', '.join(us_cards) or 'no card'}"
+        + ("" if state.option(s, "U17_gegenangriff_staging") else state.open_reading(s, "U17_gegenangriff_staging"))
+        + "; if one is already there, the lower one is removed after revealing (8.2.3 p.62)"
+    )
+    prot.append(
+        f"Enemy tactic Offensive Assault through turn {until}; 'Counter Attack Ends' marker on turn {until + 1}; PC A with the Counter Attack list"
+        + state.open_reading(s, "U28_gegenangriff_alle_pc_a")
+        + " [Normandy M1 MSR 1 p.19]"
+    )
+
+
+ENEMY_EVENTS = (
+    (lambda i, ev: i == "evacuate", _enemy_evacuate),
+    (lambda i, ev: i in ("displace_mortars", "displace_leaders", "displace_hmgs"), _enemy_displace),
+    (lambda i, ev: i == "displace_tanks", _enemy_displace_tanks),
+    (lambda i, ev: i == "rally", _enemy_rally),
+    (lambda i, ev: i == "fall_back", _enemy_fall_back),
+    (lambda i, ev: i == "shifting_lines", _enemy_shifting_lines),
+    (lambda i, ev: i == "counter_attack", _enemy_counter_attack),
+)
+
+
+def enemy_event(s, ev, o, prot):
+    """Dispatch to the handler of the event id (ENEMY_EVENTS); L557 (review E4): one function per event."""
+    i = ev["id"]
+    s["ereignis_einheiten"] = []
+    without_us = [k for k in s["karten"] if not state.units_on(s, k, "US")]
+    for match, handler in ENEMY_EVENTS:
+        if match(i, ev):
+            return handler(s, ev, o, prot, i, without_us)
+    raise rules.Violation(f"Enemy event id '{i}' is not implemented; nothing booked (L277)")
 
 
 def start_counter_attack(s, ga):

@@ -41,9 +41,8 @@ def test_overhead_fire_example_1_mg_on_level_2_fires_over_level_1_at_level_3(boa
     assert s["einheiten"]["MG"]["ziel"] == "13"
     assert fire.effective_fire_target(s, "MG") == "13"
     assert fire.vof_against(s, "13", "Feind")[:2] == ("A", -1)
-    assert (
-        "MG" not in (fire.vof_against(s, "12", "US") or (None, None, []))[2]
-    )  # kein VOF des MG auf der ueberschossenen Karte (der Feind selbst feuert auf 12)
+    v12 = fire.vof_against(s, "12", "US")  # L552 (review T4): the enemy itself fires at 12, so there is a VOF
+    assert v12 is not None and "MG" not in v12[2]  # kein VOF des MG auf der ueberschossenen Karte
 
 
 def test_overhead_fire_example_2_mg_on_level_1_fires_over_level_1_at_hill_level_2(board):
@@ -61,7 +60,11 @@ def test_overhead_fire_example_2_mg_on_level_1_fires_over_level_1_at_hill_level_
     assert s["einheiten"]["MG"]["ziel"] == "13"
     assert fire.effective_fire_target(s, "MG") == "13"
     assert fire.vof_against(s, "13", "Feind")[:2] == ("A", -1)
-    assert "MG" not in (fire.vof_against(s, "12", "US") or (None, None, []))[2]
+    v12 = fire.vof_against(s, "12", "US")
+    assert (
+        v12 is None or "MG" not in v12[2]
+    )  # L552: no VOF on 12 at all is the expected case here (no enemy fires at 12)
+    assert fire.effective_fire_target(s, "MG") != "12"
 
 
 # ---------------------------------------------------------------- 7.2.2 / 7.2.4 Grazing Fire und FPL (Diagramm 7.2.5)

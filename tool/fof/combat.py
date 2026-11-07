@@ -350,6 +350,7 @@ def remove_from_play(s, name, prot, reason, as_casualty=False, successor=None, c
     if _mk:  # L70: markers on the removed counter, otherwise only named in Clean Up
         prot.append(f"remove {' and '.join(_mk)} of {name} on {e.get('karte')} (counter off the board) [3.8 p.17]")
     del s["einheiten"][name]
+    state.forget_pending(s, name)  # L538 (review E5)
     if e.get("an_bord"):  # L528 [10.8.8] the jeep's experience follows the units still on board
         from . import vehicles
 
@@ -847,6 +848,7 @@ def ammo_pick_up(s, z, name, what, prot):
         if z.get("out_of_ammo") or z.pop("ooa_flip", None):
             # L228 (review H4): a Fire-Team flip caused by a HIT (6.4.3) is not undone by resupply, only the Out-of-Ammo flip
             z.pop("out_of_ammo", None)
+            z.pop("ooa_fallback", None)  # L539: the O-A Fall Back belongs to the Out-of-Ammo flip
             if state.fire_team_side(z):
                 z["status"].remove(rules.FIRE_TEAM_SIDE)
             prot.append(

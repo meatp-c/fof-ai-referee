@@ -22,7 +22,14 @@ def cmd_undo(s, args):
         raise rules.Violation(
             f"No snapshot for entry {nr} (kept: the last {state.HISTORY_KEEP} entries since the history started)"
         )
-    old = json.loads(snap.read_text(encoding="utf-8"))
+    try:
+        old = json.loads(snap.read_text(encoding="utf-8"))
+    except ValueError:  # L551 (review K9)
+        raise rules.Violation(f"Snapshot {nr} is damaged (not valid JSON); choose an earlier entry") from None
+    if len(old.get("protokoll", [])) != nr:  # L551: a reused old file under this number is not the state after entry nr
+        raise rules.Violation(
+            f"Snapshot {nr} holds the state after entry {len(old.get('protokoll', []))}, not {nr}; choose another entry"
+        )
     dropped = s["protokoll"][nr:]
     reason = options.text_opt(o, "--grund", cli.usage("undo"), "")
     text = (

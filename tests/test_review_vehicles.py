@@ -183,6 +183,7 @@ def test_m32_enemy_must_wait_for_the_us_action(game):
 
 def test_m35_enemy_vehicle_brewed_up_books_enemy_casualties(game):
     game["einheiten"]["Panzer"] = sherman("22", side="Feind")
+    game["kampagne"] = {}  # L551: the mission total of casualties is kept in campaign games (make_casualty, 12.4)
     game["us_casualties_gesamt"] = 3
     vehicles.apply_result(game, "Panzer", "Brewed Up", [])
     c = game["karten"]["22"]
@@ -198,6 +199,7 @@ def test_m35_enemy_vehicle_brewed_up_books_enemy_casualties(game):
 def test_m36_us_reaction_quick_shot_chain_keeps_unit_open_on_stop(game):
     game["einheiten"]["Sherman 1"] = sherman("21")
     game["einheiten"]["Panzer"] = sherman("23", side="Feind")
+    vehicles.queue_reactions(game, "Panzer", [])  # L531: US Reaction Fire only inside the window an enemy action opens
     vehicles.cmd_vehicle(game, ["react", "Sherman 1", "Panzer"])
     st = vehicles.at36(game)
     assert st["queue"][0]["reaction"] is True

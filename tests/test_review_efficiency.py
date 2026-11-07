@@ -12,7 +12,10 @@ def test_check_move_computes_each_vof_once(board, monkeypatch):
     s["einheiten"]["2/1"] = unit("23")
     calls = []
     real = fire.vof_against
-    monkeypatch.setattr(fire, "vof_against", lambda s_, kid, side, **kw: calls.append(kid) or real(s_, kid, side, **kw))
+    # L535: infiltration looks at the VOF of both sides (K34); each (card, side) pair is still computed only once
+    monkeypatch.setattr(
+        fire, "vof_against", lambda s_, kid, side, **kw: calls.append((kid, side)) or real(s_, kid, side, **kw)
+    )
     try:
         commands.check_move(s, s["einheiten"]["1/1"], "1/1", "23", "4.2.2c")
     except Exception:  # legality is not the point here

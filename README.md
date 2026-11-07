@@ -17,13 +17,14 @@ paste the first prompt.
 | `GETTING_STARTED.md` | step-by-step for players without programming background, with the first prompt to paste |
 | `AI_BRIEFING.md` | the working contract for the AI (roles, "tool first", answer format, shorthand). Give it to the AI first. |
 | `tool/fof.py` | command-line entry point; `fof.py help` lists the commands, `fof.py help <command>` shows one |
-| `tool/fof/` | the engine as a package: `rules` (tables), `state`, `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
+| `tool/fof/` | the engine as a package: `rules` (tables), `state`, `keys` (register of the state keys), `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `fire_support`, `grenades`, `pickup`, `pyro`, `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `vehicles`, `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
 | `tests/` | unit tests on a synthetic board (`python3 -m pytest tests`), no game data needed |
 | `tool/zug.py` | one call per game step: probe in a scratch copy, book only if every command is legal, then git commit |
 | `tool/build_rules_index.py` | builds the rule text index from your own rulebook PDF, used by `fof.py rule <no>` |
 | `templates/mission_template.json` | skeleton of a mission setup (fill it from your Mission Book) |
 | `templates/action_cards_template.json` | skeleton of an action card archive (optional, for ":NN" card lookups) |
 | `GLOSSARY.md` | German identifiers, JSON keys and values used inside the engine |
+| `ARCHITECTURE.md` | how the engine is built: module map, game state, the way of a command, phase machine, conventions (for developers) |
 
 ## How it works
 1. **The AI runs the tool.** The AI needs a shell (for example Claude with a code/terminal environment, or any

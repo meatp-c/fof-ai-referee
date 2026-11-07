@@ -6,6 +6,8 @@ import pytest
 from conftest import unit
 
 from fof import briefing, campaign, commands, enemy, rules, state
+from fof import grenades  # L556: split from commands
+from fof import pyro  # L556: split from commands
 
 
 @pytest.fixture
@@ -19,11 +21,11 @@ def test_colored_smoke_not_at_night(board):
     board["sicht"], board["licht"] = "eingeschraenkt", 2
     board["einheiten"]["CO XO"] = unit("11", vof=None, typ="Staff", assets=["Red Smoke", "RSP"])
     with pytest.raises(rules.Violation, match="colored smoke"):
-        commands.execute_pyro(board, board["einheiten"]["CO XO"], "CO XO", {"--asset": "Red Smoke"}, [])
+        pyro.execute_pyro(board, board["einheiten"]["CO XO"], "CO XO", {"--asset": "Red Smoke"}, [])
     board["licht"] = 1
     board["einheiten"]["CO XO"]["assets"] = ["Red Smoke"]
     try:
-        commands.execute_pyro(board, board["einheiten"]["CO XO"], "CO XO", {"--asset": "Red Smoke"}, [])
+        pyro.execute_pyro(board, board["einheiten"]["CO XO"], "CO XO", {"--asset": "Red Smoke"}, [])
     except rules.Violation as ex:  # other checks may follow, but not the night ban
         assert "colored smoke" not in str(ex)
 
@@ -109,11 +111,11 @@ def test_grenade_response_is_offered_and_booked(board, quiet):
     }
     assert rec[0]["zug"] == 2  # L231 (review H9): records carry the turn
     with pytest.raises(rules.Violation, match="draw 2 Action cards"):
-        commands.cmd_grenade(board, ["response", "Enemy 1"])
-    commands.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
+        grenades.cmd_grenade(board, ["response", "Enemy 1"])
+    grenades.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
     assert board["einheiten"]["1/1"]["grenade"] == [rules.GRENADE_VOF_DEFAULT] and board["granate_antworten"] == []
     with pytest.raises(rules.Violation, match="no open free response"):
-        commands.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
+        grenades.cmd_grenade(board, ["response", "Enemy 1", "--success=ja"])
 
 
 def test_xp_promote_and_skill(board, quiet):
@@ -143,11 +145,11 @@ def test_draw_watch_names_jam_and_critical_hit(board):
     """L153: Jam for jam-prone units (7.12: A, G!, H weapons teams, A squads with ammo), Critical Hit (7.10.3, 7.11.4)."""
     bazooka = unit("11", vof="G", rng="C", typ="Weapons Team", steps=1)
     squad = unit("11", vof="S")
-    w = commands.draw_watch(board, "grenade", bazooka, ranged=True)
+    w = grenades.draw_watch(board, "grenade", bazooka, ranged=True)
     assert "Jam icon = weapon malfunction" in w and "Critical Hit" in w
-    assert "no effect at Point Blank" in commands.draw_watch(board, "grenade", bazooka, ranged=False)
-    assert "never counts as Crosshairs" in commands.draw_watch(board, "cf", squad)
-    assert "Short" in commands.draw_watch(board, "cff", squad)
+    assert "no effect at Point Blank" in grenades.draw_watch(board, "grenade", bazooka, ranged=False)
+    assert "never counts as Crosshairs" in grenades.draw_watch(board, "cf", squad)
+    assert "Short" in grenades.draw_watch(board, "cff", squad)
 
 
 def test_concentrate_fire_critical_hit(board, quiet):

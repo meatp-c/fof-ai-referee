@@ -7,6 +7,7 @@ import types
 import pytest
 
 from conftest import unit
+from fof import pickup  # L556: split from commands
 
 
 def _board(board):
@@ -23,10 +24,9 @@ def _board(board):
 
 
 def _embark(s, n):
-    from fof import commands
 
     prot = []
-    commands.embark_jeep(s, types.SimpleNamespace(z=s["einheiten"][n], target_name=n, prot=prot))
+    pickup.embark_jeep(s, types.SimpleNamespace(z=s["einheiten"][n], target_name=n, prot=prot))
     return prot
 
 

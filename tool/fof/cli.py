@@ -211,8 +211,8 @@ COMMANDS = [
     (
         "grenade",
         "granate",
-        "commands.cmd_grenade",
-        "grenade response <responder> --success=yes|no [--critical=yes] [--jam=yes]",
+        "grenades.cmd_grenade",
+        "grenade response <responder> --success=yes|no [--critical=yes]",
         "7.10.5 free Grenade Attack response after a Point Blank attack (no Command)",
     ),
     # combat
@@ -245,7 +245,7 @@ COMMANDS = [
         "drop",
         "ablegen",
         "setup.cmd_drop",
-        "drop <unit> <Casualty|asset|device|Leitung[:n]|AMMO:n>",
+        "drop <unit> <Casualty|asset|device|Leitung[:n]|MG:n|MTR:n|RKT:n|RCL:n>",
         "drop something without a Command (5.1.6B)",
     ),
     # campaign
@@ -370,6 +370,12 @@ SUBWORD_ALIASES = {  # per (German) command: English positional word -> German w
 }
 
 
+# L547 (review K7): positions (among the positional arguments) where a sub-word may stand; everything else is free
+# text or a name and is passed unchanged ('xp add 2 we did spend ...' keeps its reason)
+SUBWORD_POSITIONS = {"xp": {0}, "korrektur": {0, 2, 3}}
+SUBWORD_POSITIONS_DEFAULT = {0, 1}
+
+
 def _alias_item(x):
     head, sep, tail = x.rpartition(":")
     return head + sep + options.VALUE_ALIASES.get(tail, tail) if sep else options.VALUE_ALIASES.get(x, x)
@@ -382,6 +388,8 @@ def argv_to_german(argv):
     cmd = CMD_ALIASES.get(argv[0], argv[0])
     sub = SUBWORD_ALIASES.get(cmd, {})
     out = [cmd]
+    where = SUBWORD_POSITIONS.get(cmd, SUBWORD_POSITIONS_DEFAULT)
+    pos = 0
     for a in argv[1:]:
         if a.startswith("--"):
             k, eq, v = a.partition("=")
@@ -403,7 +411,8 @@ def argv_to_german(argv):
                 v = ",".join(_alias_item(x) for x in v.split(","))
             out.append(k + eq + v)
         else:
-            out.append(sub.get(a, a))
+            out.append(sub.get(a, a) if pos in where else a)
+            pos += 1
     return out
 
 

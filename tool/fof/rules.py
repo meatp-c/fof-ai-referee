@@ -1,5 +1,9 @@
 """Rule tables: sequence of play, action menu, LAT limits, VOF values, default options (3.0, 4.2, 6.2)."""
 
+from __future__ import annotations
+
+from typing import Any
+
 from . import messages
 
 SOP_OFFENSIVE = [
@@ -102,7 +106,7 @@ ORDER_NOT_IMPLEMENTED = {"4.2.1a": "activate <hq>"}  # [RULE 4.2.1a p.22] comman
 assert set(ORDER_NOT_IMPLEMENTED) <= set(ACTIONS), "an action given by its own command is still an action of the menu"
 
 
-def order_not_implemented(akt):
+def order_not_implemented(akt: str) -> Violation:
     """The Violation for an action that cmd_order cannot carry out (registry ORDER_NOT_IMPLEMENTED)."""
     if akt in ORDER_NOT_IMPLEMENTED:
         return Violation(
@@ -389,15 +393,27 @@ class Pending(Violation):
     can resolve the draw next. Callers that catch Violation still stop on it."""
 
 
-def need(args, n, usage):
+def need(args: list[str], n: int, usage: str) -> None:
     """Positional arguments: a Violation with the usage line instead of an IndexError (review 23.10.2026, L221)."""
     if len(args) < n:
         raise Violation(f"Usage: {usage}")
 
 
-def int_value(text, what):
+def int_value(text: Any, what: str) -> int:
     """int() for user input: a Violation instead of a ValueError/TypeError (L221)."""
     try:
         return int(text)
     except (TypeError, ValueError):
         raise Violation(f"{what}: a whole number is expected, got '{text}'") from None
+
+
+EXPERIENCE_LEVELS = ("Green", "Line", "Veteran")
+
+
+def experience_value(text: Any, what: str) -> str:
+    """L529 (review C7): an experience level given on the command line, any case; a Violation instead of storing a
+    value that card counts and save limits silently treat as Line."""
+    for lv in EXPERIENCE_LEVELS:
+        if isinstance(text, str) and text.strip().lower() == lv.lower():
+            return lv
+    raise Violation(f"{what}: one of {', '.join(EXPERIENCE_LEVELS)} expected, got '{text}'")

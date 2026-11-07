@@ -13,7 +13,13 @@ def cmd_new(args):
     if not args:
         sys.exit("fof.py new <setup.json> [game]")
 
-    setup_data = json.loads(pathlib.Path(args[0]).read_text(encoding="utf-8"))
+    try:
+        setup_data = json.loads(pathlib.Path(args[0]).read_text(encoding="utf-8"))
+    except ValueError as err:  # L529 (review K5): a damaged setup file is a Violation, not a traceback
+        raise rules.Violation(f"{args[0]} is not valid JSON ({err})") from None
+    missing = [k for k in ("einheiten", "karten") if not isinstance(setup_data, dict) or k not in setup_data]
+    if missing:
+        raise rules.Violation(f"{args[0]} is not a setup file: missing {', '.join(missing)}")
     name = args[1] if len(args) > 1 else "partie1"
     test_run = bool(os.environ.get("FOF_PARTIE"))
     if test_run:
@@ -55,10 +61,22 @@ def cmd_new(args):
         s.setdefault("us_casualties_gesamt", 0)
         campaign.apply_attempt_plan(s, [])  # L477: turns, visibility and enemy values of attempt 1
     setup.check_new_game(s)  # review M5 (L348): validate before .aktuelle_partie is switched or anything is written
+    # L529 (review K2): create the folder (with parents) first and switch .aktuelle_partie back if saving fails, so a
+    # failed 'new' never leaves the pointer on a folder without a game
+    (state.ROOT / name).mkdir(parents=True, exist_ok=True)
+    pointer = state.ROOT / ".aktuelle_partie"
+    old_pointer = pointer.read_text(encoding="utf-8") if pointer.exists() else None
     if not test_run:
-        (state.ROOT / ".aktuelle_partie").write_text(name, encoding="utf-8")
-    (state.ROOT / name).mkdir(exist_ok=True)
-    state.save_state(s, f"Game {name} created: {s['mission']}", None)
+        pointer.write_text(name, encoding="utf-8")
+    try:
+        state.save_state(s, f"Game {name} created: {s['mission']}", None)
+    except BaseException:
+        if not test_run:
+            if old_pointer is None:
+                pointer.unlink(missing_ok=True)
+            else:
+                pointer.write_text(old_pointer, encoding="utf-8")
+        raise
     print(briefing.briefing(s))
     if "optionen" in s:
         print("Open rules questions with chosen reading: fof.py options")
@@ -179,11 +197,12 @@ def _enter_3_6(s, prot):
 
 
 def _enter_3_7_1(s, prot):
-    flipped = False
+    changed = False  # a Pending flipped or an Incoming/AirStrike removed: LOS through and out of cards changes
     for kid, c in s["karten"].items():
         for x in list(c.get("extern", [])):
             if x["typ"] in ("Incoming", "AirStrike"):
                 c["extern"].remove(x)
+                changed = True  # L536 (review V4): units under the lifted marker get their old target back
                 prot.append(f"{kid}: remove {rules.VOF_NAME[x['typ']]} marker [3.7.1]")
                 for pk in s.get("pakete", {}).values():
                     if not pk.get("einheit") and pk.get("im_spiel") and pk["name"] == x.get("quelle"):
@@ -192,13 +211,13 @@ def _enter_3_7_1(s, prot):
         for x in c.get("extern", []):
             if x["typ"] == "Pending":
                 x["typ"] = "Incoming"
-                flipped = True
+                changed = True
                 prot.append(
                     f"{kid}: flip Pending Fire Mission to its active side (Incoming {x['wert']}); units there lose LOS out of the card [3.7.1, 5.4]"
                 )
-    if flipped:
+    if changed:
         # L95: also fire THROUGH the card (5.4); once after all flips and removals (review LOW: was once per flip,
-        # against a half-updated board)
+        # against a half-updated board); L536: the removal of a marker counts too
         fire.cease_fire_on_los_loss(s, prot)
     fire.open_fire(s, prot)
 
@@ -681,10 +700,13 @@ def cmd_retreat(s, args):
         c[key] -= 1
         e["traegt_casualties"] = 1
         prot.append(f"{n} picks up a Casualty on {origin} (Casualty marker goes with it) [3.5.2 p.16]")
-    e["karte"], e["bereich"] = target, "offen"
-    commands.mark(e, rules.EXPOSED)
+    # L544 (review V9): through the one move path of each side (Grenade VOF becomes a Grenade Miss, mines, ammo surplus,
+    # phone line, fire after the move) instead of moving the counter by hand
     prot.append(f"{n} retreats from {origin} to {target} (open), Exposed [3.5.2 p.16]")
-    fire.fire_after_move(s, n, prot, origin=origin)
+    if e["seite"] == "US":
+        commands.move_unit(s, n, target, "offen", exposed=True, prot=prot)
+    else:
+        enemy.move_enemy(s, n, target, prot, cover=False, how="retreats", rule="3.5.2")
     state.save_state(s, f"Retreat {n}: " + "; ".join(prot), "3.5.2 p.16")
     briefing.print_board(prot, s)
 
@@ -693,11 +715,21 @@ def check_retreat(s, prot):
     """3.5.2: Paralyzed Teams (unpinned, not Exposed) and Litter Teams with a Casualty under VOF retreat one card."""
     gone = []
     for n, e in s["einheiten"].items():
+        if (
+            e["typ"] in ("Paralyzed Team", "Litter Team")
+            and must_retreat(s, e)
+            and e["seite"] == "Feind"
+            and state.card(s, e["karte"])["reihe"] >= state.top_row(s)
+        ):
+            # [RULE 3.5.2 p.16] "Enemy units who retreat from a card at their side's edge of the map will retreat off the
+            # map. Remove them from play. Do not extend the map." L551 (review V12): Litter Teams too, with their Casualty
+            if e["typ"] == "Litter Team" and not e.get("traegt_casualties"):
+                c = state.card(s, e["karte"])
+                c["casualties_feind"] = max(0, c.get("casualties_feind", 0) - 1)
+                prot.append(f"{n} takes a Casualty off the map from {e['karte']} [3.5.2]")
+            gone.append(n)
+            continue
         if e["typ"] == "Paralyzed Team" and must_retreat(s, e):
-            if e["seite"] == "Feind" and state.card(s, e["karte"])["reihe"] >= state.top_row(s):
-                # [RULE 3.5.2 p.16] "Enemy units who retreat from a card at their side's edge of the map will retreat off the map. Remove them from play. Do not extend the map."
-                gone.append(n)
-                continue
             prot.append(
                 f'{n} ({e["seite"]}) must retreat one card (priority: no VOF, then best cover, random on a tie), Exposed [3.5.2]: fof.py retreat "{n}" [<card>]'
             )
@@ -747,6 +779,7 @@ def end_turn_v4(s, prot):
         "fm_gesperrt",
         "bn_nicht_verfuegbar",
         "ereignis_munition",
+        "hold_up",  # L554 (review E2): a turn-stamped event lives for its turn only
     ):
         s.pop(k, None)
     ga = s.get("gegenangriff")
@@ -814,7 +847,9 @@ def clean_up_vehicles(s, prot):
 def clean_up_units(s, prot):
     """3.8: Exposed, Concentrated Fire, Grenade VOF and Critical Hit markers off the units."""
     for n, e in s["einheiten"].items():
-        for m in (rules.EXPOSED, "Moved", "Fired"):
+        for m in (
+            rules.EXPOSED,
+        ):  # L551 (review V13): "Moved"/"Fired" were never set; Moved/Fired is vehicles.clean_up
             if m in e["status"]:
                 e["status"].remove(m)
                 prot.append(f"{n}: remove {m}")
@@ -862,7 +897,7 @@ def clean_up_cards(s, prot):
             )
             c["casualties"] = 0
         if s["typ"] == "defensiv" and c.get("pc") and not state.units_on(s, kid, "US"):
-            c["pc"] = None
+            state.clear_pc(c, promote=False)  # L550
             prot.append(f"{kid}: unresolved PC marker removed (defensive mission)")
 
 

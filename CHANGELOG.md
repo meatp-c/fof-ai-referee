@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-11-07 (eighth release)
+This release comes mostly from a full review of the engine code rather than from play at the table. The fixes come
+with tests. It also adds the company jeep for Naktong River Mission 1.
+- Company jeep (Naktong Mission 1, 10.8.1): a jeep without crew that carries up to two steps of infantry
+  (`order <HQ> <unit> 4.2.2h --what=jeep`, the same order again to dismount). It is activated by an HQ or Staff on
+  board, or by an HQ in visual or verbal contact with command over a passenger. Its experience is the highest on board
+  (10.8.8) and is recalculated whenever the game is loaded or saved; vehicle and passengers move as one. L528, L548
+- Step runner: `zug.py` decides by the exit code of `fof.py` (0 legal, 2 VIOLATION, anything else an error). Help
+  texts or notes that contain the word VIOLATION no longer stop a step, a crash books nothing, and an error in the
+  real run names the commands that were already booked but not committed. `new` creates missing parent folders and
+  does not leave the game pointer on a game that failed to save; an invalid setup file is a violation. Arguments that
+  used to crash the engine (`steps=null`, a doubled `--from` or `--with`, an invalid `--experience`, a bare
+  `--success`) are refused, and `--plain=no` now means no. L529, L547
+- Vehicle phase (3.6): sides alternate after every enemy tank action (before, all enemy tanks acted in a row before
+  the first US vehicle). Reaction Fire is an open window in the plan: when an enemy vehicle moves or fires in LOS and
+  range of a US AT unit, the tool stops until each firing unit is booked with `vehicle react <unit> <vehicle>` or the
+  window is closed with `vehicle react pass`. Enemy tank Concentrate Fire takes `--target=<unit>`. Move & Fire with
+  several targets is a plan step after VOF and Reaction Fire, and a tank whose chart has no Move & Fire value
+  (SU-76M) does not fire after moving. Crew losses of a brewed up vehicle are handled as normal casualties, and an
+  enemy route over a card with unknown trafficability is refused instead of taking a silent detour. L531, L543, L551
+- Enemy: point blank and bunker facing are cleared when a unit leaves its bunker or pillbox; a unit in a Deep Bunker
+  gets no target at placement and ceases fire before it opens fire after leaving; cover choice respects the capacity
+  of the marker (5.3.2), so a Fall Back under full foxholes can be booked; Fall Back with Casualty takes the casualty
+  along; Paralyzed and Litter Teams moving towards a casualty do not enter a card under VOF; with option U20 a
+  successful enemy Seek Cover on a mined card asks for a mine check; enemy Rally keeps a flip caused by running out of
+  ammo (only resupply removes it); Advance from row 1 avoids diagonals across a PDF; enemy Infiltrate goes only onto
+  a step card towards the nearest opponent; a Litter Team at its own map edge leaves the map with its casualty.
+  L532-L534, L539-L541, L550, L551
+- Contacts: a G! grenade attack at contact uses the full grenade resolution (whole stack, Critical Hit, Jam);
+  `pc set` with a second open letter applies 8.2.3 at once. L542, L550
+- Orders and fire: Move and Infiltrate share one test for VOF or Grenade Miss on the start or destination card
+  (before, a unit under its own point blank VOF could do neither); removing an Incoming or Air Strike marker in 3.7.1
+  also checks for lost LOS; a Staff that gives up its step in 4.2.1d ends the HQ's impulse, and 4.2.1d is limited to
+  PLT HQs; removing a counter clears its open mine check, rally, heat, capture and sniper prompts; Retreat uses the
+  normal move path (Grenade VOF, mine check, wire); refusals that depend on the state of the game come before the
+  draw prompt; Move within a Card refuses jeep passengers; the free answer roll (always point blank) has no Jam
+  branch; Indirect Lay ceases the previous fire; a change of target clears the fields of the old target; usage texts
+  match the words the command line accepts. L535-L538, L544-L546, L549, L550
+- Housekeeping: Hold Up is removed in Clean Up; snapshots and BRIEFING.md are written atomically, and undo checks
+  the snapshot before using it; `visibility --this-turn-only` needs a weather value; `extend` from row or column 10
+  is refused. L551, L554
+- Structure, without effect on play: a register of every key in the game state with its meaning and lifetime
+  (`tool/fof/keys.py`; with `FOF_KEY_CHECK=1`, as in the tests, a state with an unregistered key is not saved);
+  `commands.py` split into `fire_support`, `grenades`, `pickup` and `pyro`; the five longest functions split up;
+  type annotations at the module boundaries, with a mypy test where mypy is installed; a new `ARCHITECTURE.md` that
+  explains how the engine is built. L530, L554-L558
+- Tests: 549 tests in the full project (the kit skips those that need mission data).
+
 ## 2026-11-05 (seventh release)
 Engine updates from the first game of the Korea campaign at the table (Naktong River Mission 1, attempt 1 and most of
 attempt 2, counter attack included) and from a BGG research pass on open rules questions:

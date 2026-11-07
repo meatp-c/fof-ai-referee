@@ -125,6 +125,14 @@ def update_jeep_experience(s, name):
     j["erfahrung"] = max(exp, key=_EXP_ORDER.get) if exp else None
 
 
+def refresh_jeeps(s):
+    """L548 (review V10): the company jeep's experience follows its passengers (10.8.8) also when a passenger changes
+    without embarking (Fire Team side, HQ hit): recomputed whenever the state is loaded or saved."""
+    for n, e in s.get("einheiten", {}).items():
+        if e.get("kompanie_jeep"):
+            update_jeep_experience(s, n)
+
+
 def arty_jeep_unit(fo):
     """The ARTY FD Net Jeep counter (E79): no crew (10.8.8), Jeep chart line, embarked units drive it (10.8.1)."""
     return {
@@ -422,11 +430,41 @@ def reaction_shooters(s, target):
 
 
 def queue_reactions(s, target, prot):
+    """[RULE 10.5.4 p.73] enemy shooters always react (queued); eligible US shooters get a Reaction Fire window that
+    holds the plan until each has reacted or the player passes (L531, review V1): the moving vehicle is still on the
+    card of its move and still 'moving'."""
+    us = []
     for n in reaction_shooters(s, target):
         if s["einheiten"][n]["seite"] == "Feind":
             queue_at(s, n, target, prot, "reaction")
         else:
-            prot.append(f"{n} may Reaction Fire at {target}: fof.py vehicle react {n} {target} [10.5.4]")
+            us.append(n)
+    if us:
+        at36(s)["reaktion_offen"] = {"ziel": target, "schuetzen": us}  # resume() names it as the next step
+
+
+def window_live(s):
+    """The open Reaction Fire window, with shooters that are still eligible; a stale window is dropped."""
+    st = at36(s)
+    w = st.get("reaktion_offen")
+    if not w:
+        return None
+    if w["ziel"] not in s["einheiten"]:
+        st.pop("reaktion_offen")
+        return None
+    w["schuetzen"] = [n for n in w["schuetzen"] if n in s["einheiten"] and n in reaction_shooters(s, w["ziel"])]
+    if not w["schuetzen"]:
+        st.pop("reaktion_offen")
+        return None
+    return w
+
+
+def window_text(s):
+    w = at36(s).get("reaktion_offen")
+    return (
+        f"Reaction Fire at {w['ziel']} possible for {', '.join(w['schuetzen'])}: fof.py vehicle react <unit> {w['ziel']} "
+        "for each one that fires, or vehicle react pass [10.5.4]"
+    )
 
 
 def require_phase(s):
@@ -452,6 +490,8 @@ def lock(s):
         raise rules.Violation("First resolve the open AT draw: " + describe(s, q[0]))
     if choice_live(s, st.get("wahl")):
         raise rules.Violation("First resolve the open target choice: " + describe(s, st["wahl"]))
+    if window_live(s):
+        raise rules.Violation("First decide on Reaction Fire: " + window_text(s))
     crew = [n for n, e in s["einheiten"].items() if e.get("crew_hit_offen")]
     if crew:
         raise rules.Violation(
@@ -510,11 +550,10 @@ def apply_result(s, target, res, prot):
         campaign.book_xp(s, campaign.xp_table(s, key), f"{target} {res}", prot)
     crew = chart(z)[2] or 0
     if res == "Brewed Up":
-        # review M35: crew steps become Casualties of their own side (keys as in combat.make_casualty)
-        key = "casualties" if z["seite"] == "US" else "casualties_feind"
-        c[key] = c.get(key, 0) + crew
-        if z["seite"] == "US":
-            s["us_casualties_gesamt"] = s.get("us_casualties_gesamt", 0) + crew
+        # review M35: crew steps become Casualties of their own side; L551 (review V14): through combat.make_casualty,
+        # the one casualty path (mission total only in v4, as for infantry)
+        for _ in range(crew):
+            combat.make_casualty(s, z, prot, target)
         smoke = (s.get("fahrzeug_werte") or {}).get("burning_wreck_smoke", 1)
         c.setdefault("extern", []).append({"typ": "Smoke", "wert": smoke, "quelle": "Burning Wreck", "wrack": True})
         combat.remove_from_play(
@@ -566,6 +605,10 @@ def cmd_at(s, args):
     require_phase(s)
     contact.mine_lock(s)
     st = at36(s)
+    prot = []
+    purge(s, prot)  # L538 (review V8): a draw against a unit removed by another command lapses instead of a KeyError
+    if prot and not st["queue"]:
+        return finish(s, prot)
     if not st["queue"]:
         raise rules.Violation("No AT draw open")
     crew = [n for n, e in s["einheiten"].items() if e.get("crew_hit_offen")]
@@ -575,7 +618,6 @@ def cmd_at(s, args):
         )
     rules.need(args, 1, AT_USAGE)
     item = st["queue"][0]
-    prot = []
     handler = AT_SUBCOMMANDS.get(args[0])
     if handler is None:
         handler = at_quick_offer if item.get("typ") == "quick_offer" else at_draw
@@ -713,6 +755,17 @@ def run_fire(s, n, step, prot):
     queue_at(s, n, t, prot, "action")
 
 
+def run_choose(s, n, step, prot):
+    """L543: Move & Fire with several targets: the still valid ones go to a random choice (vehicle target <R#>)."""
+    targets = [t for t in step["ziele"] if t in vehicle_targets(s, n)]
+    if len(targets) == 1:
+        queue_at(s, n, targets[0], prot, "action")
+    elif targets:
+        at36(s)["wahl"] = make_item("wahl", schuetze=n, ziele=targets, typ_nach="action")
+    else:
+        prot.append(f"{n}: no target left in LOS/range after the move, no AT Fire [10.6 A]")
+
+
 def run_cf(s, n, step, prot):
     """Concentrate Fire step (10.5.2 B, 7.11): effects only now, after the VOF before the action (review M30)."""
     if not step["erfolg"]:
@@ -747,7 +800,7 @@ def run_spot(s, n, step, prot):
 def advance(s, prot):
     """Run the plan of the current vehicle action until a draw (or a Quick Shot target choice) is needed (10.5.1)."""
     st = at36(s)
-    while not st["queue"] and not st.get("wahl") and not s.get("minen_checks"):
+    while not st["queue"] and not st.get("wahl") and not window_live(s) and not s.get("minen_checks"):
         ak = st.get("aktion")
         if not ak:
             return
@@ -773,6 +826,8 @@ def advance(s, prot):
             queue_reactions(s, n, prot)
         elif kind == "fire":
             run_fire(s, n, step, prot)
+        elif kind == "choose":
+            run_choose(s, n, step, prot)
         elif kind == "cf":
             run_cf(s, n, step, prot)
         elif kind == "spot":
@@ -816,6 +871,8 @@ def resume(s, prot):
         prot.append("Next draw: " + describe(s, st["queue"][0]))
     elif st.get("wahl"):
         prot.append("Next: " + describe(s, st["wahl"]))
+    elif window_live(s):
+        prot.append("Next: " + window_text(s))
     elif st.get("aktion") and not st["aktion"].get("ende"):
         n = st["aktion"]["einheit"]
         # L454: the Arty Jeep has no gun; L459: AT Fire only against an opposing vehicle in LOS and range (10.6)
@@ -851,6 +908,8 @@ def end_action(s, prot):
         e.pop("in_bewegung", None)
         finish_shooter(s, n, prot)
         e["hat_gehandelt"] = True
+        # L531 (review V3): the side that just acted hands over (10.5.1); a unit gone during its action keeps naechste
+        st["naechste"] = e["seite"]
     st["aktion"] = None
     switch_side(s, prot)
 
@@ -954,12 +1013,14 @@ def traffic(s, kid):
 def do_move(s, n, kid, area, prot):
     e = s["einheiten"][n]
     from_ = e["karte"]
-    commands.move_unit(s, n, kid, area, exposed=False, prot=prot)
+    # L548 (review V11): vehicle and passengers move together; the board-wide open_fire runs once after the last of them
+    commands.move_unit(s, n, kid, area, exposed=False, prot=prot, open_all=False)
     for p in passengers(s, n):
         prot.append(
             f"{p} rides along on {n} to {kid} [10.8.1]"
         )  # Exposed follows from move_unit (not within staging, 5.1.3)
-        commands.move_unit(s, p, kid, "offen", exposed=True, prot=prot)
+        commands.move_unit(s, p, kid, "offen", exposed=True, prot=prot, open_all=False)
+    fire.open_fire(s, prot)
     e["in_bewegung"] = True
     ak = at36(s)["aktion"]
     ak["bewegt"] = True
@@ -1069,6 +1130,8 @@ def vehicle_status(s):
         lines.append("Open draw: " + describe(s, st["queue"][0]))
     elif st.get("wahl"):
         lines.append("Open target choice: " + describe(s, st["wahl"]))
+    elif window_live(s):
+        lines.append("Open: " + window_text(s))
     lines.append(next_hint(s))
     print("\n".join(lines))
 
@@ -1233,6 +1296,10 @@ def vehicle_enemy(s, rest, o):
     if st.get("naechste") == "US" and us_actors(s):  # review M32: the sides alternate (10.5.1), as in start_action
         raise rules.Violation("It is the US side's turn to act (vehicle move|fire|cf|spot|done <unit>) [10.5.1]")
     n = text_opt(o, "--einheit", "--unit=<enemy unit>")
+    if n and n not in actors and s["einheiten"].get(n, {}).get("seite") == "US":
+        # L531 (review V2): --unit=<US unit> is the target of a tank's Concentrate Fire, not the acting enemy
+        o = {**o, "--ziel": o.get("--ziel") or n}
+        n = None
     if not n:
         if len(actors) > 1:
             raise rules.Violation(
@@ -1259,7 +1326,8 @@ def vehicle_enemy(s, rest, o):
         raise rules.Violation(f"{t} not in LOS/range of {n}")
     prot = []
     queue_at(s, n, t, prot, "action")
-    st["naechste"] = "US"
+    st["naechste"] = "Feind"  # L531: the enemy acted; hand over like end_action
+    switch_side(s, prot)
     return prot
 
 
@@ -1285,21 +1353,41 @@ def vehicle_target(s, rest, o):
     if t not in vehicle_targets(s, w["schuetze"]):
         raise rules.Violation(f"{t} is no longer a target of {w['schuetze']} (gone or out of LOS/range) [10.6 A]")
     st.pop("wahl")
-    queue_at(s, w["schuetze"], t, prot, "quick", reaction=w.get("reaction", False))
+    queue_at(s, w["schuetze"], t, prot, w.get("typ_nach", "quick"), reaction=w.get("reaction", False))  # L543
     return prot
 
 
 def vehicle_react(s, rest, o):
-    """vehicle react <unit> <target vehicle>: Reaction Fire of a US AT-capable unit (10.5.4)."""
-    rules.need(rest, 2, "vehicle react <unit> <target vehicle>")
-    n, t = rest[0], rest[1]
+    """vehicle react <unit> <target vehicle> | vehicle react pass: Reaction Fire of a US AT-capable unit (10.5.4), only
+    while the Reaction Fire window of a vehicle action is open (L531, review V1/V7)."""
+    usage = "vehicle react <unit> <target vehicle> | vehicle react pass"
     require_phase(s)
+    rules.need(rest, 1, usage)
     require_open(s)
+    contact.mine_lock(s)
+    st = at36(s)
+    if st["queue"]:
+        raise rules.Violation("First resolve the open AT draw: " + describe(s, st["queue"][0]))
+    if rest[0].lower() not in ("pass", "verzicht", "none", "keine"):
+        rules.need(rest, 2, usage)
+    w = window_live(s)
+    if not w:
+        raise rules.Violation(
+            "No Reaction Fire window is open: US units react only when an opposing vehicle acts in their LOS and range [10.5.4]"
+        )
+    prot = []
+    if rest and rest[0].lower() in ("pass", "verzicht", "none", "keine"):
+        prot.append(f"No (further) Reaction Fire at {w['ziel']} by {', '.join(w['schuetzen'])} [10.5.4]")
+        st.pop("reaktion_offen")
+        return prot
+    n, t = rest[0], rest[1]
     state.unit(s, n)
     state.unit(s, t)
-    if n not in reaction_shooters(s, t):
-        raise rules.Violation(f"{n} cannot Reaction Fire at {t} [10.5.4]")
-    prot = []
+    if t != w["ziel"] or n not in w["schuetzen"]:
+        raise rules.Violation(f"{n} cannot Reaction Fire at {t} now; " + window_text(s))
+    w["schuetzen"].remove(n)
+    if not w["schuetzen"]:
+        st.pop("reaktion_offen")
     queue_at(s, n, t, prot, "reaction")
     return prot
 
@@ -1334,6 +1422,7 @@ def tank_better_cards(s, n):
     start = e["karte"]
     here = _cc_low(state.card(s, start))
     frontier, seen, best = [(start, [])], {start}, {}
+    unknown = set()
     dist = 0
     while frontier and not best:
         dist += 1
@@ -1344,8 +1433,13 @@ def tank_better_cards(s, n):
             for k2, c2 in s["karten"].items():
                 if k2 in seen or not geometry.adjacent(s, k, k2) or c2.get("staging") or geometry.face_down(c2):
                     continue
+                if c2.get("ausserhalb"):
+                    continue  # L551 (review V16): outside the mission boundaries, as for US vehicles
                 t = traffic(s, k2)
-                if t is None or t is False:
+                if t is None:
+                    unknown.add(base_type(c2.get("terrain")) or k2)
+                    continue
+                if t is False:
                     continue
                 if len([m for m in state.units_on(s, k2, "Feind") if is_vehicle(s["einheiten"][m])]) >= 4:
                     continue
@@ -1354,6 +1448,11 @@ def tank_better_cards(s, n):
                 if _cc_low(c2) > here:
                     best[k2] = path + [k2]
         frontier = nxt
+    if unknown:  # L551 (review V16): no silent detour around a card whose vehicle symbol is not recorded
+        raise rules.Violation(
+            f"Trafficability not recorded for {', '.join(sorted(unknown))}: fof.py vehicle traffic <terrain type> "
+            "normal|slow|no, then repeat [5.2.4, E76]"
+        )
     return dist, best
 
 
@@ -1382,7 +1481,7 @@ def enemy_tank_action(s, st, n, o):
             "bewegt": False,
         }
         st["aktion"]["plan"] += [make_step("fire", ziel=t), make_step("react"), make_step("ende")]
-        st["naechste"] = "US"
+        st["naechste"] = "Feind"  # L531: acting side; end_action hands over to the US side
         return [f"{n}: priority 1, AT Fire at {t} [MSR 3]"]
     for prio, pred, what in (
         (2, lambda x: x.get("at_waffe") in AT_TEAM_WEAPONS, "Bazooka/RCL team"),
@@ -1397,12 +1496,12 @@ def enemy_tank_action(s, st, n, o):
             k = 2 + {"Green": -1, "Veteran": 1}.get(comms.experience(e), 0)
             raise rules.Violation(
                 f"{n} priority {prio}: Concentrate Fire on a {what} under its VOF ({', '.join(cands)}): draw {k} Action cards, "
-                "Crosshairs = success (2+: Critical Hit); target randomly if several; then --success=yes|no [--unit=<target>] "
+                "Crosshairs = success (2+: Critical Hit); target randomly if several; then --success=yes|no [--target=<unit>] "
                 "[--critical=yes] [MSR 3, 10.5.2 B]"
             )
-        ze = text_opt(o, "--einheit", "--unit=<target>") or (cands[0] if len(cands) == 1 else None)
+        ze = text_opt(o, "--ziel", "--target=<unit>") or (cands[0] if len(cands) == 1 else None)  # L531 (review V2)
         if o["--erfolg"] == "ja" and ze not in cands:
-            raise rules.Violation(f"--unit=<one of {', '.join(cands)}>")
+            raise rules.Violation(f"--target=<one of {', '.join(cands)}>")
         st["aktion"] = {
             "einheit": n,
             "plan": [make_step("vof", label=f"VOF on {e['karte']} before the action")],
@@ -1413,7 +1512,7 @@ def enemy_tank_action(s, st, n, o):
             make_step("react"),
             make_step("ende"),
         ]
-        st["naechste"] = "US"
+        st["naechste"] = "Feind"  # L531: acting side; end_action hands over to the US side
         return [f"{n}: priority {prio}, Concentrate Fire action [MSR 3, 10.5.2 B]"]
     dist, best = tank_better_cards(s, n)
     if best:
@@ -1437,14 +1536,15 @@ def enemy_tank_action(s, st, n, o):
             "bewegt": False,
         }
         st["aktion"]["plan"] += [make_step("tankmove", karte=x) for x in path] + [make_step("ende")]
-        st["naechste"] = "US"
+        st["naechste"] = "Feind"  # L531: acting side; end_action hands over to the US side
         return [
             f"{n}: priority 3, moves toward {k} (route {', '.join(path)}; stops for AT Fire as soon as a US vehicle is in LOS) [MSR 3]"
         ]
     finish_shooter(s, n, prot)
     e["hat_gehandelt"] = True
     prot.append(f"{n}: no priority applies, stays where it is (BGG 3553563) [MSR 3]")
-    st["naechste"] = "US"
+    st["naechste"] = "Feind"  # L531: the enemy acted (no action); hand over like end_action
+    switch_side(s, prot)
     return prot
 
 
@@ -1458,13 +1558,20 @@ def tank_move_step(s, n, step, ak, prot):
     if n not in s["einheiten"]:
         return
     targets = vehicle_targets(s, n)
+    if targets and chart_line(weapon(s["einheiten"][n]))[4] is None:
+        # L543 (review V6): no Move & Fire on the chart (SU-76M): no AT Fire after moving, as for US vehicles (10.5.2 D)
+        prot.append(
+            f"{n}: US vehicle in LOS, but no Move & Fire capability: no AT Fire after moving, it moves on [10.5.2 D]"
+        )
+        return
     if targets:
         rest = [x for x in ak["plan"] if _legacy_step(x)["art"] not in ("tankmove", "ende")]
         if len(targets) == 1:
             ak["plan"] = rest + [make_step("fire", ziel=targets[0]), make_step("react"), make_step("ende")]
         else:
-            at36(s)["wahl"] = make_item("wahl", schuetze=n, ziele=targets)
-            ak["plan"] = rest + [make_step("ende")]
+            # L543 (review V5): the target choice is a plan step after the VOF on the new card and the Reaction Fire,
+            # like the single-target fire step; it queues an AT Fire action, not a Quick Shot
+            ak["plan"] = rest + [make_step("choose", ziele=targets), make_step("react"), make_step("ende")]
         prot.append(f"{n} stops: US vehicle in LOS, Move & Fire [MSR 3 note]")
 
 

@@ -4,6 +4,9 @@ import pytest
 from conftest import unit
 
 from fof import briefing, commands, rules, state
+from fof import fire_support  # L556: split from commands
+from fof import grenades  # L556: split from commands
+from fof import pyro  # L556: split from commands
 
 
 @pytest.fixture
@@ -62,8 +65,8 @@ def test_grenade_response_lapsed_record_does_not_block_newer(board, quiet):
         {"werfer": "Enemy 1", "angreifer": "1/1", "karte": "22", "zug": 3, "phase": "3.3.1b"},
     ]
     with pytest.raises(rules.Violation, match="free response throw at 1/1"):
-        commands.cmd_grenade(s, ["response", "Enemy 1"])
-    commands.cmd_grenade(s, ["response", "Enemy 1", "--success=ja"])
+        grenades.cmd_grenade(s, ["response", "Enemy 1"])
+    grenades.cmd_grenade(s, ["response", "Enemy 1", "--success=ja"])
     assert s["einheiten"]["1/1"]["grenade"] == [rules.GRENADE_VOF_DEFAULT] and s["granate_antworten"] == []
 
 
@@ -90,7 +93,7 @@ def test_handlers_refuse_missing_or_bad_arguments(board):
         (commands.cmd_hq, []),
         (commands.cmd_order, ["CO HQ", "1/1"]),
         (commands.cmd_fire, ["1/1"]),
-        (commands.cmd_grenade, ["response"]),
+        (grenades.cmd_grenade, ["response"]),
         (commands.cmd_correct, ["munition", "1/1"]),
         (commands.cmd_correct, ["status", "1/1", "Pinned"]),
         (commands.cmd_correct, ["granate", "1/1", "verfallen"]),
@@ -281,7 +284,7 @@ def test_second_indirect_lay_on_the_same_mortar_is_refused(board):
     s["einheiten"]["Mtr"] = unit("22", vof="H", typ="Weapons Team", platoon="1", steps=2, moerser=True)
     s["karten"]["23"]["extern"].append({"typ": "Indirect", "wert": -3, "quelle": "Mtr", "seite": "US"})
     with pytest.raises(rules.Violation, match="already fires an Indirect Lay"):
-        commands.indirect_lay(s, "1st PLT HQ", hq, "Mtr", s["einheiten"]["Mtr"], {"--ziel": "23"}, [], False)
+        fire_support.indirect_lay(s, "1st PLT HQ", hq, "Mtr", s["einheiten"]["Mtr"], {"--ziel": "23"}, [], False)
 
 
 # ---------------------------------------------------------------- M18 (L244)
@@ -404,11 +407,11 @@ def test_apply_grenade_hits_the_stack_under_cover(board):
     s["einheiten"]["Enemy 2"] = unit("23", side="Feind", bereich="C1")
     s["einheiten"]["Enemy 3"] = unit("23", side="Feind")
     prot = []
-    stack, under = commands.apply_grenade(s, "Enemy 1", -4, True, prot, "7.10.1")
+    stack, under = grenades.apply_grenade(s, "Enemy 1", -4, True, prot, "7.10.1")
     assert set(stack) == {"Enemy 1", "Enemy 2"} and under
     assert s["einheiten"]["Enemy 2"]["grenade"] == [-4] and s["einheiten"]["Enemy 2"]["grenade_critical"] is True
     assert "grenade" not in s["einheiten"]["Enemy 3"] and any("Critical Hit" in x for x in prot)
-    commands.apply_grenade(s, "Enemy 3", -4, True, prot, "7.10.1")
+    grenades.apply_grenade(s, "Enemy 3", -4, True, prot, "7.10.1")
     assert s["einheiten"]["Enemy 3"]["grenade"] == [-4, -4]
 
 
@@ -422,7 +425,7 @@ def test_pyro_infiltration_by_signal_reads_english_no(board, quiet):
     s["einheiten"]["2/1"] = unit("22")
     s["einheiten"]["Enemy 1"] = unit("23", side="Feind", vof="A", ziel="22")  # VOF on the origin card (5.1.4)
     prot = []
-    commands.follow_signal(s, "InfAP2PO", {"1/1": "32", "2/1": "32"}, {"--erfolg": "1/1:no,2/1:YES"}, prot)
+    pyro.follow_signal(s, "InfAP2PO", {"1/1": "32", "2/1": "32"}, {"--erfolg": "1/1:no,2/1:YES"}, prot)
     assert "Exposed" in s["einheiten"]["1/1"]["status"] and "Exposed" not in s["einheiten"]["2/1"]["status"]
     assert s["einheiten"]["1/1"]["karte"] == s["einheiten"]["2/1"]["karte"] == "32"
 
@@ -463,5 +466,5 @@ def test_grenade_target_checked_before_ammo_is_spent(board, quiet):
         s, "1st PLT HQ", "Baz", "4.2.4d", {"--ziel": "23", "--erfolg": "ja", "--einheit": "1st PLT HQ"}, None
     )
     with pytest.raises(rules.Violation, match="not an opposing unit"):
-        commands._order_grenade_attack(s, ctx)
+        grenades.order_grenade_attack(s, ctx)
     assert s["einheiten"]["Baz"]["munition"]["punkte"] == 2

@@ -5,6 +5,7 @@ import types
 import pytest
 
 from conftest import unit
+from fof import pickup  # L556: split from commands
 
 
 def _board(board):
@@ -93,17 +94,17 @@ def test_fo_on_board_does_not_move_on_its_own(board):
 
 
 def test_get_off_and_on_only_the_arty_fo(board):
-    from fof import commands, rules
+    from fof import rules
 
     s = _board(board)
     _jeep(s)
     fo = s["einheiten"]["Arty FO"]
-    commands.embark_jeep(s, types.SimpleNamespace(z=fo, target_name="Arty FO", prot=[]))
+    pickup.embark_jeep(s, types.SimpleNamespace(z=fo, target_name="Arty FO", prot=[]))
     assert "an_bord" not in fo
     s["einheiten"]["1/1"] = unit("21")
     with pytest.raises(rules.Violation, match="single step"):
-        commands.embark_jeep(s, types.SimpleNamespace(z=s["einheiten"]["1/1"], target_name="1/1", prot=[]))
-    commands.embark_jeep(s, types.SimpleNamespace(z=fo, target_name="Arty FO", prot=[]))
+        pickup.embark_jeep(s, types.SimpleNamespace(z=s["einheiten"]["1/1"], target_name="1/1", prot=[]))
+    pickup.embark_jeep(s, types.SimpleNamespace(z=fo, target_name="Arty FO", prot=[]))
     assert fo["an_bord"] == "Arty Jeep"
 
 

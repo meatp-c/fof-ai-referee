@@ -1,5 +1,9 @@
 """Command-line option parsing (--key=value) with English aliases."""
 
+from __future__ import annotations
+
+from typing import Any
+
 from . import rules
 
 
@@ -178,7 +182,7 @@ ENUM_VALUE_OPTIONS = frozenset(
 )
 
 
-def parse_opts(args):
+def parse_opts(args: list[str]) -> dict[str, Any]:
     """--key=value pairs. Unknown keys, empty values and repeated keys are refused (L72, L222); a bare --flag is stored as
     True. English key aliases are accepted here too (idempotent: no alias target is itself an alias key).
 
@@ -202,7 +206,7 @@ def parse_opts(args):
     return o
 
 
-def int_opt(o, key, what, default=None):
+def int_opt(o: dict[str, Any], key: str, what: str, default: int | None = None) -> int | None:
     """Integer option with a Violation instead of a ValueError (L221); a bare --flag without a number is a Violation as
     well (L333), it used to fall back to the default silently."""
     v = o.get(key)
@@ -213,7 +217,7 @@ def int_opt(o, key, what, default=None):
     return rules.int_value(v, what)
 
 
-def text_opt(o, key, usage=None, default=None):
+def text_opt(o: dict[str, Any], key: str, usage: str | None = None, default: str | None = None) -> str | None:
     """Option that needs a text value (canonical version of the local text_opt helpers in commands.py and vehicles.py,
     review H12): a bare --flag (stored as True by parse_opts) is a Violation naming the usage; missing: default."""
     v = o.get(key)
@@ -222,7 +226,7 @@ def text_opt(o, key, usage=None, default=None):
     return default if v is None else v
 
 
-def list_option(o, key):
+def list_option(o: dict[str, Any], key: str) -> list[str]:
     v = o.get(key)
     if v is True:  # L323: a bare flag where a list is expected
         raise rules.Violation(f"Option {key} needs a value: {key}=<a>[,<b>..]")

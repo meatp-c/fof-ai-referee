@@ -3,7 +3,7 @@
 import copy
 import re
 
-from . import briefing, campaign, combat, commands, comms, fire, geometry, messages, options, rules, state
+from . import briefing, campaign, combat, commands, comms, fire, fire_support, geometry, messages, options, rules, state
 
 
 def check_new_game(s):
@@ -281,6 +281,8 @@ def cmd_drop(s, args):
             f"{n} drops a casualty on {e['karte']}"
             + (" (CCP: evacuation in Clean Up)" if s.get("ccp") == e["karte"] else "")
         ]
+    elif ":" in what and what.split(":")[0].upper() == "AMMO":  # L550 (review K10): name the ammo types
+        raise rules.Violation(f"Ammo by type: drop <unit> <{'|'.join(rules.AMMO_CAPACITY)}>:<n>")
     elif ":" in what and what.split(":")[0] in rules.AMMO_CAPACITY:
         rules.int_value(what.partition(":")[2], "drop <ammo type>:<n>")  # L331: 'MG:x' was a ValueError in ammo_drop
         prot = []
@@ -371,6 +373,12 @@ def cmd_visibility(s, args):
         s["wetter"] = rules.int_value(args[1], "visibility <light> <weather>")  # L331
         if o.get("--nur_zug") == "ja":
             s["wetter_nur_zug"] = True
+        else:
+            s.pop("wetter_nur_zug", None)  # L551 (review K12): weather set for good is not reset in Clean Up
+    elif o.get("--nur_zug") == "ja":
+        raise rules.Violation(
+            "--this-turn-only=yes needs a weather value: visibility <light> <weather> --this-turn-only=yes"
+        )
     geometry.update_visibility(s)
     l, w = geometry.light_weather(s)
     txt = f"Visibility: light {l:+d}, weather {w:+d}, total {l + w:+d}" + (
@@ -548,6 +556,8 @@ def cmd_extend(s, args):
     rules.need(args, 3, _usage("extend"))
     r, c, type_ = rules.int_value(args[0], "extend <row>"), rules.int_value(args[1], "extend <row> <column>"), args[2]
     o = options.parse_opts(args[3:])
+    if r >= 10 or c >= 10:  # L551 (review K14): '210' would be row 2 column 10 and row 21 column 0 at once
+        raise rules.Violation(f"Row {r} column {c}: card ids are not unique from row or column 10 on; not supported")
     kid = state.card_id(r, c)
     if kid in s["karten"] or geometry.card_at(s, r, c):
         raise rules.Violation(f"Card at row {r} column {c} already exists")
@@ -639,10 +649,10 @@ def objective_concentration(s, z, args, prot):
     state.card(s, kid)
     if ag not in (s.get("fm_werte") or {}):
         raise rules.Violation(f"Unknown fire asset: {ag}; available: {', '.join(s.get('fm_werte', {}))}")
-    s.setdefault("target_marker", {})[commands.target_marker_key(s, ag)] = kid
+    s.setdefault("target_marker", {})[fire_support.target_marker_key(s, ag)] = kid
     s["konzentration_gesetzt"] = True
     prot.append(
-        f"Artillery Concentration: Target marker {commands.target_marker_key(s, ag)} on {kid}; Call for Fire of this fire asset on {kid} +1 card [RULE 7.16.5 p.59, Normandy M3 p.24]"
+        f"Artillery Concentration: Target marker {fire_support.target_marker_key(s, ag)} on {kid}; Call for Fire of this fire asset on {kid} +1 card [RULE 7.16.5 p.59, Normandy M3 p.24]"
     )
 
 
@@ -718,7 +728,7 @@ def objective_card(s, z, kind, kid, prot):
         if c["reihe"] != 2 or not s.get("patrouille_mission"):
             raise rules.Violation("Combat Outpost on a card in row 2 (Combat Patrol mission) [Normandy M3 p.24, 2.6.1]")
         if c.get("pc"):
-            c["pc"] = None
+            state.clear_pc(c, promote=False)  # L550
             s.get("pc_start", {}).pop(kid, None)
             prot.append(f"PC marker removed from {kid} (no PC on the COP) [Normandy M3 p.24, 2.6.1]")
         n_fh = sum(1 for cv in c.get("cover", []) if cv["typ"] == "Foxholes")
@@ -752,6 +762,8 @@ def cmd_values(s, args):
             raise rules.Violation(f"'{a}': field=value expected; usage: {_usage('set')}")
         if k not in VALUE_FIELDS:
             raise rules.Violation(f"Field {k} cannot be changed; allowed: {', '.join(VALUE_FIELDS)}")
+        if v in ("null", "-") and k == "steps":  # L529 (review K3): steps=None crashed every step sum later
+            raise rules.Violation("steps cannot be cleared; give the number of steps (at least 1)")
         if v in ("null", "-"):
             v2 = None
         elif k == "steps":

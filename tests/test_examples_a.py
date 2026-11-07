@@ -6,6 +6,7 @@ import pytest
 from conftest import card, unit
 
 from fof import briefing, combat, commands, comms, fire, rules, state
+from fof import grenades  # L556: split from commands
 
 RADIO = {"typ": "SCR536", "netz": "CO TAC"}
 PHONE = {"typ": "EE8", "netz": "CO TAC"}
@@ -252,10 +253,10 @@ def test_grenade_example_1_village_point_blank(board, quiet):
     commands.cmd_order(s, ["3rd PLT HQ", "1/3", "4.2.4d", "--success=nein", "--unit=1/1 PLT"])
     assert s["karten"]["22"].get("grenade_miss") is True
     assert {x["werfer"] for x in s["granate_antworten"]} == {"1/1 PLT", "1/LMG"}
-    commands.cmd_grenade(s, ["response", "1/1 PLT", "--success=nein"])
-    commands.cmd_grenade(s, ["response", "1/LMG", "--success=ja", "--value=-4"])
+    grenades.cmd_grenade(s, ["response", "1/1 PLT", "--success=nein"])
+    grenades.cmd_grenade(s, ["response", "1/LMG", "--success=ja", "--value=-4"])
     with pytest.raises(rules.Violation, match="no open free response"):
-        commands.cmd_grenade(s, ["response", "Assault Team", "--success=ja"])
+        grenades.cmd_grenade(s, ["response", "Assault Team", "--success=ja"])
     assert s["einheiten"]["1/3"]["grenade"] == [-4] and s["einheiten"]["3rd PLT HQ"]["grenade"] == [-4]
     for n in ("1/1 PLT", "1/LMG", "Assault Team"):
         assert total(combat.ncm_rows(s, n)) == 3, n

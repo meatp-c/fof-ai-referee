@@ -1,11 +1,8 @@
 """L475: rules.Pending, a saved step that stops at an open draw: OPEN instead of VIOLATION, exit code 0."""
 
-import sys
-
 import pytest
 
-sys.path.insert(0, "werkzeuge")
-from fof import cli, messages, rules  # noqa: E402
+from fof import cli, messages, rules  # L552 (review T6): conftest/pyproject put the package on the path
 
 
 def test_pending_is_a_violation():

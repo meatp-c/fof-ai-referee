@@ -4,6 +4,7 @@ heat casualties, Naktong counter attack, enemy tank priorities. Synthetic boards
 import pytest
 
 from conftest import card, unit
+from fof import fire_support  # L556: split from commands
 
 
 @pytest.fixture
@@ -355,13 +356,38 @@ def test_detached_team_not_exposed(board):
 
 
 # ---- L497 package infiltration attempt: 2 cards adjusted for Experience (Naktong CSR 3, Normandy CSR 6)
-def test_package_infiltration_cards_follow_experience():
-    import inspect
+def test_package_infiltration_cards_follow_experience(b342):
+    """L552 (review T3): behaviour instead of source text: the prompt names 2 cards adjusted for Experience."""
+    import copy
 
-    from fof import contact
+    import pytest
 
-    src = inspect.getsource(contact.contact_place_units)
-    assert '2 + {"Green": -1, "Veteran": 1}' in src and "infiltration_regel" in src
+    from fof import contact, rules
+
+    s = b342
+    s["kampagne"] = {}
+    s["karten"]["11"]["pc"] = "A"
+    s["einheiten"]["1/1"] = unit("11")
+    pk = {
+        "name": "Infiltrators",
+        "spotted": True,
+        "place_vof": True,
+        "infiltration_regel": "Naktong CSR 3 p.13",
+        "einheiten": [
+            {
+                "einheit": "NKPA Squad",
+                "typ": "Squad",
+                "vof_rating": "S",
+                "reichweite": "L",
+                "steps": 3,
+                "platz": "max",
+                "infiltration": True,
+                "erfahrung": "Green",
+            }
+        ],
+    }
+    with pytest.raises(rules.Violation, match=r"1 Action cards \(2, experience Green\).*Naktong CSR 3 p.13"):
+        contact.pc_contact_v4(s, "11", "A1", copy.deepcopy(pk), {"--richtung": "Front"})
 
 
 # ---- L498 Limited Visibility at the start of a turn: fire beyond the adjacent card lapses (9.1)
@@ -378,13 +404,17 @@ def test_limited_visibility_ends_fire_beyond_adjacent(board):
     assert s["einheiten"]["1/1"]["ziel"] is None and prot
 
 
-def test_end_turn_rechecks_los_after_new_visibility():
-    import inspect
-
+def test_end_turn_rechecks_los_after_new_visibility(board, quiet):
+    """L552 (review T3): turn 2 of the attempt plan is a night turn: the PDF two cards away lapses at the turn change."""
     from fof import phase
 
-    src = inspect.getsource(phase.cmd_end_turn)
-    assert src.index("apply_turn_visibility") < src.rindex("cease_fire_on_los_loss")
+    s = board
+    s.update(phase="3.8", mission="x", max_zuege=6, kampagne={})
+    s["versuch_plan"] = {"1": {"sicht": {"1": {"licht": 0, "wetter": 0}, "2-6": {"licht": 3, "wetter": 0}}}}
+    s["einheiten"]["1/1"] = unit("11", ziel="31")
+    s["einheiten"]["E"] = unit("31", side="Feind")
+    phase.cmd_end_turn(s, [])
+    assert s["zug"] == 2 and s["sicht"] == "eingeschraenkt" and s["einheiten"]["1/1"]["ziel"] is None
 
 
 # ---- L499 Heat Casualty on a 2-step squad: the last step becomes a generic Fire Team (6.4.3)
@@ -439,13 +469,17 @@ def test_reattempt_names_saved_commands_removal():
 
 
 # ---- L504 handing out assets in the reattempt preparation opens no fire (3.9 step 14)
-def test_setup_fire_update_only_after_a_placement():
-    import inspect
-
+def test_setup_fire_update_only_after_a_placement(board, quiet):
+    """L552 (review T3): handing out an asset in the reattempt preparation opens no fire on either side."""
     from fof import setup
 
-    src = inspect.getsource(setup.cmd_setup)
-    assert 'if kz and (s.get("reattempt_setup") or s.get("patrouille_mission")):' in src
+    s = board
+    s.update(phase="3.1", mission="x", max_zuege=6, kampagne={}, reattempt_setup=True, assets_pool={"HC Smoke": 2})
+    s["einheiten"]["1/1"] = unit("11")
+    s["einheiten"]["E"] = unit("31", side="Feind")
+    setup.cmd_setup(s, ["1/1", "--asset=HC Smoke"])
+    assert s["einheiten"]["1/1"]["assets"] == ["HC Smoke"]
+    assert s["einheiten"]["1/1"]["ziel"] is None and s["einheiten"]["E"]["ziel"] is None
 
 
 # ---- L505 3.9 step 8 again in 'reattempt done': a cover freed by a used-up LAT takes the enemy in the open
@@ -462,8 +496,20 @@ def test_enemy_into_cover_after_lat_used_up(board):
     del s["einheiten"]["AT"]  # used up in step 3
     campaign.enemy_into_cover(s, prot)
     assert s["einheiten"]["FT"]["bereich"] == "C1" and "step 8" in prot[-1]
-    src = __import__("inspect").getsource(campaign.reattempt_done)
-    assert "enemy_into_cover(s, prot)" in src
+
+
+def test_reattempt_done_puts_enemies_into_free_cover(board, quiet):
+    """L552 (review T3): 'reattempt done' itself runs step 8 again (behaviour instead of source text)."""
+    from fof import campaign
+
+    s = board
+    s.update(phase="3.1", mission="x", max_zuege=6, kampagne={"versuch": 2}, reattempt_setup=True)
+    s["karten"]["11"]["staging"] = True
+    s["karten"]["22"]["cover"] = [{"id": "C1", "typ": "Foxholes", "wert": 1}]
+    s["einheiten"]["1/1"] = unit("11")
+    s["einheiten"]["FT"] = unit("22", side="Feind", steps=1)
+    campaign.reattempt_done(s)
+    assert s["einheiten"]["FT"]["bereich"] == "C1" and not s.get("reattempt_setup")
 
 
 # ---- L506 secured cards of the reattempt setup: the snapshot at the end of the attempt (3.9 step 5, U42)
@@ -538,28 +584,32 @@ def test_grenade_vof_counts_as_under_fire(board):
 
 
 # ---- L511 a Platoon Infiltrate/Move counts as the single action of every member (4.2)
-def test_platoon_infiltrate_books_single_action():
-    import inspect
-
+def test_platoon_infiltrate_books_single_action(board, monkeypatch):
+    """L552 (review T3): every member of a Platoon Infiltrate has used its single action (4.2.2c) in this impulse."""
+    from conftest import _hq_board
     from fof import commands
 
-    src = inspect.getsource(commands._order_move_platoon)
-    assert 'ctx.also_book = "4.2.2a" if ctx.akt == "4.2.2b" else "4.2.2c"' in src
-    s = {"impuls_aktionen": {"1/1": ["4.2.2c"]}, "einheiten": {}}
-    assert "4.2.2c" in s["impuls_aktionen"]["1/1"]
+    s = _hq_board(board, monkeypatch)
+    s["einheiten"]["1/1"] = unit("22", platoon="1")
+    s["einheiten"]["2/1"] = unit("22", platoon="1")
+    s["einheiten"]["E"] = unit("33", side="Feind", ziel="22")
+    commands.cmd_order(
+        s, ["1st PLT HQ", "1st PLT HQ", "4.2.2d", "--target=12", "--success=1st PLT HQ:ja,1/1:ja,2/1:ja"]
+    )
+    for n in ("1st PLT HQ", "1/1", "2/1"):
+        assert "4.2.2c" in s["impuls_aktionen"][n]
 
 
 # ---- L512 a 'PLT HQ' column of the Fire Support Available Table covers every PLT HQ (7.16.1)
 def test_plt_hq_column_makes_every_plt_hq_an_observer(board):
-    from fof import commands
 
     s = board
     s["cff_beobachter"] = {"Arty FO": 4, "CO HQ": 3, "PLT HQ": 2}
     s["cff_tabelle"] = {"81mm HE": {"Arty FO": 3, "CO HQ": 3, "PLT HQ": 2}}
     hmg = unit("21", typ="HQ", ebene="PLT")
-    assert commands.cff_observer_key(s, "HMG PLT HQ", hmg) == "PLT HQ"
-    assert commands.cff_observer_key(s, "CO HQ", unit("21", typ="HQ", ebene="CO")) == "CO HQ"
-    assert commands.cff_observer_key(s, "1/1", unit("21")) == "1/1"
+    assert fire_support.cff_observer_key(s, "HMG PLT HQ", hmg) == "PLT HQ"
+    assert fire_support.cff_observer_key(s, "CO HQ", unit("21", typ="HQ", ebene="CO")) == "CO HQ"
+    assert fire_support.cff_observer_key(s, "1/1", unit("21")) == "1/1"
     s["cff_beobachter"].pop("PLT HQ")
     s["cff_tabelle"]["81mm HE"].pop("PLT HQ")
-    assert commands.cff_observer_key(s, "HMG PLT HQ", hmg) == "HMG PLT HQ"
+    assert fire_support.cff_observer_key(s, "HMG PLT HQ", hmg) == "HMG PLT HQ"

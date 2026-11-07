@@ -466,6 +466,14 @@ def cease_fire(e):
         e.pop(k, None)
 
 
+def set_target(e, kid):
+    """L549 (review V15): a firing unit changes its target by itself (fire follows 6.3.4, Point Blank shift 6.1.2): the
+    working fields that belong to the old target go, as in cease_fire, then the new target is set."""
+    for k in ("konzentriert", "_rauch_ziel", "_vof_sperre", "_reichweite_vof", "ziel_offen"):
+        e.pop(k, None)
+    e["ziel"] = kid
+
+
 def pdf_left_behind(s, n, e, origin):
     """L461: what happens to the PDF marker the mover leaves on its origin card: it stays while another unit there still
     fires at the same target, otherwise it is removed (or turned back to the single arrow if the fire was mutual)."""
@@ -533,8 +541,7 @@ def fire_after_move(s, n, prot, origin=None, open_all=True):
                     hb=geometry.card_height_bonus(s, e["karte"], geometry.opponent_of(f)),
                 )
                 if ok and geometry.in_range(s, f, e["karte"]) and e["karte"] in fire_candidates(s, m):
-                    f["ziel"] = e["karte"]
-                    f.pop("konzentriert", None)
+                    set_target(f, e["karte"])
                     prot.append(
                         f"{m}: fire follows {n} to {e['karte']}, PDF from {f['karte']} to {e['karte']}"
                         + pdf_note(s, f["karte"], e["karte"], m)
@@ -561,8 +568,7 @@ def fire_after_move(s, n, prot, origin=None, open_all=True):
                 and origin in (geometry.line_between(s, f["karte"], e["karte"]) or [])
                 and e["karte"] in fire_candidates(s, m)
             ):
-                f["ziel"] = e["karte"]
-                f.pop("konzentriert", None)
+                set_target(f, e["karte"])
                 prot.append(f"{m}: fire follows {n} along the same PDF to {e['karte']} [6.3.4 p.44]")
     for m, f in s["einheiten"].items():
         if (
@@ -573,7 +579,7 @@ def fire_after_move(s, n, prot, origin=None, open_all=True):
             and state.is_visible(e)
             and not geometry.no_point_blank(s, f)
         ):
-            f["ziel"] = f["karte"]
+            set_target(f, f["karte"])
             prot.append(f"{m} shifts fire to its own card (Point Blank) [6.1.2]")
     # [RULE 3.0 p.15, 6.1.1 p.39] after every board change all unengaged units with a valid target open fire
     if open_all:

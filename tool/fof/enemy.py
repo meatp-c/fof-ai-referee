@@ -4,7 +4,7 @@ import dataclasses
 import functools
 import typing
 
-from . import briefing, combat, commands, comms, contact, fire, geometry, options, rules, state
+from . import briefing, combat, commands, comms, contact, fire, geometry, grenades, options, rules, state
 
 
 OFFENSIVE_TACTICS = ("Offensive Assault", "Assault", "Overrun")
@@ -52,14 +52,21 @@ def fire_from_other_direction(s, kid, own_target):
     return any(geometry.direction(s, kid, k) != own for k in fire.pdfs_to(s, kid, "Feind"))
 
 
-def best_free_cover(s, kid):
-    """Cover markers on kid an enemy may enter (no US unit under them), highest value only; several = random choice by
-    R# [RULE 8.6.1E p.66]. Empty list without a free marker (L264, review M26)."""
-    free = state.free_cover(s, kid, side="Feind")
+def best_free_cover(s, kid, steps=0):
+    """Cover markers on kid an enemy may enter (no US unit under them, room for `steps`, L534), highest value only;
+    several = random choice by R# [RULE 8.6.1E p.66]. Empty list without a free marker (L264, review M26)."""
+    free = state.free_cover(s, kid, side="Feind", steps=steps)
     if not free:
         return []
     top = max(c["wert"] for c in free)
     return [c for c in free if c["wert"] == top]
+
+
+def leave_structure(e):
+    """L532 (review E1): the placement flags of a Bunker/Pillbox or Deep Bunker (no Point Blank, fire arc, no VOF) end
+    when the unit leaves the marker: by moving to another card or by leaving it on its card (5.3, CSR 5)."""
+    for k in ("kein_point_blank", "bunker_richtung", "deep_bunker"):
+        e.pop(k, None)
 
 
 def move_enemy(s, n, target, prot, *, cover=True, exposed=True, how="moves", rule="8.6.1C"):
@@ -72,15 +79,15 @@ def move_enemy(s, n, target, prot, *, cover=True, exposed=True, how="moves", rul
     e = s["einheiten"][n]
     origin = e["karte"]
     combat.ammo_surplus(s, n, e, origin, prot)  # L145 [RULE 8.11 p.68]
-    commands.grenade_expires(
+    grenades.grenade_expires(
         s, e, n, prot
     )  # L92 [RULE 7.10.4] Grenade marker becomes a Grenade Miss on the origin card
     cv_from = geometry.cover_marker(s, e)
     e["karte"], e["bereich"] = target, "offen"
-    e.pop("deep_bunker", None)  # cover ids are per card: the marker stays behind (review M19)
+    leave_structure(e)  # cover ids are per card: the marker stays behind (review M19, L532)
     chosen, best = None, []
     if cover:
-        best = best_free_cover(s, target)
+        best = best_free_cover(s, target, state.steps(e))  # L534: a full Bunker/Foxholes is no choice
         if best:
             chosen = best[0]
             e["bereich"] = chosen["id"]
@@ -789,6 +796,7 @@ def _enemy_advance(s, ctx):
                 "Assault from row 1: --target=<adjacent card towards the nearest US unit>"
                 + state.open_reading(s, "U24_assault_in_staging")
             )
+        commands.diagonal_pdf_check(s, ctx.e, target)  # L550 (review E13): as every other enemy move
     if not target:
         # L268 (review M23): no card straight ahead used to be a silent no-op that still closed the check
         missing = state.card_id(c["reihe"] - 1, c["spalte"])
@@ -805,12 +813,24 @@ def _is_advance(s, ctx):
     return "advance" in ctx.a
 
 
+def _seek_cover_mine_check(s, ctx):
+    """L541 (review E9): option U20 (successful Seek Cover on a mine card triggers a mine check) for the enemy too."""
+    if state.is_v4(s) and state.option(s, "U20_mine_bei_seek_cover"):
+        contact.request_mine_check(
+            s,
+            [ctx.n],
+            ctx.e["karte"],
+            ctx.prot,
+            "movement under cover" + state.open_reading(s, "U20_mine_bei_seek_cover"),
+        )
+
+
 def _enemy_seek_cover(s, ctx):
     """cmd_feindaktion: 'seek cover' in a or 'move into' in a"""
     kk = state.card(s, ctx.e["karte"])
-    best = best_free_cover(s, ctx.e["karte"])  # L264 (review M26): highest value, not the first marker
+    best = best_free_cover(s, ctx.e["karte"], state.steps(ctx.e))  # L264, L534: highest value with room
     if best and ctx.e.get("bereich", "offen") == "offen":
-        commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
+        grenades.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
         ctx.e["bereich"] = best[0]["id"]
         commands.mark(ctx.e, rules.EXPOSED)
         ctx.prot.append(
@@ -818,6 +838,7 @@ def _enemy_seek_cover(s, ctx):
             + (f" (tie with {', '.join(c['id'] for c in best[1:])}: choose by R#)" if len(best) > 1 else "")
             + ", Exposed [8.6.1C, 8.6.1E]"
         )
+        _seek_cover_mine_check(s, ctx)
     else:
         if ctx.o.get("--erfolg") not in ("ja", "nein"):
             n_cards = (kk.get("cover_draw") or 2) + {"Green": -1, "Veteran": 1}.get(comms.experience(ctx.e), 0)
@@ -847,18 +868,38 @@ def _enemy_seek_cover(s, ctx):
             cid = commands.new_cover_marker(s, ctx.e["karte"], gt, gw)
             if gt != "Basic Cover":
                 next(c_ for c_ in kk["cover"] if c_["id"] == cid)["feld"] = False
-            commands.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
+            grenades.grenade_expires(s, ctx.e, ctx.n, ctx.prot)  # L171 [RULE 7.10.4] moving within the card
             ctx.e["bereich"] = cid
             commands.mark(ctx.e, rules.EXPOSED)
             ctx.prot.append(
                 f"{ctx.n}: new cover marker {cid} ({gt} +{gw}) on {ctx.e['karte']}, {ctx.n} under it, Exposed [4.2.2e, CSR 8]"
             )
+            _seek_cover_mine_check(s, ctx)
         else:
             ctx.prot.append(f"{ctx.n}: Seek Cover failed")
 
 
 def _is_seek_cover(s, ctx):
     return "seek cover" in ctx.a or "move into" in ctx.a
+
+
+def _carry_casualty(s, ctx, target):
+    """L540 (review E7, P12 'Fall Back with Casualty'): the Litter Team takes one Casualty of its card along (3.7.4
+    retreat wording: 'a Litter Team plus a Casualty'); off-map the Casualty leaves with it."""
+    if "with casualty" not in ctx.a:
+        return
+    origin = state.card(s, ctx.e["karte"])
+    if not origin.get("casualties_feind"):
+        return
+    origin["casualties_feind"] -= 1
+    if target:
+        dest = state.card(s, target)
+        dest["casualties_feind"] = dest.get("casualties_feind", 0) + 1
+    ctx.prot.append(
+        f"{ctx.n} carries one Casualty from {ctx.e['karte']}"
+        + (f" to {target}" if target else " off the map")
+        + " [8.6.3]"
+    )
 
 
 def _enemy_fall_back(s, ctx):
@@ -870,6 +911,7 @@ def _enemy_fall_back(s, ctx):
             raise rules.Violation(
                 f"{ctx.n} is neither at the enemy edge with an empty position behind it nor beyond the left/right boundary: no off-map Fall Back [8.6.3]"
             )
+        _carry_casualty(s, ctx, None)
         remove_enemy(s, ctx.n, ctx.prot, reason=f"Fall Back off-map ({off}) [8.6.3 priority 1, K26]")
     else:
         if off:
@@ -895,6 +937,7 @@ def _enemy_fall_back(s, ctx):
             raise rules.Violation(
                 f"Fall Back of {ctx.n}: by 8.6.3 to {', '.join(best)} (towards the enemy edge; first out of every US LOS, then highest cover value incl. free markers; tie: R#) [RULE 8.6.3 p.66]"
             )
+        _carry_casualty(s, ctx, target)
         move_enemy(s, ctx.n, target, ctx.prot, how="falls back", rule="8.6.3")
 
 
@@ -961,7 +1004,7 @@ def _grenade_prompt(s, ctx, mode, grenade_pb):
         f"{enemy_attempt_cards(s, ctx.e, concentrate)} cards "
         f"(base 2, experience {comms.experience(ctx.e)}{', Leader +1' if leader_cards(s, ctx.e) else ''}{', tripod +1' if concentrate and ctx.e.get('tripod') else ''}), "
         f"{'Crosshairs' if concentrate else 'Grenade symbol'}; --success=yes|no --unit=<target unit or cover stack>{largest_target_note(s, ctx.e)} [7.10, 7.11, 8.9] "
-        + commands.draw_watch(s, "cf" if concentrate else "grenade", ctx.e, ranged=mode == "grenade" and not grenade_pb)
+        + grenades.draw_watch(s, "cf" if concentrate else "grenade", ctx.e, ranged=mode == "grenade" and not grenade_pb)
     )
 
 
@@ -972,7 +1015,8 @@ def _leave_deep_bunker(s, ctx):
     if not (cv0 and cv0["typ"] == "Deep Bunker"):
         return
     ctx.e["bereich"] = "offen"
-    ctx.e.pop("deep_bunker", None)
+    leave_structure(ctx.e)  # L532
+    fire.cease_fire(ctx.e)  # L533 (review E6): a target stored before the unit could fire must not survive
     commands.mark(ctx.e, rules.EXPOSED)
     ctx.prot.append(
         f"{ctx.n} leaves Deep Bunker {cv0['id']} for the Grenade Attack, Exposed; VOF now active [CSR 5 p.14, 5.3.2]"
@@ -1014,7 +1058,7 @@ def _grenade_target_card(s, ctx, grenade_pb, g_without_pdf, rg):
 def _apply_grenade_hit(s, ctx, zk, ze, z):
     """[RULE 7.10.1 p.54] one unit out of cover or the whole stack under its Cover marker (L124)."""
     gw = options.int_opt(ctx.o, "--wert", "--value", s.get("granate_vof", rules.GRENADE_VOF_DEFAULT))  # L274 (M27)
-    stack = commands.grenade_stack(s, ze)
+    stack = grenades.grenade_stack(s, ze)
     crit = ctx.o.get("--kritisch") == "ja"
     under = z.get("bereich", "offen") != "offen"
     for m in stack:
@@ -1031,7 +1075,7 @@ def _apply_grenade_hit(s, ctx, zk, ze, z):
             if under
             else f"Critical Hit: a second Grenade VOF on {ze} [7.10.3]"
         )
-    commands.grenade_back_notes(s, ctx.e, stack, True, ctx.prot, ctx.n)
+    grenades.grenade_back_notes(s, ctx.e, stack, True, ctx.prot, ctx.n)
 
 
 def _apply_concentrate_hit(s, ctx, zk, ze):
@@ -1065,14 +1109,15 @@ def _enemy_grenade_concentrate(s, ctx):
         and (ctx.e.get("vof_rating") == "G" or ctx.e.get("grenade_ranged"))
     ):
         combat.ammo_use(s, ctx.n, ctx.e, 1, "Grenade Attack at range", ctx.prot)
-    jammed = state.is_v4(s) and ctx.o.get("--jam") == "ja" and not grenade_pb and commands.jam_prone(ctx.e)
+    jammed = state.is_v4(s) and ctx.o.get("--jam") == "ja" and not grenade_pb and grenades.jam_prone(ctx.e)
     if jammed:
-        commands.jam(s, ctx.n, ctx.prot)
+        grenades.jam(s, ctx.n, ctx.prot)
         ctx.o["--erfolg"] = "nein"
     cv = geometry.cover_marker(s, ctx.e)
     if grenade_pb and cv and cv["typ"] in rules.STRUCTURES:
         # [RULE 5.3 p.37] Grenade Attack against a Point Blank opponent: unit leaves Bunker/Pillbox and becomes Exposed
         ctx.e["bereich"] = "offen"
+        leave_structure(ctx.e)  # L532
         commands.mark(ctx.e, rules.EXPOSED)
         ctx.prot.append(f"{ctx.n} leaves {cv['typ']} {cv['id']} for the Point Blank attack, Exposed [5.3 p.37]")
     grenade_hit = mode == "grenade" and (zk == ctx.e["karte"] or ctx.e.get("vof_rating") == "G" or rg)
@@ -1095,14 +1140,14 @@ def _enemy_grenade_concentrate(s, ctx):
         state.card(s, zk)["grenade_miss"] = True
         ctx.prot.append(f"{ctx.n}: Grenade Miss (-1) on {zk} [7.10.4]")
         ze = ctx.o.get("--einheit")
-        commands.grenade_back_notes(
-            s, ctx.e, commands.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
+        grenades.grenade_back_notes(
+            s, ctx.e, grenades.grenade_stack(s, ze) if ze else state.units_on(s, zk, "US"), False, ctx.prot, ctx.n
         )
     elif grenade_hit and not jammed:
         # L513 [RULE 7.10.4 p.55 'If a Grenade Attack fails, place a Grenade Miss Modifier marker on the target card'] also
         # for a ranged enemy Grenade Attack (G!, mortar, rifle grenade); not after a Jam (L246)
         ctx.prot.append(f"{ctx.n}: attempt failed")
-        ctx.prot.append(commands.place_grenade_miss(s, zk))
+        ctx.prot.append(grenades.place_grenade_miss(s, zk))
     else:
         ctx.prot.append(f"{ctx.n}: attempt failed")
 
@@ -1159,6 +1204,9 @@ def _enemy_rally(s, ctx):
             ctx.prot.append(f"{ctx.n}: Pinned marker removed, VOF Basic again [6.5.1]")
         else:
             ctx.prot.append(f"{ctx.n}: Rally failed")
+    elif state.fire_team_side(ctx.e) and ctx.e.get("ooa_flip"):
+        # L539 (review E8, L228): on the Fire Team side because Out of Ammo; only resupply undoes that flip
+        ctx.prot.append(f"{ctx.n} stays on its Fire Team side: Out of Ammo, only resupply flips it back [7.18.2, L228]")
     elif state.fire_team_side(ctx.e):
         if ctx.under_vof and ctx.o.get("--erfolg") not in ("ja", "nein"):
             raise rules.Violation("Flip to Front under VOF: 2 cards, word 'Rally'; --success=yes|no [4.2.3f]")
@@ -1205,6 +1253,12 @@ def _enemy_move_towards(s, ctx):
             "Move towards closest Casualty: --target=<adjacent card towards the closest Casualty> [LAT/Pinned Hierarchy]"
         )
     commands.diagonal_pdf_check(s, ctx.e, target)  # L131 [RULE 5.1.2 p.32]
+    if restricted_mover(ctx.e) and fire.vof_against(s, target, "Feind") is not None:
+        # L541 (review E3): the same 4.2.5/E90 limit as Fall Back (fall_back_candidates) and the event Fall Back
+        raise rules.Violation(
+            f"{ctx.n} (Pinned/Paralyzed/Litter) may not enter {target}: it has a VOF against it; draw the activity R# again "
+            "and book that result (L515) [RULE 4.2.5 p.26, E90]"
+        )
     move_enemy(s, ctx.n, target, ctx.prot, cover=False, how="moves towards the Casualty")  # in the open, as before
 
 
@@ -1254,6 +1308,11 @@ def _enemy_infiltrate(s, ctx):
         )
     if not geometry.adjacent(s, ctx.e["karte"], target):
         raise rules.Violation(f"{target} is not adjacent to {ctx.e['karte']} [RULE 5.1.2 p.31]")
+    steps = {st for _k, sts in closest_opponent_cards(s, ctx.e) for st in sts}
+    if steps and target not in steps:  # L550 (review E15): the step towards the closest opponent, as Fall Back checks
+        raise rules.Violation(
+            f"{target} does not bring {ctx.n} closer to the closest opposing unit; step cards: {', '.join(sorted(steps))} [Chart, L168]"
+        )
 
     def _any_vof(k):  # a VOF marker of either side on the card [5.1.4]
         return any(fire.vof_against(s, k, side) is not None for side in ("US", "Feind"))
@@ -1379,6 +1438,7 @@ def remove_enemy(s, n, prot, reason="", pc=False):
         pk["im_spiel"] = False
     ammo_lost(e, n, prot)
     del s["einheiten"][n]
+    state.forget_pending(s, n)  # L538
     prot.append(f"{n} off the board ({reason}), counter back to the pool [8.3]")
 
 
@@ -1602,7 +1662,7 @@ def fall_back_candidates(s, e):
 
     def cover_value(k):
         ck = state.card(s, k)
-        free = [cv["wert"] for cv in state.free_cover(s, k, side="Feind")]
+        free = [cv["wert"] for cv in state.free_cover(s, k, side="Feind", steps=state.steps(e))]  # L534
         return (ck.get("cc") or 0) + (max(free) if free else 0)
 
     top = max(cover_value(k) for k in pool)

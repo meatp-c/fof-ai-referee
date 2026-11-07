@@ -3,6 +3,7 @@
 import pytest
 from conftest import fof_subprocess, m6_state, saved_state, unit
 from fof import campaign, combat
+from fof import grenades  # L556: split from commands
 
 
 def test_lat_conversion_takes_counter_values(board):
@@ -57,12 +58,11 @@ def test_enemy_seek_cover_turns_grenade_into_miss(board):
 
 def test_jam_prone_only_weapons_and_ammo_squads():
     """L172 [7.12]: S squads and S weapons teams never jam; A weapons teams and A squads with ammo do."""
-    from fof import commands
 
-    assert not commands.jam_prone({"typ": "Squad", "vof_rating": "S"})
-    assert not commands.jam_prone({"typ": "Weapons Team", "vof_rating": "S"})
-    assert commands.jam_prone({"typ": "Weapons Team", "vof_rating": "A"})
-    assert commands.jam_prone({"typ": "Squad", "vof_rating": "A", "munition": {"punkte": 3}})
+    assert not grenades.jam_prone({"typ": "Squad", "vof_rating": "S"})
+    assert not grenades.jam_prone({"typ": "Weapons Team", "vof_rating": "S"})
+    assert grenades.jam_prone({"typ": "Weapons Team", "vof_rating": "A"})
+    assert grenades.jam_prone({"typ": "Squad", "vof_rating": "A", "munition": {"punkte": 3}})
 
 
 def test_fire_ammo_skips_rockets_and_at_gun_small_arms():
@@ -75,10 +75,9 @@ def test_fire_ammo_skips_rockets_and_at_gun_small_arms():
 
 def test_rocket_team_with_g_superscript_is_jam_prone():
     """L174, K42 [7.12]: an S G! rocket team (Bazooka) is liable to jamming, also after its rockets ran out."""
-    from fof import commands
 
-    assert commands.jam_prone({"typ": "Weapons Team", "vof_rating": "S", "grenade_ranged": True})
-    assert commands.jam_prone({"typ": "Weapons Team", "vof_rating": "S", "rkt_leer": True})
+    assert grenades.jam_prone({"typ": "Weapons Team", "vof_rating": "S", "grenade_ranged": True})
+    assert grenades.jam_prone({"typ": "Weapons Team", "vof_rating": "S", "rkt_leer": True})
 
 
 def test_set_values_during_play_needs_reason(board):
@@ -98,10 +97,9 @@ def test_set_values_during_play_needs_reason(board):
 
 def test_out_of_ammo_unit_is_s_rated_no_jam_no_ammo():
     """L176, K43 [7.18.2]: an A weapons team with an Out of Ammo marker fires S: not liable to jam, no ammo for CF."""
-    from fof import commands
 
     e = {"typ": "Weapons Team", "vof_rating": "A", "out_of_ammo": True, "munition": {"typ": "MG", "punkte": 0}}
-    assert not commands.jam_prone(e)
+    assert not grenades.jam_prone(e)
     assert combat.fire_ammo(e) is None
 
 
@@ -128,7 +126,8 @@ def test_last_step_team_inherits_empty_ammo(board, monkeypatch):
     assert "4/Gp FJ 1" not in s["einheiten"] and len(teams) == 1
     team = s["einheiten"][teams[0]]
     assert team["vof_rating"] == "A" and team["munition"]["punkte"] == 0
-    assert team.get("munition_leer") or team.get("out_of_ammo")
+    # L552 (review T4): the squad fired its last ammo this turn (munition_leer); the Out of Ammo marker comes in 3.8
+    assert team.get("munition_leer") is True and not team.get("out_of_ammo")
 
 
 def test_marker_summary_point_blank_positions(board):
