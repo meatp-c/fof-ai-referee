@@ -3,30 +3,30 @@
 import copy
 import types
 
-from . import briefing, combat, commands, enemy, events, fire, geometry, grenades, options, rules, state
+from . import briefing, combat, commands, enemy, events, fire, geometry, grenades, migrate, options, rules, state
 
 
 def package_units(pk):
-    """Units of a package: list 'einheiten' (v3, e.g. package 7 'Squad in Trench + LMG in Bunker') or flat package (v2)."""
-    if pk.get("einheiten"):
-        return pk["einheiten"]
-    if pk.get("einheit") or pk.get("einheit_wahl"):
+    """Units of a package: list 'units' (series rules, e.g. package 7 'Squad in Trench + LMG in Bunker') or flat package (basic game)."""
+    if pk.get("units"):
+        return pk["units"]
+    if pk.get("unit") or pk.get("unit_choice"):
         return [pk]
     return []
 
 
 def in_play_count(s, type_name):
-    return sum(1 for e in s["einheiten"].values() if e["seite"] == "Feind" and e.get("typname") == type_name)
+    return sum(1 for e in s["units"].values() if e["side"] == "Enemy" and e.get("type_name") == type_name)
 
 
 def cover_count(s, type_):
-    return sum(1 for c in s["karten"].values() for cv in c.get("cover", []) if cv["typ"] == type_)
+    return sum(1 for c in s["cards"].values() for cv in c.get("cover", []) if cv["type"] == type_)
 
 
 def type_free(s, u, needed=None):
-    """Free counter types for a package unit; 'einheit_wahl' = choose the type at random [FM1 p.48], type in use: take another [RULE 8.3 p.62]."""
+    """Free counter types for a package unit; 'unit_choice' = choose the type at random [FM1 p.48], type in use: take another [RULE 8.3 p.62]."""
     cm, needed = s.get("countermix", {}), needed or {}
-    names = u.get("einheit_wahl") or [u["einheit"]]
+    names = u.get("unit_choice") or [u["unit"]]
     return [
         n for n in names if in_play_count(s, n) + needed.get(n, 0) < (cm.get(n, 1) if cm.get(n, 1) is not None else 1)
     ]
@@ -34,22 +34,22 @@ def type_free(s, u, needed=None):
 
 def package_available(s, p, choice=None):
     """[RULE 8.3 p.62/63, FM1 p.48 'Respect the counter mix'] all counters and markers of the package must be free.
-    Marker packages without a unit (Incoming) are occupied as long as their marker is on the board ('im_spiel')."""
-    pk = s["pakete"][p]
-    if pk.get("wahl"):
+    Marker packages without a unit (Incoming) are occupied as long as their marker is on the board ('in_play')."""
+    pk = s["packages"][p]
+    if pk.get("choice"):
         return any(
-            all(type_free(s, u) for u in opt_) for opt_ in pk["wahl"].values()
-        )  # v4: package with a choice (Normandy package 5)
-    units = [u for u in package_units(pk) if not u.get("optional_r") and not u.get("nur_wenn_verfuegbar")]
+            all(type_free(s, u) for u in opt_) for opt_ in pk["choice"].values()
+        )  # campaign: package with a choice (Normandy package 5)
+    units = [u for u in package_units(pk) if not u.get("optional_r") and not u.get("only_if_available")]
     if not units and "place_vof" in pk:
         return True
     if not units:
-        return not pk.get("im_spiel")
+        return not pk.get("in_play")
     cm = s.get("countermix", {})
     needed, cover_needed = {}, {}
     for u in units:
         free = type_free(s, u, needed)
-        if choice and u.get("einheit_wahl"):
+        if choice and u.get("unit_choice"):
             free = [x for x in free if x == choice]
         if not free:
             return False
@@ -63,40 +63,40 @@ def package_available(s, p, choice=None):
 
 def enemy_pdf_or_vof(s, k):
     """[RULE 8.4.3 p.63] 'cannot place a package on a card which is along the PDF of another enemy unit or if it has an enemy VOF marker'."""
-    for n, e in s["einheiten"].items():
-        if e["seite"] == "Feind" and fire.is_firing(e) and e["ziel"] != e["karte"]:
-            if k in (geometry.line_between(s, e["karte"], e["ziel"]) or []) + [e["ziel"]]:
+    for n, e in s["units"].items():
+        if e["side"] == "Enemy" and fire.is_firing(e) and e["target"] != e["card"]:
+            if k in (geometry.line_between(s, e["card"], e["target"]) or []) + [e["target"]]:
                 return f"along the PDF of {n}"
-    for x in state.card(s, k).get("extern", []):
-        if x.get("seite") == "Feind" or any(pk.get("name") == x.get("quelle") for pk in s.get("pakete", {}).values()):
+    for x in state.card(s, k).get("external", []):
+        if x.get("side") == "Enemy" or any(pk.get("name") == x.get("source") for pk in s.get("packages", {}).values()):
             return "enemy VOF marker"
     return None
 
 
-def valid_places(s, pk, kid):
+def valid_places(s, pk, card_id):
     out = []
     units = package_units(pk) or [pk]
     without_pb = all(u.get("cover") in rules.STRUCTURES for u in units)
-    hi = min(rules.RANGE_CARDS.get((u.get("reichweite") or "L").split("-")[-1], 2) for u in units)
-    v3 = enemy.series_rules(s)  # L262: one predicate for the series-rules placement restrictions
-    for k, c in s["karten"].items():
-        if pk.get("reihe") and c["reihe"] != pk["reihe"]:
+    hi = min(rules.RANGE_CARDS.get((u.get("range") or "L").split("-")[-1], 2) for u in units)
+    series = enemy.series_rules(s)  # one predicate for the series-rules placement restrictions
+    for k, c in s["cards"].items():
+        if pk.get("row") and c["row"] != pk["row"]:
             continue
-        if c.get("staging") or state.units_on(s, k, "Feind"):
+        if c.get("staging") or state.units_on(s, k, "Enemy"):
             continue
-        if state.units_on(s, k, "US") and k != kid and not (v3 and without_pb):
+        if state.units_on(s, k, "US") and k != card_id and not (series and without_pb):
             continue  # [RULE 8.4.3 p.63] '(unless Point Blank fire is not possible for the units in the package)'
-        if v3 and without_pb and k == kid:
+        if series and without_pb and k == card_id:
             continue  # a bunker cannot fire Point Blank, but must be able to open fire on the trigger card
-        if k != kid:
+        if k != card_id:
             if (
-                geometry.distance(s, k, kid) > hi
-                or not geometry.los(s, k, kid, hb=geometry.card_height_bonus(s, kid, "US"))[0]
+                geometry.distance(s, k, card_id) > hi
+                or not geometry.los(s, k, card_id, hb=geometry.card_height_bonus(s, card_id, "US"))[0]
             ):
                 continue
-            if any(state.units_on(s, between, "US") for between in (geometry.line_between(s, k, kid) or [])):
+            if any(state.units_on(s, between, "US") for between in (geometry.line_between(s, k, card_id) or [])):
                 continue
-        if v3 and enemy_pdf_or_vof(s, k):
+        if series and enemy_pdf_or_vof(s, k):
             continue
         out.append(k)
     return out
@@ -104,52 +104,54 @@ def valid_places(s, pk, kid):
 
 def cmd_pc(s, args):
     """pc | pc <card> | pc reveal|set <card> <letter> | pc clear <card> | pc contact <card> <package> [..] (8.2-8.4).
-    L557 (review E4): a switch over the sub-commands; each one is its own function."""
-    if args and args[0] in ("aufdecken", "setzen") and cmd_pc_v4(s, args):
+    a switch over the sub-commands; each one is its own function."""
+    if args and args[0] in ("reveal", "set") and cmd_pc_campaign(s, args):
         return None
     if not args:
         return pc_overview(s)
-    if args[0] not in ("kontakt", "frei"):
+    if args[0] not in ("contact", "clear"):
         return pc_draw_info(s, args[0])
-    if args[0] == "frei":
+    if args[0] == "clear":
         return pc_clear(s, args)
     return pc_contact(s, args)
 
 
 def pc_overview(s):
-    """pc: the PC markers on cards with friendly units, by letter (L516)."""
+    """pc: the PC markers on cards with friendly units, by letter."""
     open_ = sorted(
-        (k for k, c in s["karten"].items() if c.get("pc") and state.units_on(s, k, "US")),
-        key=lambda k: (str(s["karten"][k]["pc"]), k),
-    )  # L516: by PC letter like the 3.7.2 list
+        (k for k, c in s["cards"].items() if c.get("pc") and state.units_on(s, k, "US")),
+        key=lambda k: (str(s["cards"][k]["pc"]), k),
+    )  # by PC letter like the 3.7.2 list
     print(
         "PC markers with friendly units: "
-        + (", ".join(f"{k} (PC {s['karten'][k]['pc']})" for k in open_) if open_ else "none")
+        + (", ".join(f"{k} (PC {s['cards'][k]['pc']})" for k in open_) if open_ else "none")
     )
 
 
-def pc_draw_info(s, kid):
+def pc_draw_info(s, card_id):
     """pc <card>: legality of resolving the PC marker and the draw instructions [8.2.4, 8.3]."""
-    c = state.card(s, kid)
+    c = state.card(s, card_id)
     if not c.get("pc"):
-        raise rules.Violation(f"{kid} has no PC marker")
-    if not state.units_on(s, kid, "US"):
-        raise rules.Violation(f"{kid}: a PC marker is only resolved with a friendly unit on the card [RULE 8.2.4 p.62]")
+        raise rules.Violation(f"{card_id} has no PC marker")
+    if not state.units_on(s, card_id, "US"):
+        raise rules.Violation(
+            f"{card_id}: a PC marker is only resolved with a friendly unit on the card [RULE 8.2.4 p.62]"
+        )
     if s["phase"] != "3.7.2":
         print(f"Note: PC resolution belongs in 3.7.2, currently {s['phase']}")
     # E39 (the player 07.10.2026): reveal ?-markers only on cards with friendly units (8.2.4; developer AAR BGG 2585005)
     if "?" in (c.get("pc"), c.get("pc2")) or any(
-        "?" in (cc.get("pc"), cc.get("pc2")) for kk, cc in s["karten"].items() if state.units_on(s, kk, "US")
+        "?" in (cc.get("pc"), cc.get("pc2")) for other_id, cc in s["cards"].items() if state.units_on(s, other_id, "US")
     ):
         raise rules.Violation(
             "First reveal the PC markers showing '?' on cards with friendly units: fof.py pc reveal <card> <A|B|C> [RULE 8.2.4 p.62, E39]"
         )
-    higher = [k for k, cc in s["karten"].items() if cc.get("pc") and state.units_on(s, k, "US") and cc["pc"] < c["pc"]]
+    higher = [k for k, cc in s["cards"].items() if cc.get("pc") and state.units_on(s, k, "US") and cc["pc"] < c["pc"]]
     if higher:
         raise rules.Violation(f"First resolve the higher letters: {', '.join(higher)} [RULE 8.2.4 p.62]")
-    n = rules.PC_DRAWS[c["pc"]][s["aktivitaet"] or "No Contact"]
+    n = rules.PC_DRAWS[c["pc"]][s["activity"] or "No Contact"]
     print(
-        f"PC {c['pc']} on {kid} at {s['aktivitaet']}: "
+        f"PC {c['pc']} on {card_id} at {s['activity']}: "
         + (
             "Auto, contact without a draw"
             if n == 0
@@ -157,17 +159,17 @@ def pc_draw_info(s, kid):
         )
         + " [8.2.4, Charts 1]"
     )
-    tab = s.get("paket_tabelle", {}).get("PC " + c["pc"], {})
+    tab = s.get("package_table", {}).get("PC " + c["pc"], {})
     if (
-        s.get("gegenangriff")
+        s.get("counterattack")
         and c["pc"] == "A"
-        and s.get("paket_tabelle_gegenangriff")
-        and state.option(s, "U28_gegenangriff_alle_pc_a")
+        and s.get("package_table_counterattack")
+        and state.option(s, "U28_counterattack_all_pc_a")
     ):
-        tab = s["paket_tabelle_gegenangriff"]["PC A"]
+        tab = s["package_table_counterattack"]["PC A"]
         print(
             "Counter-attack active: PC A uses the Counter-Attack list"
-            + state.open_reading(s, "U28_gegenangriff_alle_pc_a")
+            + state.open_reading(s, "U28_counterattack_all_pc_a")
             + " [Normandy M1 MSR 1 p.19]"
         )
     print(
@@ -175,16 +177,16 @@ def pc_draw_info(s, kid):
         + c["pc"]
         + ": "
         + "; ".join(
-            f"R# {v} = package {p} ({s['pakete'][p]['name']}, {'free' if package_available(s, p) else 'IN USE'})"
+            f"R# {v} = package {p} ({s['packages'][p]['name']}, {'free' if package_available(s, p) else 'IN USE'})"
             for p, v in tab.items()
-            if p in s["pakete"]
+            if p in s["packages"]
         )
     )
-    if state.is_v4(s):
-        rt = s.get("richtung_tabelle", {})
+    if state.is_campaign(s):
+        rt = s.get("direction_table", {})
         print(
-            f"Package that cannot be placed: draw again (8.3 p.63, Normandy p.19; E6); if none can be placed, no contact. Direction per unit on the friendly card: R# column {rt.get('spalte', 8)}: "
-            + ", ".join(f"{b} {v}" for b, v in rt.items() if b != "spalte")
+            f"Package that cannot be placed: draw again (8.3 p.63, Normandy p.19; E6); if none can be placed, no contact. Direction per unit on the friendly card: R# column {rt.get('column', 8)}: "
+            + ", ".join(f"{b} {v}" for b, v in rt.items() if b != "column")
             + " [8.4.2 p.63]. Then fof.py pc contact <card> <package> --direction=.. (the tool names any further inputs)"
         )
     elif state.company(s):
@@ -199,186 +201,189 @@ def pc_draw_info(s, kid):
 
 def pc_clear(s, args):
     """pc clear <card>: no contact, the PC marker is removed [8.2.4]."""
-    rules.need(args, 2, "pc clear <card>")  # L269 (review H12); L550: usage names the English word the CLI knows
-    kid = args[1]
-    c = state.card(s, kid)
+    rules.need(args, 2, "pc clear <card>")  # usage names the English word the CLI knows
+    card_id = args[1]
+    c = state.card(s, card_id)
     if not c.get("pc"):
-        raise rules.Violation(f"{kid} has no PC marker")
+        raise rules.Violation(f"{card_id} has no PC marker")
     old = c["pc"]
-    state.clear_pc(c)  # L550
-    state.save_state(s, f"PC {old} on {kid}: no contact, PC marker removed", "8.2.4 p.62")
-    print(f"No contact on {kid}. Remove the PC marker [8.2.4].")
+    state.clear_pc(c)
+    state.save_state(s, f"PC {old} on {card_id}: no contact, PC marker removed", "8.2.4 p.62")
+    print(f"No contact on {card_id}. Remove the PC marker [8.2.4].")
     print(briefing.check_stamp(s))
 
 
 def pc_contact(s, args):
-    """pc contact <card> <package> [--place=..] [--direction=..]: place the package (v4: pc_contact_v4) [8.3, 8.4]."""
-    rules.need(args, 3, "pc contact <card> <package> [--place=..] [--direction=..]")  # L269 (review H12)
-    kid, package = args[1], args[2]
+    """pc contact <card> <package> [--place=..] [--direction=..]: place the package (campaign: pc_contact_campaign) [8.3, 8.4]."""
+    rules.need(args, 3, "pc contact <card> <package> [--place=..] [--direction=..]")
+    card_id, package = args[1], args[2]
     o = options.parse_opts(args[3:])
-    c = state.card(s, kid)
+    c = state.card(s, card_id)
     if not c.get("pc"):
-        raise rules.Violation(f"{kid} has no PC marker")
-    pk = s.get("pakete", {}).get(package)
+        raise rules.Violation(f"{card_id} has no PC marker")
+    pk = s.get("packages", {}).get(package)
     if not pk:
         raise rules.Violation(f"Package {package} unknown")
-    if not state.units_on(s, kid, "US"):
+    if not state.units_on(s, card_id, "US"):
         raise rules.Violation(
-            f"{kid}: a PC marker is only resolved with a friendly unit on the card [RULE 8.2.4 p.62, 3.7.2 p.17]"
+            f"{card_id}: a PC marker is only resolved with a friendly unit on the card [RULE 8.2.4 p.62, 3.7.2 p.17]"
         )
     if "place_vof" in pk:
         if c.get("pc") == "?":
             raise rules.Violation("Reveal the PC marker first: fof.py pc reveal <card> <A|B|C>")
-        return pc_contact_v4(s, kid, package, pk, o)
+        return pc_contact_campaign(s, card_id, package, pk, o)
     if not package_available(s, package):
         raise rules.Violation(f"Package {package} not available (counter mix); ignore the draw [8.3 p.63, FM1 p.26]")
     prot = []
     pc_old = c["pc"]
     units = package_units(pk)
     if units:
-        place = o.get("--platz", kid if pk["platz"].startswith("trigger") else None)
-        valid = valid_places(s, pk, kid)
+        place = o.get("--place", card_id if pk["place"].startswith("trigger") else None)
+        valid = valid_places(s, pk, card_id)
         if not place:
             raise rules.Violation(
-                f"Package {package} ('{pk['platz']}'): valid cards {', '.join(valid) if valid else 'NONE (redraw the package; if none can be placed, remove the PC marker without contact)'}; draw a random card, column {len(valid)}, and --place=<card> [8.4.3]"
+                f"Package {package} ('{pk['place']}'): valid cards {', '.join(valid) if valid else 'NONE (redraw the package; if none can be placed, remove the PC marker without contact)'}; draw a random card, column {len(valid)}, and --place=<card> [8.4.3]"
             )
         state.card(s, place)
         if place not in valid:
             raise rules.Violation(
                 f"{place} is not a valid place (row, LOS, range, enemies, friendly units in between, enemy PDF/VOF). Valid: {', '.join(valid) or 'none'} [8.4.3 p.63]"
             )
-        types_ = v3_counter_types(s, units, o, prot)  # L557: split for readability (review E4)
+        types_ = series_counter_types(s, units, o, prot)  # split for readability
         new_units = [
-            v3_place_unit(s, u, type_name, place, kid, package, pk, pc_old, prot) for u, type_name in zip(units, types_)
+            place_series_unit(s, u, type_name, place, card_id, package, pk, pc_old, prot)
+            for u, type_name in zip(units, types_)
         ]
         contact_tail(s, new_units, prot, pdf_needs_vof=False)
     else:
-        c.setdefault("extern", []).append(
-            {"typ": "Incoming", "wert": pk.get("wert", -3), "quelle": pk["name"], "seite": "Feind"}
+        c.setdefault("external", []).append(
+            {"type": "Incoming", "value": pk.get("value", -3), "source": pk["name"], "side": "Enemy"}
         )
         prot.append(
-            f"{pk['name']}: Incoming marker (VOF {pk.get('wert', -3)}) active on {kid}, takes effect in this Combat Effects Segment; blocks LOS out of {kid} [8.10, 5.4]"
+            f"{pk['name']}: Incoming marker (VOF {pk.get('value', -3)}) active on {card_id}, takes effect in this Combat Effects Segment; blocks LOS out of {card_id} [8.10, 5.4]"
         )
-        fire.cease_fire_on_los_loss(s, prot)  # L95: also fire THROUGH the card (5.4)
-    pk["im_spiel"] = True
-    state.clear_pc(c)  # L550: a second marker on the card stays
-    prot.append(f"Remove PC marker from {kid} [8.2.4]")
-    ak = fire.update_activity(s)
-    if ak:
-        prot.append(ak)
-    state.save_state(s, f"Contact on {kid}: package {package} {pk['name']}; " + "; ".join(prot), "8.3 p.62, 8.4.3 p.63")
+        fire.cease_fire_on_los_loss(s, prot)  # also fire THROUGH the card (5.4)
+    pk["in_play"] = True
+    state.clear_pc(c)  # a second marker on the card stays
+    prot.append(f"Remove PC marker from {card_id} [8.2.4]")
+    activity_note = fire.update_activity(s)
+    if activity_note:
+        prot.append(activity_note)
+    state.save_state(
+        s, f"Contact on {card_id}: package {package} {pk['name']}; " + "; ".join(prot), "8.3 p.62, 8.4.3 p.63"
+    )
     print("CONTACT [RULE 8.3 p.62, 8.4.3 p.63]")
     briefing.print_board(prot, s)
 
 
-def v3_counter_types(s, units, o, prot):
-    """v3 packages: the counter type of each unit (a free one; several free: random by --type, FM1 p.48)."""
+def series_counter_types(s, units, o, prot):
+    """series rules packages: the counter type of each unit (a free one; several free: random by --type, FM1 p.48)."""
     needed, types_ = {}, []
     for u in units:
         free = type_free(s, u, needed)
-        if u.get("einheit_wahl") and len(free) > 1:
-            w = o.get("--typ")
+        if u.get("unit_choice") and len(free) > 1:
+            w = o.get("--type")
             if w not in free:
                 raise rules.Violation(
                     f"Choose the squad type at random (R#/{len(free)}): {', '.join(free)}; then --type=<counter name> [FM1 p.48]"
                 )
             prot.append(f"Squad type at random: {w} [FM1 p.48]")
             free = [w]
-        elif u.get("einheit_wahl") and len(free) == 1 and len(u["einheit_wahl"]) > 1:
+        elif u.get("unit_choice") and len(free) == 1 and len(u["unit_choice"]) > 1:
             prot.append(f"Squad type: only {free[0]} is free, this one is taken [RULE 8.3 p.62]")
         needed[free[0]] = needed.get(free[0], 0) + 1
         types_.append(free[0])
     return types_
 
 
-def v3_place_unit(s, u, type_name, place, kid, package, pk, pc_old, prot):
-    """v3 packages: one enemy unit on its card, with cover marker and fire at the trigger card [8.3, 8.4.3]."""
+def place_series_unit(s, u, type_name, place, card_id, package, pk, pc_old, prot):
+    """series rules packages: one enemy unit on its card, with cover marker and fire at the trigger card [8.3, 8.4.3]."""
     values_ = dict(u)
-    values_.update(u.get("varianten", {}).get(type_name, {}))
-    fname = commands.new_name(s, type_name, reuse_removed=True)  # L215
+    values_.update(u.get("variants", {}).get(type_name, {}))
+    fname = commands.new_name(s, type_name, reuse_removed=True)
     cid = None
     if values_.get("cover"):
-        cid = commands.new_cover_marker(s, place, values_["cover"], values_.get("cover_wert", 1))
+        cid = commands.new_cover_marker(s, place, values_["cover"], values_.get("cover_value", 1))
         cv = next(x for x in state.card(s, place)["cover"] if x["id"] == cid)
-        if values_.get("cover_kapazitaet"):
-            cv["kapazitaet"] = values_["cover_kapazitaet"]
-        if values_["cover"] in rules.STRUCTURES and place != kid:
-            cv["richtung"] = list(geometry.direction(s, place, kid))
-        prot.append(f"{values_['cover']} marker {cid} (+{values_.get('cover_wert', 1)}) on {place}")
+        if values_.get("cover_capacity"):
+            cv["capacity"] = values_["cover_capacity"]
+        if values_["cover"] in rules.STRUCTURES and place != card_id:
+            cv["direction"] = list(geometry.direction(s, place, card_id))
+        prot.append(f"{values_['cover']} marker {cid} (+{values_.get('cover_value', 1)}) on {place}")
     e = {
-        "typ": values_.get("typ", "Weapons Team"),
-        "typname": type_name,
-        "seite": "Feind",
-        "erfahrung": values_.get("erfahrung", "Line"),
-        "karte": place,
-        "bereich": cid or "offen",
+        "type": values_.get("type", "Weapons Team"),
+        "type_name": type_name,
+        "side": "Enemy",
+        "experience": values_.get("experience", "Line"),
+        "card": place,
+        "area": cid or "open",
         "status": [],
         "steps": values_.get("steps", 1),
         "vof_rating": values_["vof_rating"],
-        "reichweite": values_.get("reichweite", "L"),
+        "range": values_.get("range", "L"),
         "spotted": bool(pk.get("spotted", values_.get("spotted"))),
-        "paket": package,
-        "pc_herkunft": pc_old,
-        "fire_team_seite": values_.get("fire_team_seite", values_.get("steps", 1) == 1),
+        "package": package,
+        "pc_origin": pc_old,
+        "fire_team_side": values_.get("fire_team_side", values_.get("steps", 1) == 1),
         "ft_vof": values_.get("ft_vof", "S"),
-        "letzter_step": values_.get("letzter_step"),
-        "ziel": None,
-        "kein_point_blank": values_.get("cover") in rules.STRUCTURES,
+        "last_step": values_.get("last_step"),
+        "target": None,
+        "no_point_blank": values_.get("cover") in rules.STRUCTURES,
     }
-    if values_.get("breakdown_hinweis"):
-        e["breakdown_hinweis"] = values_["breakdown_hinweis"]
-    s["einheiten"][fname] = e
+    if values_.get("breakdown_note"):
+        e["breakdown_note"] = values_["breakdown_note"]
+    s["units"][fname] = e
     if values_.get("cover") in rules.STRUCTURES:
-        e["bunker_richtung"] = kid
+        e["bunker_direction"] = card_id
         prot.append(
-            f"Point the bunker arrow at {kid}; fires only in this direction, never Point Blank; redraw Shift Fire results [5.3.2]"
+            f"Point the bunker arrow at {card_id}; fires only in this direction, never Point Blank; redraw Shift Fire results [5.3.2]"
         )
     prot.append(
         f"Enemy {fname} ({type_name}, VOF {values_['vof_rating']}, {values_.get('steps', 1)} steps) on {place}"
         + (f" under {cid}" if cid else " without cover")
         + (", Spotted" if e["spotted"] else ", place an Unspotted marker")
     )
-    e["ziel"] = kid
+    e["target"] = card_id
     prot.append(
-        f"{fname} opens fire on {kid}"
-        + ("" if place == kid else f", PDF from {place} to {kid}" + fire.pdf_note(s, place, kid, fname))
+        f"{fname} opens fire on {card_id}"
+        + ("" if place == card_id else f", PDF from {place} to {card_id}" + fire.pdf_note(s, place, card_id, fname))
         + " [8.4.3]"
     )
     return fname
 
 
 def contact_tail(s, new_units, prot, pdf_needs_vof=True):
-    """After the units of a package are placed (L276, structure 9: one function for the former v3 and v4 copies):
+    """After the units of a package are placed:
     PC markers their PDFs fire over are removed [RULE 8.4.4], friendly units on a placement card with a Spotted enemy shift
     to Point Blank [RULE 6.1.2] and return fire opens [RULE 6.1.1]; Unspotted enemies draw no fire [RULE 8.5].
-    pdf_needs_vof=False keeps the v3 reading: every placed PDF counts, also one without a VOF (G! unit, Deep Bunker)."""
+    pdf_needs_vof=False keeps the series rules reading: every placed PDF counts, also one without a VOF (G! unit, Deep Bunker)."""
     for fname in new_units:
-        e = s["einheiten"][fname]
-        has_pdf = fire.is_firing(e) if pdf_needs_vof else e.get("ziel") is not None
-        if has_pdf and e["ziel"] != e["karte"]:
-            for between in geometry.line_between(s, e["karte"], e["ziel"]) or []:
+        e = s["units"][fname]
+        has_pdf = fire.is_firing(e) if pdf_needs_vof else e.get("target") is not None
+        if has_pdf and e["target"] != e["card"]:
+            for between in geometry.line_between(s, e["card"], e["target"]) or []:
                 cb = state.card(s, between)
-                if cb.get("pc") and cb.get("elevation", 1) == state.card(s, e["karte"]).get("elevation", 1):
-                    state.clear_pc(cb, promote=False)  # L550
+                if cb.get("pc") and cb.get("elevation", 1) == state.card(s, e["card"]).get("elevation", 1):
+                    state.clear_pc(cb, promote=False)
                     prot.append(f"PC marker on {between} removed (fired over) [8.4.4]")
     for fname in new_units:
-        e = s["einheiten"][fname]
+        e = s["units"][fname]
         if not e["spotted"]:
             continue
-        for m, f in s["einheiten"].items():
+        for m, f in s["units"].items():
             if (
-                f["seite"] == "US"
-                and f["karte"] == e["karte"]
+                f["side"] == "US"
+                and f["card"] == e["card"]
                 and fire.is_firing(f)
-                and f["ziel"] != e["karte"]
+                and f["target"] != e["card"]
                 and not geometry.no_point_blank(s, f)
             ):
-                # L280 (review LOW): the old PDF ceases (the v4 copy kept the Concentrated Fire flag and the other
+                # the old PDF ceases (the campaign copy kept the Concentrated Fire flag and the other
                 # fire fields of the old target), then the unit fires Point Blank
                 fire.cease_fire(f)
-                f["ziel"] = e["karte"]
+                f["target"] = e["card"]
                 prot.append(f"{m} shifts fire to its own card (Point Blank), the old PDF lapses [6.1.2]")
-    if any(s["einheiten"][f]["spotted"] for f in new_units):
+    if any(s["units"][f]["spotted"] for f in new_units):
         fire.open_fire(s, prot)
     elif new_units:
         prot.append("Enemy Unspotted: no return fire, spot it first [8.5, 6.1.1]")
@@ -388,24 +393,26 @@ def cmd_external(s, args):
     rules.need(
         args, 2, "external <card> <Incoming|Mines|AirStrike|Smoke|Pending> <value> [<source>] | external <card> remove"
     )
-    kid = args[0]
-    c = state.card(s, kid)
+    card_id = args[0]
+    c = state.card(s, card_id)
     prot = []
-    if args[1] in ("weg", "remove", "away"):  # L550 (review E10): the words the usage and the CLI name
-        c["extern"] = []
-        prot.append(f"external VOF on {kid} removed")
+    if args[1] in ("remove", "away"):  # the words the usage and the CLI name
+        c["external"] = []
+        prot.append(f"external VOF on {card_id} removed")
     else:
-        rules.need(args, 3, "external <card> <type> <value> [<source>]")  # L269 (review H12)
+        rules.need(args, 3, "external <card> <type> <value> [<source>]")
         type_, value = args[1], rules.int_value(args[2], "VOF value")
         if type_ not in ("Incoming", "Mines", "AirStrike", "Smoke", "Pending"):
             raise rules.Violation("Type: Incoming | Mines | AirStrike | Smoke | Pending")
-        c.setdefault("extern", []).append({"typ": type_, "wert": value, "quelle": args[3] if len(args) > 3 else type_})
-        prot.append(f"{type_} {value} on {kid}")
+        c.setdefault("external", []).append(
+            {"type": type_, "value": value, "source": args[3] if len(args) > 3 else type_}
+        )
+        prot.append(f"{type_} {value} on {card_id}")
         if type_ in ("Incoming", "AirStrike", "Smoke"):
-            fire.cease_fire_on_los_loss(s, prot)  # L95: also fire THROUGH the card (5.4)
-    ak = fire.update_activity(s)
-    if ak:
-        prot.append(ak)
+            fire.cease_fire_on_los_loss(s, prot)  # also fire THROUGH the card (5.4)
+    activity_note = fire.update_activity(s)
+    if activity_note:
+        prot.append(activity_note)
     state.save_state(s, "; ".join(prot), "5.4 p.38")
     briefing.print_board(prot, s)
 
@@ -414,138 +421,142 @@ def cmd_enemy(s, args):
     rules.need(args, 1, "enemy <unit> spotted|unspotted|pinned|unpinned|remove|card=<card>|cover=<id>|steps=<n>")
     name = args[0]
     f = state.unit(s, name)
-    if f["seite"] != "Feind":
+    if f["side"] != "Enemy":
         raise rules.Violation(f"{name} is not an enemy unit")
     prot = []
     for a in args[1:]:
-        a = "weg" if a in ("remove", "away") else ("karte=" + a[5:] if a.startswith("card=") else a)  # L550 (E10)
+        a = (
+            "remove"
+            if a in ("remove", "away", *migrate.german("remove"))
+            else ("card=" + a.partition("=")[2] if a.partition("=")[0] in migrate.german("card") else a)
+        )
         if a == "spotted":
-            for m in state.units_on(s, f["karte"], "Feind"):
-                s["einheiten"][m]["spotted"] = True
-            prot.append(f"Enemies on {f['karte']} Spotted (per card) [8.5]")
+            for m in state.units_on(s, f["card"], "Enemy"):
+                s["units"][m]["spotted"] = True
+            prot.append(f"Enemies on {f['card']} Spotted (per card) [8.5]")
             fire.open_fire(s, prot)
         elif a == "unspotted":
-            if f.get("typname") != "Sniper" and not f.get("out_of_ammo"):
+            if f.get("type_name") != "Sniper" and not f.get("out_of_ammo"):
                 prot.append("WARNING: only snipers and Out-of-Ammo Fire Teams become Unspotted again [8.8, 8.11.1]")
-            for m in state.units_on(s, f["karte"], "Feind"):
-                s["einheiten"][m]["spotted"] = False
-            prot.append(f"Enemies on {f['karte']} Unspotted")
+            for m in state.units_on(s, f["card"], "Enemy"):
+                s["units"][m]["spotted"] = False
+            prot.append(f"Enemies on {f['card']} Unspotted")
         elif a == "pinned":
             commands.mark(f, rules.PINNED)
             prot.append(f"{name} Pinned (its VOF becomes 'All Pinned' +2)")
         elif a == "unpinned":
             f["status"] = [x for x in f["status"] if x != rules.PINNED]
             prot.append(f"{name} Pinned removed")
-        elif a == "weg":
+        elif a == "remove":
             enemy.remove_enemy(s, name, prot, reason="correction/removal")
             break
-        elif a.startswith("karte="):
-            state.card(s, a[6:])
-            # L264: the one enemy move path (ammo surplus, Deep Bunker left, fire after move, mine check); the
+        elif a.startswith("card="):
+            state.card(s, a[5:])
+            # the one enemy move path (ammo surplus, Deep Bunker left, fire after move, mine check); the
             # correction command leaves the unit in the open, cover= sets the marker explicitly
-            enemy.move_enemy(s, name, a[6:], prot, cover=False)
+            enemy.move_enemy(s, name, a[5:], prot, cover=False)
         elif a.startswith("cover="):
             grenades.grenade_expires(s, f, name, prot)
             commands.set_area(s, f, a[6:])
             prot.append(f"{name} under {a[6:]}")
         elif a.startswith("steps="):
-            f["steps"] = rules.int_value(a[6:], "steps")  # L269
+            f["steps"] = rules.int_value(a[6:], "steps")
             prot.append(f"{name} {f['steps']} steps")
         else:
             raise rules.Violation(f"Unknown entry {a}")
-    ak = fire.update_activity(s)
-    if ak:
-        prot.append(ak)
+    activity_note = fire.update_activity(s)
+    if activity_note:
+        prot.append(activity_note)
     state.save_state(s, "; ".join(prot), None)
     briefing.print_board(prot, s)
 
 
-def mines_on(s, kid):
-    return [x for x in state.card(s, kid).get("extern", []) if x["typ"] == "Mines"]
+def mines_on(s, card_id):
+    return [x for x in state.card(s, card_id).get("external", []) if x["type"] == "Mines"]
 
 
 def engineers_clear(s, e):
-    """L82 [Normandy CSR 10 p.16]: Good Order Engineers with 2 or 3 steps clear paths (1 card after a successful infiltration)."""
+    """[Normandy CSR 10 p.16]: Good Order Engineers with 2 or 3 steps clear paths (1 card after a successful infiltration)."""
     return bool(e.get("engineer")) and state.good_order(e) and state.steps(e) >= 2
 
 
-def request_mine_check(s, names, kid, prot, reason, cards=3, path_=False):
-    if not mines_on(s, kid):
+def request_mine_check(s, names, card_id, prot, reason, cards=3, path_=False):
+    if not mines_on(s, card_id):
         return
-    names = [n for n in names if n in s["einheiten"] and s["einheiten"][n]["typ"] not in ("Casualty",)]
+    names = [n for n in names if n in s["units"] and s["units"][n]["type"] not in ("Casualty",)]
     if not names:
         return
-    s.setdefault("minen_checks", [])
-    info = s.setdefault("minen_check_info", {})
+    s.setdefault("mine_checks", [])
+    info = s.setdefault("mine_check_info", {})
     for n in names:
-        if n not in s["minen_checks"]:
-            s["minen_checks"].append(n)
-        info[n] = {"karten": cards, "pfad": path_}
+        if n not in s["mine_checks"]:
+            s["mine_checks"].append(n)
+        info[n] = {"cards": cards, "path": path_}
     if path_:
         prot.append(
-            f"mine check on {kid} ({reason}) for {', '.join(names)}: {cards} action card(s), hit on a Burst icon; without a hit the path is marked and the Mines marker comes off; then fof.py mine <unit> yes|no [CSR 10 p.16, 7.9.1 p.54]"
+            f"mine check on {card_id} ({reason}) for {', '.join(names)}: {cards} action card(s), hit on a Burst icon; without a hit the path is marked and the Mines marker comes off; then fof.py mine <unit> yes|no [CSR 10 p.16, 7.9.1 p.54]"
         )
     else:
         prot.append(
-            f"mine check on {kid} ({reason}) for {', '.join(names)}: {cards} action card(s) per unit, hit on a Burst icon (also multi-burst and Short); then fof.py mine <unit> yes|no [7.9.1 p.54]"
+            f"mine check on {card_id} ({reason}) for {', '.join(names)}: {cards} action card(s) per unit, hit on a Burst icon (also multi-burst and Short); then fof.py mine <unit> yes|no [7.9.1 p.54]"
         )
 
 
 def cmd_mine(s, args):
-    rules.need(args, 2, "mine <unit> yes|no")  # L269 (review H12)
+    rules.need(args, 2, "mine <unit> yes|no")
     n, result = args[0], args[1]
-    if n not in s.get("minen_checks", []):
+    if n not in s.get("mine_checks", []):
         raise rules.Violation(f"No mine check pending for {n}")
     e = state.unit(s, n)
-    s["minen_checks"].remove(n)
-    info = s.get("minen_check_info", {}).pop(n, {})
+    s["mine_checks"].remove(n)
+    info = s.get("mine_check_info", {}).pop(n, {})
     prot = []
-    if result == "ja":
+    if result == "yes":
         e["mine_hit"] = True
-        for x in mines_on(s, e["karte"]):
-            x["aktiv"] = True
+        for x in mines_on(s, e["card"]):
+            x["active"] = True
         prot.append(
             f"{n} hit by a mine: flip the Mines marker to its explosion side, {n} under it; Mines! VOF -4 in 3.7.4; may not move within the card or to an adjacent card this turn [7.9.1 p.54]"
-            + ("; path marking failed, the mines stay [CSR 10 p.16]" if info.get("pfad") else "")
+            + ("; path marking failed, the mines stay [CSR 10 p.16]" if info.get("path") else "")
         )
-    elif result == "nein":
-        if info.get("pfad"):
-            k = state.card(s, e["karte"])
-            k["extern"] = [x for x in k.get("extern", []) if x["typ"] != "Mines"]
-            prot.append(f"{n}: no mine hit, path marked: remove the Mines marker from {e['karte']} [CSR 10 p.16]")
+    elif result == "no":
+        if info.get("path"):
+            k = state.card(s, e["card"])
+            k["external"] = [x for x in k.get("external", []) if x["type"] != "Mines"]
+            prot.append(f"{n}: no mine hit, path marked: remove the Mines marker from {e['card']} [CSR 10 p.16]")
         else:
             prot.append(f"{n}: no mine hit")
     else:
         raise rules.Violation("yes | no")
     if s["phase"] == "3.6" and s.get("at36"):
-        from . import vehicles  # L187: the vehicle action continues after the mine check
+        from . import vehicles  # the vehicle action continues after the mine check
 
-        vehicles.resume(s, prot)  # L322: purge, advance and name the next step (review LOW)
-    ak = fire.update_activity(s)
-    if ak:
-        prot.append(ak)
+        vehicles.resume(s, prot)  # purge, advance and name the next step
+    activity_note = fire.update_activity(s)
+    if activity_note:
+        prot.append(activity_note)
     state.save_state(s, "; ".join(prot), "7.9.1 p.54")
     briefing.print_board(prot, s)
 
 
 def mine_lock(s):
     reveal_lock(s)
-    if s.get("hitze_offen"):
+    if s.get("heat_open"):
         raise rules.Violation(
             "First the Heat Casualties draws: "
-            + ", ".join(s["hitze_offen"])
+            + ", ".join(s["heat_open"])
             + " (fof.py heat <unit> <R#/4 value>, only 1 is a loss) [Naktong M1 p.17]"
         )
-    if s.get("minen_checks"):
+    if s.get("mine_checks"):
         raise rules.Violation(
             "First resolve the pending mine checks: "
-            + ", ".join(s["minen_checks"])
+            + ", ".join(s["mine_checks"])
             + " (fof.py mine <unit> yes|no) [7.9.1 p.54, 8.7.1 p.67]"
         )
 
 
 def reveal_lock(s):
-    """L481 [RULE 5.2 p.34]: the next step waits until the face-down cards in LOS are flipped (terrain entered)."""
+    """[RULE 5.2 p.34]: the next step waits until the face-down cards in LOS are flipped (terrain entered)."""
     open_ = geometry.reveal_candidates(s)
     if open_:
         dep = geometry.reveal_dependencies(s, open_)
@@ -558,11 +569,11 @@ def reveal_lock(s):
         )
 
 
-def cmd_pc_v4(s, args):
-    if args[0] == "aufdecken":
-        rules.need(args, 3, "pc reveal <card> <A|B|C>")  # L269 (review H12)
-        kid, b = args[1], args[2]
-        c = state.card(s, kid)
+def cmd_pc_campaign(s, args):
+    if args[0] == "reveal":
+        rules.need(args, 3, "pc reveal <card> <A|B|C>")
+        card_id, b = args[1], args[2]
+        c = state.card(s, card_id)
         if b not in ("A", "B", "C"):
             raise rules.Violation("Letter A|B|C")
         prot = []
@@ -571,28 +582,28 @@ def cmd_pc_v4(s, args):
         elif c.get("pc2") == "?":
             c["pc2"] = b
         else:
-            raise rules.Violation(f"{kid} has no face-down PC marker")
-        prot.append(f"PC marker on {kid} revealed: {b}")
+            raise rules.Violation(f"{card_id} has no face-down PC marker")
+        prot.append(f"PC marker on {card_id} revealed: {b}")
         if c.get("pc2") and c["pc"] != "?" and c["pc2"] != "?":
             high, deep = min(c["pc"], c["pc2"]), max(c["pc"], c["pc2"])
             c["pc"] = high
             c.pop("pc2")
-            prot.append(f"two PC markers on {kid}: the lower one ({deep}) is removed, {high} stays [8.2.3 p.62]")
+            prot.append(f"two PC markers on {card_id}: the lower one ({deep}) is removed, {high} stays [8.2.3 p.62]")
         state.save_state(s, "; ".join(prot), "8.2.3 p.62")
         briefing.print_board(prot, s)
         return True
-    if args[0] == "setzen":
-        rules.need(args, 3, "pc set <card> <A|B|C|?>")  # L269 (review H12)
-        kid, b = args[1], args[2]
-        c = state.card(s, kid)
+    if args[0] == "set":
+        rules.need(args, 3, "pc set <card> <A|B|C|?>")
+        card_id, b = args[1], args[2]
+        c = state.card(s, card_id)
         if b not in ("A", "B", "C", "?"):
             raise rules.Violation("A|B|C|?")
-        prot = [f"PC marker {b} on {kid} (correction/event)"]
+        prot = [f"PC marker {b} on {card_id} (correction/event)"]
         if c.get("pc") and c["pc"] != "?" and b != "?":
-            # L550 (review E12): two face-up markers on one card at once: 8.2.3 applies now, the lower one goes
+            # two face-up markers on one card at once: 8.2.3 applies now, the lower one goes
             high, deep = min(c["pc"], b), max(c["pc"], b)
             c["pc"] = high
-            prot.append(f"two PC markers on {kid}: the lower one ({deep}) is removed, {high} stays [8.2.3 p.62]")
+            prot.append(f"two PC markers on {card_id}: the lower one ({deep}) is removed, {high} stays [8.2.3 p.62]")
         elif c.get("pc"):
             c["pc2"] = b
         else:
@@ -603,62 +614,64 @@ def cmd_pc_v4(s, args):
     return False
 
 
-DIRECTION = {"Front": (1, 0), "Left Front": (1, -1), "Right Front": (1, 1), "Links": (1, -1), "Rechts": (1, 1)}
+DIRECTION = {"Front": (1, 0), "Left Front": (1, -1), "Right Front": (1, 1), "Left": (1, -1), "Right": (1, 1)}
 
 
-def check_place_v4(s, u, k, kid, pk):
-    """Placement restrictions 8.4.3 for a package unit on card k (trigger kid)."""
-    if state.units_on(s, k, "Feind") and not u.get("_gleiche_karte_ok"):
+def check_placement(s, u, k, card_id, pk):
+    """Placement restrictions 8.4.3 for a package unit on card k (trigger card_id)."""
+    if state.units_on(s, k, "Enemy") and not u.get("_same_card_ok"):
         return f"{k}: enemies already there (8.4.3 'Other Enemy Units')"
     without_pb = (u.get("cover") in rules.STRUCTURES) or state.is_mortar(u)
-    no_pdf = u.get("platz") == "max_los" or not pk.get("place_vof", True) or not u.get("vof_rating")
-    if k != kid and state.units_on(s, k, "US") and not without_pb and not no_pdf:
-        return f"{k}: friendly units there (8.4.3)"  # L151: only units that place a PDF (8.4.3 example 2: Spotter with US units)
-    if k != kid and not no_pdf and not state.is_mortar(u):
-        between = geometry.line_between(s, k, kid) or []
+    no_pdf = u.get("place") == "max_los" or not pk.get("place_vof", True) or not u.get("vof_rating")
+    if k != card_id and state.units_on(s, k, "US") and not without_pb and not no_pdf:
+        return (
+            f"{k}: friendly units there (8.4.3)"  # only units that place a PDF (8.4.3 example 2: Spotter with US units)
+        )
+    if k != card_id and not no_pdf and not state.is_mortar(u):
+        between = geometry.line_between(s, k, card_id) or []
         overhead = (u.get("vof_rating") == "H" or u.get("tripod")) and all(
-            fire.overhead_possible(s, k, b, kid) for b in between if state.units_on(s, b)
+            fire.overhead_possible(s, k, b, card_id) for b in between if state.units_on(s, b)
         )
         grazing = u.get("tripod") and all(
-            state.card(s, b).get("elevation", 1) == state.card(s, k).get("elevation", 1) for b in between + [kid]
+            state.card(s, b).get("elevation", 1) == state.card(s, k).get("elevation", 1) for b in between + [card_id]
         )
         if any(state.units_on(s, b, "US") for b in between) and not (overhead or grazing):
-            return f"{k}: friendly units between {k} and {kid} (8.4.3, no Grazing/Overhead Fire)"
-        if any(state.units_on(s, b, "Feind") for b in between) and not overhead:
-            return f"{k}: own enemy units between {k} and {kid} (8.4.3 example 1: only with Overhead Fire)"  # L151
+            return f"{k}: friendly units between {k} and {card_id} (8.4.3, no Grazing/Overhead Fire)"
+        if any(state.units_on(s, b, "Enemy") for b in between) and not overhead:
+            return f"{k}: own enemy units between {k} and {card_id} (8.4.3 example 1: only with Overhead Fire)"
     if enemy_pdf_or_vof(s, k):
         return f"{k}: {enemy_pdf_or_vof(s, k)} (8.4.3)"
     return None
 
 
-def range_of(u, pk):
-    if u.get("platz") == "max_los":
+def range_of(u):
+    if u.get("place") == "max_los":
         return 3  # [RULE 8.4.3 p.63] Spotter/Patrol: Max LOS up to Very Long
-    r = u.get("reichweite") or "V"
+    r = u.get("range") or "V"
     return rules.RANGE_CARDS.get(r.split("-")[-1], 3)
 
 
 def building_table_ref(s, place):
-    """L494: R# column and source of the campaign's building table (Normandy CSR 8 p.15 column 8, Naktong CSR 6 p.14
+    """R# column and source of the campaign's building table (Normandy CSR 8 p.15 column 8, Naktong CSR 6 p.14
     column 5), taken from the table itself instead of a fixed Normandy text."""
-    tab = s.get("gebaeude_tabelle", {}).get(state.card(s, place).get("gebaeude_tabelle"), {})
+    tab = s.get("building_table", {}).get(state.card(s, place).get("building_table"), {})
     col = max((int(str(b).split("-")[-1]) for b in tab if str(b).split("-")[-1].isdigit()), default=8)
-    ref = (s.get("gebaeude_tabelle", {}).get("_quelle") or "CSR 8 S.15").split(",")[0].replace(" S.", " p.")
+    ref = (s.get("building_table", {}).get("_source") or "CSR 8 S.15").split(",")[0].replace(" S.", " p.")
     return col, ref
 
 
-def building_cover(s, place, u, r8, value_opt):
+def building_cover(s, place, r8, value_opt):
     """[CSR 8 p.15 Normandy, CSR 6 p.14 Naktong] Package in cover on Village/Farm/Cemetery/Church: R# on the building table; if the
     building value is equal to or better than the package cover, the unit goes inside; a worse result stays behind as a marker (BGG E21)."""
-    tab = s.get("gebaeude_tabelle", {}).get(state.card(s, place).get("gebaeude_tabelle"), {})
+    tab = s.get("building_table", {}).get(state.card(s, place).get("building_table"), {})
     col, ref = building_table_ref(s, place)
-    r8 = rules.int_value(r8, f"--building (R# column {col})")  # L269 (review H12)
+    r8 = rules.int_value(r8, f"--building (R# column {col})")
     type_ = next((t for b, t in tab.items() if events.r_matches(b, r8)), None)
     if type_ is None:
         raise rules.Violation(f"R# {r8} not in the building table (column {col}) [{ref}]")
     upper_ = type_.endswith("*")
     type_ = type_.rstrip("*")
-    w = s.get("cover_werte", {}).get(type_)
+    w = s.get("cover_values", {}).get(type_)
     if w is None:
         if value_opt is None:
             raise rules.Violation(
@@ -671,58 +684,70 @@ def building_cover(s, place, u, r8, value_opt):
 MORTAR_NO_FIRE_COVER = ("Light Building", "Strong Building", "Building", "Upper Story", "Church Tower")  # 7.3.1
 
 
-def package_cover(s, u, idx, place, kid, pk, o, building_list, cid_before, prot):
+def _building_table_cover(s, u, place, pk, o, building_list, cover_type, cover_value, prot):
+    """Package in cover on a card with a building table: the building replaces the package cover if it is at least
+    as good and the unit can fire from it; otherwise its marker stays on the card [CSR 8 p.15]. Returns the cover."""
+    t = u["type_name"]
+    if not building_list:
+        col, ref = building_table_ref(s, place)
+        raise rules.Violation(
+            f"{t} in cover on {state.card(s, place)['terrain']}: R# column {col} on the building table, --building=<R#>[,..] [{ref}]"
+        )
+    building_type, building_value, upper_ = building_cover(s, place, building_list.pop(0), o.get("--building-value"))
+    no_fire = u.get("mortar") and pk.get("place_vof", True) and building_type in MORTAR_NO_FIRE_COVER
+    if building_value >= cover_value and no_fire:
+        # E87/ [8.4.3 p.63, 7.3.1 p.52, BGG 3782765]: the package must be able to Open Fire on the trigger;
+        # a mortar may not fire from building cover, so it keeps the cover of the package list
+        prot.append(
+            f"Building table gives {building_type} (+{building_value}), but a mortar may not fire from it (7.3.1): stays in {u['cover']} (8.4.3, E87)"
+        )
+        gid = commands.new_cover_marker(s, place, building_type, building_value)
+        prot.append(f"{building_type} marker {gid} (+{building_value}) stays empty on {place} [CSR 8 p.15]")
+    elif building_value >= cover_value:
+        cover_type, cover_value = building_type, building_value
+        prot.append(
+            f"Building cover {building_type} (+{building_value}) instead of {u['cover']} [CSR 8 p.15]"
+            + (
+                " (Upper Story/Church Tower for Sniper/Spotter)"
+                if upper_ and u["type"] in ("Sniper", "Spotter")
+                else ""
+            )
+        )
+    else:
+        gid = commands.new_cover_marker(s, place, building_type, building_value)
+        prot.append(
+            f"Building {building_type} (+{building_value}) worse than {u['cover']}: marker {gid} stays on {place} (BGG E21)"
+        )
+    return cover_type, cover_value
+
+
+def package_cover(s, u, idx, place, card_id, pk, o, building_list, cid_before, prot):
     """Cover marker of one package unit: with the previous/random squad, the package cover (building table, an existing
-    free marker of the same kind), or none [8.4.3, CSR 8, E58]. L557: split from contact_place_units (review E4)."""
-    t = u["typname"]
+    free marker of the same kind), or none [8.4.3, CSR 8, E58]."""
+    t = u["type_name"]
     cid = None
-    if u["platz"] == "mit_vorigem" and cid_before.get(idx - 1) and not u.get("eigene_deckung"):
+    if u["place"] == "with_previous" and cid_before.get(idx - 1) and not u.get("own_cover"):
         cid = cid_before[idx - 1]
-    elif u["platz"] == "mit_zufaelligem" and cid_before.get(u.get("_ref")) and not u.get("eigene_deckung"):
-        cid = cid_before[u["_ref"]]  # L522
-    elif u.get("cover") and not u.get("ohne_deckung") and not u.get("infiltration"):
+    elif u["place"] == "with_random" and cid_before.get(u.get("_ref")) and not u.get("own_cover"):
+        cid = cid_before[u["_ref"]]
+    elif u.get("cover") and not u.get("no_cover") and not u.get("infiltration"):
         cover_type = u["cover"]
-        cover_value = u.get("cover_wert")
-        if cover_value is None:  # L135: take the value from the setup table instead of a silent +1 (audit C3)
-            cover_value = s.get("cover_werte", {}).get(cover_type)
+        cover_value = u.get("cover_value")
+        if cover_value is None:  # take the value from the setup table instead of a silent +1 (audit C3)
+            cover_value = s.get("cover_values", {}).get(cover_type)
         if cover_value is None:
             raise rules.Violation(
-                f"Package unit {u.get('einheit') or u.get('einheit_wahl')}: no value for cover marker {cover_type} (cover_wert in the package or cover_werte table)"
+                f"Package unit {u.get('unit') or u.get('unit_choice')}: no value for cover marker {cover_type} (cover_value in the package or cover_values table)"
             )
-        if state.card(s, place).get("gebaeude_tabelle") and cover_type not in rules.STRUCTURES:
-            if not building_list:
-                col, ref = building_table_ref(s, place)
-                raise rules.Violation(
-                    f"{t} in cover on {state.card(s, place)['terrain']}: R# column {col} on the building table, --building=<R#>[,..] [{ref}]"
-                )
-            gt, gw, upper_ = building_cover(s, place, u, building_list.pop(0), o.get("--gebaeude_wert"))
-            no_fire = u.get("moerser") and pk.get("place_vof", True) and gt in MORTAR_NO_FIRE_COVER
-            if gw >= cover_value and no_fire:
-                # E87/L204 [8.4.3 p.63, 7.3.1 p.52, BGG 3782765]: the package must be able to Open Fire on the trigger;
-                # a mortar may not fire from building cover, so it keeps the cover of the package list
-                prot.append(
-                    f"Building table gives {gt} (+{gw}), but a mortar may not fire from it (7.3.1): stays in {u['cover']} (8.4.3, E87)"
-                )
-                gid = commands.new_cover_marker(s, place, gt, gw)
-                prot.append(f"{gt} marker {gid} (+{gw}) stays empty on {place} [CSR 8 p.15]")
-            elif gw >= cover_value:
-                cover_type, cover_value = gt, gw
-                prot.append(
-                    f"Building cover {gt} (+{gw}) instead of {u['cover']} [CSR 8 p.15]"
-                    + (
-                        " (Upper Story/Church Tower for Sniper/Spotter)"
-                        if upper_ and u["typ"] in ("Sniper", "Spotter")
-                        else ""
-                    )
-                )
-            else:
-                gid = commands.new_cover_marker(s, place, gt, gw)
-                prot.append(f"Building {gt} (+{gw}) worse than {u['cover']}: marker {gid} stays on {place} (BGG E21)")
-        # L90 (E58): the same building/cover marker already lies free on the card: move in instead of a duplicate marker (5.3.3 Cover Potential)
+        if state.card(s, place).get("building_table") and cover_type not in rules.STRUCTURES:
+            cover_type, cover_value = _building_table_cover(
+                s, u, place, pk, o, building_list, cover_type, cover_value, prot
+            )
+        # (E58): the same building/cover marker already lies free on the card: move in instead of a duplicate marker (5.3.3 Cover Potential)
         free = [
             x
-            for x in state.free_cover(s, place, side="Feind")
-            if x["typ"] == cover_type and x["wert"] == cover_value and cover_type not in rules.STRUCTURES
+            for x in state.free_cover(s, place, side="Enemy")
+            if x["type"] == cover_type and x["value"] == cover_value and cover_type not in rules.STRUCTURES
         ]
         if free:
             cid = free[0]["id"]
@@ -732,92 +757,94 @@ def package_cover(s, u, idx, place, kid, pk, o, building_list, cid_before, prot)
         else:
             cid = commands.new_cover_marker(s, place, cover_type, cover_value)
         cv = next(x for x in state.card(s, place)["cover"] if x["id"] == cid)
-        if u.get("cover_kapazitaet"):
-            cv["kapazitaet"] = u["cover_kapazitaet"]
-        if cover_type in rules.STRUCTURES and place != kid:
-            cv["richtung"] = list(geometry.direction(s, place, kid))
+        if u.get("cover_capacity"):
+            cv["capacity"] = u["cover_capacity"]
+        if cover_type in rules.STRUCTURES and place != card_id:
+            cv["direction"] = list(geometry.direction(s, place, card_id))
         if not free:
             prot.append(f"{cover_type} marker {cid} (+{cover_value}) on {place}")
     return cid
 
 
-def package_unit(s, u, c, place, kid, package, pk, cid, var, o, prot):
+def package_unit(s, u, c, place, card_id, package, pk, cid, var, o, prot):
     """The unit record of one package unit: values of the package, attempt experience and ammo, spotter, infiltration
-    attempt, Exposed [8.3, 8.4.3, L477, L497]. L557: split from contact_place_units."""
-    t = u["typname"]
+    attempt, Exposed [8.3, 8.4.3]."""
+    t = u["type_name"]
     spotted = bool(u.get("spotted", pk.get("spotted")))
     e = {
-        "typ": u.get("typ", "Weapons Team"),
-        "typname": t,
-        "seite": "Feind",
-        # L477: the attempt plan may set the enemy experience (Naktong M1 p.15: Veteran, Veteran, Line, Green)
-        "erfahrung": s.get("feind_erfahrung_versuch") or u.get("erfahrung", "Line"),
-        "karte": place,
-        "bereich": cid or "offen",
+        "type": u.get("type", "Weapons Team"),
+        "type_name": t,
+        "side": "Enemy",
+        # the attempt plan may set the enemy experience (Naktong M1 p.15: Veteran, Veteran, Line, Green)
+        "experience": s.get("enemy_experience_attempt") or u.get("experience", "Line"),
+        "card": place,
+        "area": cid or "open",
         "status": [],
         "steps": u.get("steps", 1),
         "vof_rating": u.get("vof_rating"),
-        "reichweite": u.get("reichweite") or "L",
+        "range": u.get("range") or "L",
         "spotted": spotted,
-        "paket": package,
-        "pc_herkunft": c.get("pc"),
-        "fire_team_seite": u.get("fire_team_seite", u.get("steps", 1) == 1),
+        "package": package,
+        "pc_origin": c.get("pc"),
+        "fire_team_side": u.get("fire_team_side", u.get("steps", 1) == 1),
         "ft_vof": u.get("ft_vof") or "S",
-        "letzter_step": u.get("letzter_step"),
-        "ziel": None,
-        "kein_point_blank": u.get("cover") in rules.STRUCTURES,
+        "last_step": u.get("last_step"),
+        "target": None,
+        "no_point_blank": u.get("cover") in rules.STRUCTURES,
     }
     if pk.get("human_wave"):
-        e["human_wave"] = True  # L487 [RULE 8.14 p.68]
+        e["human_wave"] = True  # [RULE 8.14 p.68]
     for f in (
-        "munition",
-        "letzter_step_werte",
-        "ft_reichweite",
-        "moerser",
+        "ammo",
+        "last_step_values",
+        "ft_range",
+        "mortar",
         "grenade_ranged",
         "tripod",
         "leader",
-        "unbeweglich",
-        "breakdown_hinweis",
+        "immobile",
+        "breakdown_note",
         "spotter",
         "fj_breakdown",
         "breakdown",
         "rifle_grenades",
-        "at_waffe",  # L187: AT weapon (Vehicle and AT Weapons Chart) and Panzerfaust shots (Normandy M6 p.40)
+        "at_weapon",  # AT weapon (Vehicle and AT Weapons Chart) and Panzerfaust shots (Normandy M6 p.40)
         "panzerfaust",
-        "fahrzeug",  # L488: enemy tank (Naktong M1 package 10)
+        "vehicle",  # enemy tank (Naktong M1 package 10)
         "ambush",
     ):
         if u.get(f) is not None:
             e[f] = copy.deepcopy(u[f])
     from . import campaign  # local: campaign imports setup, which needs contact at import time
 
-    _pm = (s.get("paket_munition") or {}).get(campaign.package_ammo_key(e))
-    if _pm is not None and e.get("munition"):  # L477: package ammo per attempt (Naktong M1 p.18)
-        e["munition"]["punkte"] = e["munition"]["start"] = _pm
-    if e.get("spotter") or u.get("typ") == "Spotter":
+    _pm = (s.get("package_ammo") or {}).get(campaign.package_ammo_key(e))
+    if _pm is not None and e.get("ammo"):  # package ammo per attempt (Naktong M1 p.18)
+        e["ammo"]["points"] = e["ammo"]["start"] = _pm
+    if e.get("spotter") or u.get("type") == "Spotter":
         e["spotter"] = True
-        e["missionen"] = (var or {}).get("missionen", 2) - 1  # [BGG E19] the automatic first mission counts
-        e["karten_folge"] = (var or {}).get("karten_folge", 3)
-        e["fm_wert"] = (var or {}).get("wert", -3)
-        s.setdefault("feind_target", {})[t] = kid
+        e["missions"] = (var or {}).get("missions", 2) - 1  # [BGG E19] the automatic first mission counts
+        e["card_sequence"] = (var or {}).get("card_sequence", 3)
+        e["fm_value"] = (var or {}).get("value", -3)
+        s.setdefault("enemy_target", {})[t] = card_id
+        # [RULE 8.10 p.68 'and Target marker if applicable as per 7.16.5']: announce the marker on the board too
+        prot.append(f"Place the enemy Target marker ({t}) on {card_id} [8.10 p.68, 7.16.5]")
     if u.get("infiltration"):
-        # L497: base 2 cards adjusted for Experience (4.2: Veteran +1, Green -1); source per campaign
+        # base 2 cards adjusted for Experience (4.2: Veteran +1, Green -1); source per campaign
         # (Normandy CSR 6 p.14, Naktong CSR 3 p.13: 'drawing two cards (adjusted for Experience)')
-        ref = pk.get("infiltration_regel") or "CSR 6 p.14"
-        n_inf = 2 + {"Green": -1, "Veteran": 1}.get(e.get("erfahrung"), 0)
-        if o.get("--erfolg") not in ("ja", "nein"):
+        ref = pk.get("infiltration_rule") or "CSR 6 p.14"
+        n_inf = 2 + {"Green": -1, "Veteran": 1}.get(e.get("experience"), 0)
+        if o.get("--success") not in ("yes", "no"):
             raise rules.Violation(
-                f"Infiltrate Attempt of the package: {n_inf} Action cards (2, experience {e['erfahrung']}), success on the "
+                f"Infiltrate Attempt of the package: {n_inf} Action cards (2, experience {e['experience']}), success on the "
                 f"Infiltrate symbol; --success=yes|no [{ref}, 4.2 p.21]"
             )
-        if o["--erfolg"] == "ja":
-            free = state.free_cover(s, place, side="Feind", steps=state.steps(e))  # L534
+        if o["--success"] == "yes":
+            free = state.free_cover(s, place, side="Enemy", steps=state.steps(e))
             if free:
-                e["bereich"] = max(free, key=lambda x: x["wert"])["id"]
+                e["area"] = max(free, key=lambda x: x["value"])["id"]
             prot.append(
                 "Infiltrate Attempt successful: not Exposed"
-                + (f", under {e['bereich']}" if e["bereich"] != "offen" else ", no free cover marker on the card")
+                + (f", under {e['area']}" if e["area"] != "open" else ", no free cover marker on the card")
                 + f" [{ref}]"
             )
         else:
@@ -829,321 +856,348 @@ def package_unit(s, u, c, place, kid, package, pk, cid, var, o, prot):
     return e
 
 
-def package_structure(s, e, fname, cid, place, kid, prot):
-    """Deep Bunker (no VOF until it leaves, CSR 5) and Bunker/Pillbox fire arc of a placed unit [5.3.2]."""
-    if cid and next(x for x in state.card(s, place)["cover"] if x["id"] == cid)["typ"] == "Deep Bunker":
+def package_structure(s, e, fname, cid, place, card_id, prot):
+    """Deep Bunker (no VOF until it leaves) and Bunker/Pillbox fire arc of a placed unit [5.3.2]."""
+    if cid and next(x for x in state.card(s, place)["cover"] if x["id"] == cid)["type"] == "Deep Bunker":
         e["deep_bunker"] = cid
         prot.append(
-            f"{fname} in Deep Bunker {cid}: no VOF, no spotting, no Pyro, no grenades; leaves it on Fall Back or Grenade Attack in 3.4.2 (then --area=open) [CSR 5 p.14]"
+            f"{fname} in Deep Bunker {cid}: no VOF, no spotting, no Pyro, no grenades; leaves it on Fall Back or Grenade Attack in 3.4.2 (then --area=open) [{rules.DEEP_BUNKER_REF}]"
         )
-    if cid and next(x for x in state.card(s, place)["cover"] if x["id"] == cid)["typ"] in rules.STRUCTURES:
-        e["bunker_richtung"] = kid
+    if cid and next(x for x in state.card(s, place)["cover"] if x["id"] == cid)["type"] in rules.STRUCTURES:
+        e["bunker_direction"] = card_id
         prot.append(
-            f"Arrow toward {kid}; fires only in this direction, never Point Blank; redraw Shift results [5.3.2]"
+            f"Arrow toward {card_id}; fires only in this direction, never Point Blank; redraw Shift results [5.3.2]"
         )
 
 
-def package_open_fire(s, e, fname, place, kid, pk, o, c, trigger, prot):
+def package_open_fire(s, e, fname, place, card_id, pk, o, c, trigger, prot):
     """Place PDF/VOF of a placed unit [8.3, 8.4.3]: Place VOF No, Deep Bunker, forbidden position, the G! opening Grenade
-    Attack, or fire at the trigger card. False if the weapon jammed (the unit left play). L557: split from
-    contact_place_units."""
+    Attack, or fire at the trigger card. False if the weapon jammed (the unit left play)."""
     # Place PDF/VOF
     if not pk.get("place_vof", True):
-        e["kein_feuer_bis_clean_up"] = True
+        e["no_fire_until_clean_up"] = True
         prot.append(f"{fname}: Place PDF/VOF No, opens fire only in Clean Up [8.3 p.63]")
-    elif e.get("deep_bunker"):  # L533 (review E6): no VOF and no target until it leaves the Deep Bunker (CSR 5)
-        prot.append(f"{fname} does not open fire from the Deep Bunker; it opens fire when it leaves [CSR 5 p.14]")
-    elif fire.fire_position_forbidden(s, e):  # L203: e.g. mortar placed in building cover (7.3.1)
+    elif e.get("deep_bunker"):  # no VOF and no target until it leaves the Deep Bunker
+        prot.append(
+            f"{fname} does not open fire from the Deep Bunker; it opens fire when it leaves [{rules.DEEP_BUNKER_REF}]"
+        )
+    elif fire.fire_position_forbidden(s, e):  # e.g. mortar placed in building cover (7.3.1)
         prot.append(f"{fname} does not open fire: {fire.fire_position_forbidden(s, e)}")
     elif e.get("vof_rating") == "G":
-        g = o.get("--granate")
-        if g not in ("ja", "nein"):
-            n_cards = max(
-                1, 2 + {"Green": -1, "Veteran": 1}.get(e.get("erfahrung"), 0)
-            )  # L519: 4.2 base 2 +/- experience
+        g = o.get("--grenade")
+        if g not in ("yes", "no"):
+            n_cards = max(1, 2 + {"Green": -1, "Veteran": 1}.get(e.get("experience"), 0))  # 4.2 base 2 +/- experience
             raise rules.Violation(
-                f"{fname} (G!) opens with a Grenade Attack on {kid}: draw {n_cards} cards (base 2, experience {e.get('erfahrung')}), Grenade symbol (watch for Jam); --grenade=yes|no [--unit=<target>] [--critical=yes] [--jam=yes] [8.4.3 p.63, 7.3.2]"
+                f"{fname} (G!) opens with a Grenade Attack on {card_id}: draw {n_cards} cards (base 2, experience {e.get('experience')}), Grenade symbol (watch for Jam); --grenade=yes|no [--unit=<target>] [--critical=yes] [--jam=yes] [8.4.3 p.63, 7.3.2]"
             )
-        e["ziel"], e["nur_pdf"] = kid, True
+        e["target"], e["pdf_only"] = card_id, True
         combat.ammo_use(s, fname, e, 1, "Grenade Attack at range", prot)
-        if o.get("--jam") == "ja" and grenades.jam_prone(e):  # L542 (review E4): Jam as in the Activity Check path
+        if o.get("--jam") == "yes" and grenades.jam_prone(e):  # Jam as in the Activity Check path
             grenades.jam(s, fname, prot)
             return False  # jammed: the weapon is out of play, its steps became Fire Teams
-        if g == "ja":
-            ze = o.get("--einheit") or (trigger[0] if len(trigger) == 1 else None)
-            if not ze:
+        if g == "yes":
+            target_unit_name = o.get("--unit") or (trigger[0] if len(trigger) == 1 else None)
+            if not target_unit_name:
                 raise rules.Violation(
                     "--unit=<target of the Grenade Attack> (stack under cover or random unit without cover)"
                 )
-            z = enemy.grenade_target_check(s, kid, ze, e)  # L265 (review M11)
-            prot.append(f"{fname}: PDF to {kid} [7.3.2 p.53]")
-            # L542 (review E4): the whole stack under the cover marker, Critical Hit and 7.10.5 notes, as enemyaction
-            enemy._apply_grenade_hit(s, types.SimpleNamespace(o=o, n=fname, e=e, prot=prot), kid, ze, z)
+            target_unit = enemy.grenade_target_check(s, card_id, target_unit_name, e)
+            prot.append(f"{fname}: PDF to {card_id} [7.3.2 p.53]")
+            # the whole stack under the cover marker, Critical Hit and 7.10.5 notes, as enemyaction
+            enemy._apply_grenade_hit(
+                s, types.SimpleNamespace(o=o, n=fname, e=e, prot=prot), target_unit_name, target_unit
+            )
         else:
             c["grenade_miss"] = True
-            prot.append(f"{fname}: PDF to {kid}, Grenade Miss (-1) on {kid} [7.10.4]")
+            prot.append(f"{fname}: PDF to {card_id}, Grenade Miss (-1) on {card_id} [7.10.4]")
     elif e.get("vof_rating"):
-        e["ziel"] = kid
+        e["target"] = card_id
         prot.append(
-            f"{fname} opens fire on {kid}"
-            + ("" if place == kid else f", PDF from {place} to {kid}" + fire.pdf_note(s, place, kid, fname))
+            f"{fname} opens fire on {card_id}"
+            + ("" if place == card_id else f", PDF from {place} to {card_id}" + fire.pdf_note(s, place, card_id, fname))
             + (" (Small Arms on the card, Sniper VOF -3 on one target in 3.7.4)" if enemy.is_sniper(e) else "")
             + " [8.4.3]"
         )
     return True
 
 
-def contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger, var):
-    """Part of pc_kontakt_v4 (extracted)."""
+def contact_place_units(s, c, units, card_id, o, package, pk, places, prot, trigger, var):
+    """Part of pc_contact_campaign (extracted)."""
     new_units, cid_before = [], {}
-    building_list = options.list_option(o, "--gebaeude")
+    building_list = options.list_option(o, "--building")
     for idx, (u, place) in enumerate(zip(units, places)):
-        t = u["typname"]
-        cid = package_cover(s, u, idx, place, kid, pk, o, building_list, cid_before, prot)
+        t = u["type_name"]
+        cid = package_cover(s, u, idx, place, card_id, pk, o, building_list, cid_before, prot)
         cid_before[idx] = cid
-        e = package_unit(s, u, c, place, kid, package, pk, cid, var, o, prot)
-        fname = commands.new_name(s, t, reuse_removed=True)  # L215
-        s["einheiten"][fname] = e
-        package_structure(s, e, fname, cid, place, kid, prot)
+        e = package_unit(s, u, c, place, card_id, package, pk, cid, var, o, prot)
+        fname = commands.new_name(s, t, reuse_removed=True)
+        s["units"][fname] = e
+        package_structure(s, e, fname, cid, place, card_id, prot)
         prot.append(
             f"Enemy {fname} ({t}, VOF {e['vof_rating']}, {e['steps']} step(s)"
-            + (f", {e['munition']['punkte']} {e['munition']['typ']}" if e.get("munition") else "")
+            + (f", {e['ammo']['points']} {e['ammo']['type']}" if e.get("ammo") else "")
             + f") on {place}"
-            + (f" under {e['bereich']}" if e["bereich"] != "offen" else " without cover")
+            + (f" under {e['area']}" if e["area"] != "open" else " without cover")
             + (", Spotted" if e["spotted"] else ", place Unspotted marker")
         )
-        if package_open_fire(s, e, fname, place, kid, pk, o, c, trigger, prot):
+        if package_open_fire(s, e, fname, place, card_id, pk, o, c, trigger, prot):
             new_units.append(fname)
     return new_units
 
 
-def contact_place_markers(s, c, kid, o, pk, prot, var):
-    """Part of pc_kontakt_v4 (extracted)."""
+def contact_place_markers(s, c, card_id, o, pk, prot, var):
+    """Part of pc_contact_campaign (extracted)."""
     for mk in pk.get("marker", []):
-        if mk["typ"] == "Illum":
+        if mk["type"] == "Illum":
             # [Normandy M3 p.27, 9.2 p.70] Mortar Illumination on the trigger card
-            iv = (s.get("illum_werte") or {}).get(mk.get("quelle", "Mortar Illum"))
+            iv = (s.get("illum_values") or {}).get(mk.get("source", "Mortar Illum"))
             if o.get("--illum"):
                 top_value, _, un = o["--illum"].partition("/")
                 iv = {
-                    "oben": rules.int_value(top_value, "--illum top value"),
-                    "unten": rules.int_value(un, "--illum bottom value") if un else None,
+                    "top": rules.int_value(top_value, "--illum top value"),
+                    "bottom": rules.int_value(un, "--illum bottom value") if un else None,
                 }
             if not iv:
                 raise rules.Violation(
                     "Read the illumination values (Mortar Illumination) from the marker: --illum=<top>/<bottom> [9.2]"
                 )
             c.setdefault("illum", []).append(
-                {"oben": iv["oben"], "unten": iv.get("unten"), "quelle": f"Feind {mk.get('quelle', 'Mortar Illum')}"}
+                {"top": iv["top"], "bottom": iv.get("bottom"), "source": f"Enemy {mk.get('source', 'Mortar Illum')}"}
             )
             prot.append(
-                f"Illumination marker {iv['oben']:+d}"
-                + (f"/{iv['unten']:+d}" if iv.get("unten") is not None else "")
-                + f" on {kid} (enemy, Mortar Illumination) [9.2]"
+                f"Illumination marker {iv['top']:+d}"
+                + (f"/{iv['bottom']:+d}" if iv.get("bottom") is not None else "")
+                + f" on {card_id} (enemy, Mortar Illumination) [9.2]"
             )
             continue
-        value = mk["wert"] if mk["wert"] is not None else (var or {}).get("wert", -3)
-        c.setdefault("extern", []).append(
-            {"typ": mk["typ"], "wert": value, "quelle": pk["name"], "seite": "Feind", "aktiv": mk["typ"] != "Mines"}
+        value = mk["value"] if mk["value"] is not None else (var or {}).get("value", -3)
+        c.setdefault("external", []).append(
+            {"type": mk["type"], "value": value, "source": pk["name"], "side": "Enemy", "active": mk["type"] != "Mines"}
         )
-        if mk["typ"] == "Mines":
+        if mk["type"] == "Mines":
             prot.append(
-                f"Mines! marker (Draw 3 side, VOF {value}) on {kid}; every unit on {kid} checks immediately [8.7.1 p.67]"
+                f"Mines! marker (Draw 3 side, VOF {value}) on {card_id}; every unit on {card_id} checks immediately [8.7.1 p.67]"
             )
         else:
             prot.append(
-                f"Incoming! marker (active, VOF {value}) on {kid}; first fire mission automatic, blocks LOS out of {kid} [8.10 p.68, 5.4]"
+                f"Incoming! marker (active, VOF {value}) on {card_id}; first fire mission automatic, blocks LOS out of {card_id} [8.10 p.68, 5.4]"
             )
-            fire.cease_fire_on_los_loss(s, prot)  # L95: also fire THROUGH the card (5.4)
+            fire.cease_fire_on_los_loss(s, prot)  # also fire THROUGH the card (5.4)
 
 
-def contact_choose_places(s, own, units, kid, o, pk, places, place_list, prot, direction_list, rt):
-    """Part of pc_kontakt_v4 (extracted)."""
+def _is_spotter(u):
+    return bool(u.get("spotter") or u.get("type") == "Spotter")
+
+
+def _joined_place(units, idx, u, card_id, places, o):
+    """Place of a unit that needs no direction: on the trigger card or with another unit of the package; else None."""
+    m = u["place"]
+    if m in ("pb", "trigger"):
+        return card_id
+    if m == "with_random":
+        # [Naktong S.18 'place Leader with one random squad'] the Leader joins a squad drawn by R#
+        squads = [i for i in range(idx) if units[i].get("type") == "Squad"]
+        if not squads:
+            raise rules.Violation(f"{u.get('unit')}: no squad in the package to join")
+        pick = o.get("--leader-squad")
+        if len(squads) == 1:
+            u["_ref"] = squads[0]
+        elif pick and pick.isdigit() and 1 <= int(pick) <= len(squads):
+            u["_ref"] = squads[int(pick) - 1]
+        else:
+            raise rules.Violation(
+                f"{u.get('unit')} joins a random squad: draw R# column {len(squads)} "
+                f"(1-{len(squads)} = squad in the order of --direction); --leader-squad=<n>"
+            )
+        return places[u["_ref"]]
+    if m == "with_squad":
+        if o.get("--at") not in ("1", "2"):
+            raise rules.Violation("HMG in bunker on the card of a squad: --at=1|2 (random) [Normandy M1 p.19]")
+        return places[int(o["--at"]) - 1]
+    if m == "with_previous":
+        return places[idx - 1]
+    return None
+
+
+def _given_place(s, u, k, card_id, dir_name, hi):
+    """Check a card named with --place. Returns True for a Point Blank placement on the trigger card [8.4.3 p.64]."""
+    m = u["place"]
+    state.card(s, k)
+    if k == card_id and m != "close":
+        # Point Blank placement on the trigger card if no card in the direction is valid
+        if _is_spotter(u) or u.get("cover") in rules.STRUCTURES or state.is_mortar(u):
+            raise rules.Violation(
+                f"{u['unit']}: Point Blank placement on {card_id} not possible (spotter/structure/mortar) [8.4.3]"
+            )
+        return True
+    if (
+        geometry.direction(s, card_id, k) != DIRECTION[dir_name]
+        or geometry.distance(s, card_id, k) > hi
+        or (m == "close" and geometry.distance(s, card_id, k) != 1)
+        or not geometry.los(s, k, card_id, hb=geometry.card_height_bonus(s, card_id, "US"))[0]
+    ):
+        raise rules.Violation(f"{k} is not in direction {dir_name} within LOS/range of {card_id} [8.4.2/8.4.3 p.63]")
+    return False
+
+
+def _place_in_direction(s, u, card_id, dir_name, hi, pk):
+    """The farthest valid card in the direction (Close Range: the adjacent one) [8.4.2, 8.4.3]; a missing card that
+    could have LOS asks for a map extension [8.4.5]."""
+    m = u["place"]
+    candidates, missing = [], None
+    dr, dc = DIRECTION[dir_name]
+    trigger_card = state.card(s, card_id)
+    us_height = geometry.card_height_bonus(s, card_id, "US")
+    los_ok, last = True, card_id  # LOS still open up to the last existing card?
+    for d in [1] if m == "close" else range(1, hi + 1):
+        place_id = geometry.card_at(s, trigger_card["row"] + dr * d, trigger_card["column"] + dc * d)
+        if place_id is None:
+            # extension only if a new card there could have LOS: chain so far in LOS and
+            # (reading a: always, Hill possible) or (reading b: the last card lets LOS pass through it) [8.4.5, U19]
+            if los_ok and (
+                d == 1
+                or state.option(s, "U19_extend_to_range")
+                or geometry.see_through(state.card(s, last), (-dr, -dc), (dr, dc)) is not False
+            ):
+                missing = (trigger_card["row"] + dr * d, trigger_card["column"] + dc * d)
+            break
+        last = place_id
+        los_ok = geometry.los(s, place_id, card_id, hb=us_height)[0]
+        if not los_ok and not pk.get("place_vof", True) and not _is_spotter(u):
+            # [RULE 8.4.3 p.63 'Max LOS for these units refers to the LOS of the triggering unit', 5.4]
+            # a package without PDF counts the trigger's view INTO the card (Incoming/Smoke only block the view out)
+            los_ok = geometry.los(s, card_id, place_id, ha=us_height)[0]
+        if not los_ok and d > 1:
+            break
+        if los_ok and not check_placement(s, u, place_id, card_id, pk) and not state.card(s, place_id).get("staging"):
+            candidates.append(place_id)
+    if missing and (m == "close" or not candidates or state.option(s, "U19_extend_to_range")):
+        raise rules.Violation(
+            f"Direction {dir_name}: card row {missing[0]} column {missing[1]} missing; draw a terrain card and fof.py extend {missing[0]} {missing[1]} <type>, then repeat the contact"
+            + ("" if m == "close" else state.open_reading(s, "U19_extend_to_range"))
+            + " [8.4.5 p.65]"
+        )
+    if not candidates:
+        raise rules.Violation(
+            f"Direction {dir_name}: no valid card (LOS/range/8.4.3); redraw the direction, if none is possible, redraw the package [8.4.3 p.64]"
+        )
+    return candidates[-1]
+
+
+PLACE_WORD = {"close": "Close Range", "max": "Max LOS/Range"}
+
+
+def contact_choose_places(s, own, units, card_id, o, pk, places, place_list, prot, direction_list, rt):
+    """The card of every unit of the package, in order: joined units first, then by direction (--direction, --place)."""
     for idx, u in enumerate(units):
-        m = u["platz"]
-        if m in ("pb", "trigger"):
-            places.append(kid)
+        joined = _joined_place(units, idx, u, card_id, places, o)
+        if joined is not None:
+            places.append(joined)
             continue
-        if m == "mit_zufaelligem":
-            # L522 [Naktong S.18 'place Leader with one random squad'] the Leader joins a squad drawn by R#
-            squads = [i for i in range(idx) if units[i].get("typ") == "Squad"]
-            if not squads:
-                raise rules.Violation(f"{u.get('einheit')}: no squad in the package to join")
-            pick = o.get("--leader-squad")
-            if len(squads) == 1:
-                reference = squads[0]
-            elif pick and pick.isdigit() and 1 <= int(pick) <= len(squads):
-                reference = squads[int(pick) - 1]
-            else:
-                raise rules.Violation(
-                    f"{u.get('einheit')} joins a random squad: draw R# column {len(squads)} "
-                    f"(1-{len(squads)} = squad in the order of --direction); --leader-squad=<n>"
-                )
-            u["_ref"] = reference
-            places.append(places[reference])
-            continue
-        if m in ("mit_vorigem", "bei_squad"):
-            reference = 0
-            if m == "bei_squad":
-                b = o.get("--bei")
-                if b not in ("1", "2"):
-                    raise rules.Violation("HMG in bunker on the card of a squad: --at=1|2 (random) [Normandy M1 p.19]")
-                reference = int(b) - 1
-            else:
-                reference = idx - 1
-            places.append(places[reference])
-            continue
-        j = next(i for i, x in enumerate(own) if x is u)  # L275 (review H3): by identity, two equal units differ
+        j = next(i for i, x in enumerate(own) if x is u)  # by identity, two equal units differ
         if j >= len(direction_list):
             raise rules.Violation(
-                f"Direction per unit on its own card by R# column {rt.get('spalte', 8)} ({', '.join(f'{b} {v}' for b, v in rt.items() if b != 'spalte')}): --direction=Front|Left|Right[,..] [8.4.2 p.63]"
+                f"Direction per unit on its own card by R# column {rt.get('column', 8)} ({', '.join(f'{b} {v}' for b, v in rt.items() if b != 'column')}): --direction=Front|Left|Right[,..] [8.4.2 p.63]"
             )
         dir_name = direction_list[j]
         if dir_name not in DIRECTION:
             raise rules.Violation("Direction Front | Left | Right")
-        hi = range_of(u, pk)
-        if u.get("spotter") or u.get("typ") == "Spotter":
-            hi = 3
+        hi = 3 if _is_spotter(u) else range_of(u)
         if place_list and j < len(place_list):
             k = place_list[j]
-            state.card(s, k)
-            if k == kid and m != "close":
-                # [RULE 8.4.3 p.64] Point Blank placement on the trigger card if no card in the direction is valid
-                if not (u.get("spotter") or u.get("typ") == "Spotter") and not (
-                    u.get("cover") in rules.STRUCTURES or state.is_mortar(u)
-                ):
-                    places.append(k)
-                    continue
-                raise rules.Violation(
-                    f"{u['einheit']}: Point Blank placement on {kid} not possible (spotter/structure/mortar) [8.4.3]"
-                )
-            if (
-                geometry.direction(s, kid, k) != DIRECTION[dir_name]
-                or geometry.distance(s, kid, k) > hi
-                or (m == "close" and geometry.distance(s, kid, k) != 1)
-                or not geometry.los(s, k, kid, hb=geometry.card_height_bonus(s, kid, "US"))[0]
-            ):
-                raise rules.Violation(
-                    f"{k} is not in direction {dir_name} within LOS/range of {kid} [8.4.2/8.4.3 p.63]"
-                )
+            if _given_place(s, u, k, card_id, dir_name, hi):
+                places.append(k)
+                continue
         else:
-            candidates, missing = [], None
-            dr, dc = DIRECTION[dir_name]
-            kt = state.card(s, kid)
-            los_ok, last = True, kid  # LOS still open up to the last existing card?
-            for d in [1] if m == "close" else range(1, hi + 1):
-                kk = geometry.card_at(s, kt["reihe"] + dr * d, kt["spalte"] + dc * d)
-                if kk is None:
-                    # extension only if a new card there could have LOS: chain so far in LOS and
-                    # (reading a: always, Hill possible) or (reading b: the last card lets LOS pass through it) [8.4.5, U19]
-                    if los_ok and (
-                        d == 1
-                        or state.option(s, "U19_erweitern_bis_reichweite")
-                        or geometry.see_through(state.card(s, last), (-dr, -dc), (dr, dc)) is not False
-                    ):
-                        missing = (kt["reihe"] + dr * d, kt["spalte"] + dc * d)
-                    break
-                last = kk
-                los_ok = geometry.los(s, kk, kid, hb=geometry.card_height_bonus(s, kid, "US"))[0]
-                if not los_ok and not pk.get("place_vof", True) and not (u.get("spotter") or u.get("typ") == "Spotter"):
-                    # L525 [RULE 8.4.3 p.63 'Max LOS for these units refers to the LOS of the triggering unit', 5.4]
-                    # a package without PDF counts the trigger's view INTO the card (Incoming/Smoke only block the view out)
-                    los_ok = geometry.los(s, kid, kk, ha=geometry.card_height_bonus(s, kid, "US"))[0]
-                if not los_ok and d > 1:
-                    break
-                if los_ok and not check_place_v4(s, u, kk, kid, pk) and not state.card(s, kk).get("staging"):
-                    candidates.append(kk)
-            if missing and (m == "close" or not candidates or state.option(s, "U19_erweitern_bis_reichweite")):
-                raise rules.Violation(
-                    f"Direction {dir_name}: card row {missing[0]} column {missing[1]} missing; draw a terrain card and fof.py extend {missing[0]} {missing[1]} <type>, then repeat the contact"
-                    + ("" if m == "close" else state.open_reading(s, "U19_erweitern_bis_reichweite"))
-                    + " [8.4.5 p.65]"
-                )
-            if not candidates:
-                raise rules.Violation(
-                    f"Direction {dir_name}: no valid card (LOS/range/8.4.3); redraw the direction, if none is possible, redraw the package [8.4.3 p.64]"
-                )
-            k = candidates[-1]
-        reason = check_place_v4(s, u, k, kid, pk) if k not in places else None
+            k = _place_in_direction(s, u, card_id, dir_name, hi, pk)
+        reason = check_placement(s, u, k, card_id, pk) if k not in places else None
         if reason:
             raise rules.Violation(reason + "; redraw the direction or the package [8.4.3 p.64]")
         places.append(k)
         prot.append(
-            f"{u['typname']}: direction {dir_name}, {'Close Range' if m == 'close' else 'Max LOS/Range' if m == 'max' else 'Max LOS'} = card {k} [8.4.1-8.4.3 p.63]"
+            f"{u['type_name']}: direction {dir_name}, {PLACE_WORD.get(u['place'], 'Max LOS')} = card {k} [8.4.1-8.4.3 p.63]"
         )
 
 
-def package_units_v4(s, package, pk, o, prot):
-    """Units of a package: random choice (--choice), optional extra on an R# band (--extra), only-if-available units,
-    R#-dependent placement (--r) [8.3, Normandy M1 p.19]. Returns (units, pk); pk loses an optional marker on --extra=no."""
-    if pk.get("wahl"):
-        w = o.get("--wahl")
-        if w not in pk["wahl"]:
-            raise rules.Violation(
-                f"Package {package}: choice by R# ({' or '.join(pk['wahl'])}) and --choice=<{'|'.join(pk['wahl'])}> [8.3 p.62]"
-            )
-        units = copy.deepcopy(pk["wahl"][w])
-        prot.append(f"Random package choice: {w} [8.3 p.62]")
-    else:
-        units = copy.deepcopy(pk.get("einheiten", []))
+def _package_extra(package, pk, units, o, prot):
+    """The optional extra of a package (a unit or a marker on an R# band): --extra=yes|no. Returns (units, pk)."""
     opt_units = [u for u in units if u.get("optional_r")]
-    opt_markers = [
-        mk for mk in pk.get("marker", []) if mk.get("optional_r")
-    ]  # L452: e.g. Sniper 'On R#1/3 also place Mines'
+    opt_markers = [mk for mk in pk.get("marker", []) if mk.get("optional_r")]  # e.g. Sniper 'On R#1/3 also place Mines'
     if opt_units or opt_markers:
-        z = o.get("--zusatz")
-        extra = opt_units[0]["einheit"] if opt_units else opt_markers[0]["typ"]
+        extra_choice = o.get("--extra")
+        extra = opt_units[0]["unit"] if opt_units else opt_markers[0]["type"]
         band = (opt_units or opt_markers)[0]["optional_r"]
-        if z not in ("ja", "nein"):
+        if extra_choice not in ("yes", "no"):
             raise rules.Violation(
                 f"Package {package}: extra {extra} on R# {band} (random number column {band.rsplit('/', 1)[-1] if '/' in band else 2}, BGG B4): --extra=yes|no"
             )
-        if z == "nein":
+        if extra_choice == "no":
             units = [u for u in units if not u.get("optional_r")]
             pk = dict(pk, marker=[mk for mk in pk.get("marker", []) if not mk.get("optional_r")])
         else:
             prot.append(f"R# {band}: {extra} added [8.3 p.62]")
+    return units, pk
+
+
+def _package_r_placement(package, pk, units, o, prot):
+    """Placement mode of the units placed by R# (--r) [Normandy M1 p.19]."""
+    rp = pk["r_place"]
+    r = o.get("--r")
+    if not r:
+        raise rules.Violation(
+            f"Package {package}: placement by R# column {rp.get('column', 10)} ({', '.join(f'{b}: {m}' for b, m in rp.items() if b != 'column')}); --r=<R#>"
+        )
+    r = rules.int_value(r, "--r")
+    mode = next((m for b, m in rp.items() if b != "column" and events.r_matches(b, r)), None)
+    if mode is None:
+        raise rules.Violation(
+            f"R# {r} is outside every band of the placement table ({', '.join(b for b in rp if b != 'column')})"
+        )
+    for u in units:
+        if u.get("place") == "r":
+            u["place"] = mode
+    prot.append(f"R# {r}: placement {mode} [Normandy M1 p.19]")
+
+
+def resolve_package_units(s, package, pk, o, prot):
+    """Units of a package: random choice (--choice), optional extra on an R# band (--extra), only-if-available units,
+    R#-dependent placement (--r) [8.3, Normandy M1 p.19]. Returns (units, pk); pk loses an optional marker on --extra=no."""
+    if pk.get("choice"):
+        w = o.get("--choice")
+        if w not in pk["choice"]:
+            raise rules.Violation(
+                f"Package {package}: choice by R# ({' or '.join(pk['choice'])}) and --choice=<{'|'.join(pk['choice'])}> [8.3 p.62]"
+            )
+        units = copy.deepcopy(pk["choice"][w])
+        prot.append(f"Random package choice: {w} [8.3 p.62]")
+    else:
+        units = copy.deepcopy(pk.get("units", []))
+    units, pk = _package_extra(package, pk, units, o, prot)
     # only if available (leader)
     for u in list(units):
-        if u.get("nur_wenn_verfuegbar") and in_play_count(s, u["einheit"]) >= state.countermix_count(s, u["einheit"]):
+        if u.get("only_if_available") and in_play_count(s, u["unit"]) >= state.countermix_count(s, u["unit"]):
             units.remove(u)
-            prot.append(f"{u['einheit']} not available, omitted (p.19 'only if available')")
-    # R#-dependent placement
-    if any(u.get("platz") == "r" for u in units):
-        rp = pk["r_platz"]
-        r = o.get("--r")
-        if not r:
-            raise rules.Violation(
-                f"Package {package}: placement by R# column {rp.get('spalte', 10)} ({', '.join(f'{b}: {m}' for b, m in rp.items() if b != 'spalte')}); --r=<R#>"
-            )
-        r = rules.int_value(r, "--r")  # L269 (review H12)
-        mode = next((m for b, m in rp.items() if b != "spalte" and events.r_matches(b, r)), None)
-        if mode is None:
-            raise rules.Violation(
-                f"R# {r} is outside every band of the placement table ({', '.join(b for b in rp if b != 'spalte')})"
-            )
-        for u in units:
-            if u.get("platz") == "r":
-                u["platz"] = mode
-        prot.append(f"R# {r}: placement {mode} [Normandy M1 p.19]")
+            prot.append(f"{u['unit']} not available, omitted (p.19 'only if available')")
+    if any(u.get("place") == "r" for u in units):
+        _package_r_placement(package, pk, units, o, prot)
     return units, pk
 
 
 def package_variant(s, package, pk, o, units, prot):
-    """Variant of an Incoming package (Artillery/Mortar, --variant; R# bands of the mission table, L521). Returns
+    """Variant of an Incoming package (Artillery/Mortar, --variant; R# bands of the mission table). Returns
     (variant or None, units)."""
     var = None
-    if pk.get("varianten"):
-        vn = o.get("--variante")
-        if vn is None and len(pk["varianten"]) == 1:
-            vn = next(
-                iter(pk["varianten"])
-            )  # L452: a single variant needs no draw (Normandy M7: Incoming only as Mortar)
-        if vn not in pk["varianten"]:
-            names = list(pk["varianten"])
-            bands = [pk["varianten"][x].get("r") for x in names]
+    if pk.get("variants"):
+        variant = o.get("--variant")
+        if variant is None and len(pk["variants"]) == 1:
+            variant = next(
+                iter(pk["variants"])
+            )  # a single variant needs no draw (Normandy M7: Incoming only as Mortar)
+        if variant not in pk["variants"]:
+            names = list(pk["variants"])
+            bands = [pk["variants"][x].get("r") for x in names]
             if all(bands):
-                # L521: the mission table gives R# bands (Naktong S.18: R#1-4/10 Artillery, R#5-10/10 Mortar)
+                # the mission table gives R# bands (Naktong S.18: R#1-4/10 Artillery, R#5-10/10 Mortar)
                 hint = ", ".join(f"R# {b} = {x}" for x, b in zip(names, bands))
                 raise rules.Violation(
                     f"Package {package}: draw an Action card, {hint} (mission table); --variant=<{'|'.join(names)}>"
@@ -1151,17 +1205,17 @@ def package_variant(s, package, pk, o, units, prot):
             raise rules.Violation(
                 f"Package {package}: draw a card, 1 = {names[0]}, 2 = {names[1]} (BGG B4); --variant=<{'|'.join(names)}>"
             )
-        var = pk["varianten"][vn]
-        prot.append(f"Variant {vn} (Incoming {var['wert']:+d}) [Normandy M1 p.19]")
-        # L91 (E60): count spotter counters per firing agency (Arty Spotter / Mortar Spotter)
+        var = pk["variants"][variant]
+        prot.append(f"Variant {variant} (Incoming {var['value']:+d}) [Normandy M1 p.19]")
+        # (E60): count spotter counters per firing agency (Arty Spotter / Mortar Spotter)
         if "Arty Spotter" in s.get("countermix", {}):  # only if the game keeps separate spotter counters (M4+)
             units = [
-                dict(u, einheit=("Arty Spotter" if vn == "Artillery" else "Mortar Spotter"))
-                if u.get("spotter") or u.get("einheit") == "Spotter"
+                dict(u, unit=("Arty Spotter" if variant == "Artillery" else "Mortar Spotter"))
+                if u.get("spotter") or u.get("unit") == "Spotter"
                 else u
                 for u in units
             ]
-        if var.get("ohne_einheiten"):
+        if var.get("no_units"):
             units = []
             prot.append("without Spotter (Normandy M2 p.23: 'Artillery -4 with no Spotter')")
     return var, units
@@ -1172,12 +1226,12 @@ def package_counter_types(s, package, o, units, prot):
     the setup does not know them (--vof, --range), A-rated ammo and FJ last steps [Normandy p.48]. Changes units."""
     needed, types_ = {}, []
     type_list, vof_list, range_list = (
-        options.list_option(o, "--typ"),
+        options.list_option(o, "--type"),
         options.list_option(o, "--vof"),
-        options.list_option(o, "--reichweite"),
+        options.list_option(o, "--range"),
     )
     for u in units:
-        names = u.get("einheit_wahl") or [u["einheit"]]
+        names = u.get("unit_choice") or [u["unit"]]
         free = [x for x in names if in_play_count(s, x) + needed.get(x, 0) < state.countermix_count(s, x)]
         if not free:
             raise rules.Violation(
@@ -1195,9 +1249,9 @@ def package_counter_types(s, package, o, units, prot):
         needed[free[0]] = needed.get(free[0], 0) + 1
         types_.append(free[0])
     for u, t in zip(units, types_):
-        u.update(u.get("varianten", {}).get(t, {}))
-        u["typname"] = t
-        if u.get("vof_rating", "x") is None and u["typ"] not in ("Spotter", "HQ"):
+        u.update(u.get("variants", {}).get(t, {}))
+        u["type_name"] = t
+        if u.get("vof_rating", "x") is None and u["type"] not in ("Spotter", "HQ"):
             known = (s.get("counter_vof") or {}).get(t)
             if known:
                 u["vof_rating"] = known
@@ -1210,51 +1264,49 @@ def package_counter_types(s, package, o, units, prot):
                 u["vof_rating"] = vof_list.pop(0)
                 s.setdefault("counter_vof", {})[t] = u["vof_rating"]
                 prot.append(f"{t}: VOF {u['vof_rating']} per counter (recorded for future contacts)")
-        if u.get("vof_rating") == "A" and u.get("munition_wenn_a") and not u.get("munition"):
-            u["munition"] = copy.deepcopy(u["munition_wenn_a"])
-            u["letzter_step_werte"] = {"vof_rating": "A", "reichweite": "C"}
-        if u.get("vof_rating") == "A/S" and u.get("fj_breakdown") and not u.get("letzter_step_werte"):
-            u["letzter_step_werte"] = {
+        if u.get("vof_rating") == "A" and u.get("ammo_if_a") and not u.get("ammo"):
+            u["ammo"] = copy.deepcopy(u["ammo_if_a"])
+            u["last_step_values"] = {"vof_rating": "A", "range": "C"}
+        if u.get("vof_rating") == "A/S" and u.get("fj_breakdown") and not u.get("last_step_values"):
+            u["last_step_values"] = {
                 "vof_rating": "A/S",
-                "reichweite": "C",
+                "range": "C",
             }  # [Normandy p.48] A/S FJ: last step Fire Team A/S • C
-        if u.get("reichweite", "x") is None:
+        if u.get("range", "x") is None:
             if not range_list:
                 raise rules.Violation(
                     f"{t}: range not recorded (UNVERIFIED); read it from the counter: --range=<C|L|V>[,...]"
                 )
-            u["reichweite"] = range_list.pop(0)
-            prot.append(f"{t}: range {u['reichweite']} per counter")
+            u["range"] = range_list.pop(0)
+            prot.append(f"{t}: range {u['range']} per counter")
 
 
-def package_places(s, units, kid, o, pk, prot):
+def package_places(s, units, card_id, o, pk, prot):
     """Cards of the units: direction per unit (--direction, Unit Placement Table) and Max LOS / Close / Point Blank
     placement [8.4.2, 8.4.3]."""
     direction_list = [
-        {"Links": "Left Front", "Rechts": "Right Front"}.get(x, x) for x in options.list_option(o, "--richtung")
+        {"Left": "Left Front", "Right": "Right Front"}.get(x, x) for x in options.list_option(o, "--direction")
     ]
-    place_list = options.list_option(o, "--platz")
+    place_list = options.list_option(o, "--place")
     places = []
-    own = [u for u in units if u["platz"] in ("max", "close", "max_los")]
+    own = [u for u in units if u["place"] in ("max", "close", "max_los")]
     if len(set(direction_list)) < len(direction_list) and not pk.get("human_wave"):
         raise rules.Violation(
             "Duplicate direction: redraw (FM2 p.10, 8.4.3 'Redraw if an invalid Direction is chosen')"
         )
-    rt = s.get("richtung_tabelle", {})
-    contact_choose_places(s, own, units, kid, o, pk, places, place_list, prot, direction_list, rt)
+    rt = s.get("direction_table", {})
+    contact_choose_places(s, own, units, card_id, o, pk, places, place_list, prot, direction_list, rt)
     return places
 
 
-def package_mine_check(s, kid, pk, prot):
+def package_mine_check(s, card_id, pk, prot):
     """Mines package: mine check for the units on the trigger card; Engineers draw only one card [Normandy CSR 10]."""
-    if any(mk["typ"] == "Mines" for mk in pk.get("marker", [])):
-        request_mine_check(s, state.units_on(s, kid), kid, prot, "Mines package")
+    if any(mk["type"] == "Mines" for mk in pk.get("marker", [])):
+        request_mine_check(s, state.units_on(s, card_id), card_id, prot, "Mines package")
         _eng = [
             n
-            for n in state.units_on(s, kid)
-            if s["einheiten"][n].get("engineer")
-            and state.good_order(s["einheiten"][n])
-            and state.steps(s["einheiten"][n]) >= 2
+            for n in state.units_on(s, card_id)
+            if s["units"][n].get("engineer") and state.good_order(s["units"][n]) and state.steps(s["units"][n]) >= 2
         ]
         if _eng:
             prot.append(
@@ -1262,30 +1314,32 @@ def package_mine_check(s, kid, pk, prot):
             )
 
 
-def pc_contact_v4(s, kid, package, pk, o):
+def pc_contact_campaign(s, card_id, package, pk, o):
     """[RULE 8.3 p.62, 8.4 p.63-65, Normandy M1 p.19] Package with direction (Unit Placement Table), distance, cover, Place PDF/VOF, Spotted."""
-    c = state.card(s, kid)
+    c = state.card(s, card_id)
     prot = []
-    trigger = state.units_on(s, kid, "US")
-    if pk.get("minen_redraw") and mines_on(s, kid):
+    trigger = state.units_on(s, card_id, "US")
+    if pk.get("mine_redraw") and mines_on(s, card_id):
         raise rules.Violation(
-            f"Mines! package on {kid}, mines already lie there: redraw the package [Normandy M4 MSR 1 p.30]"
+            f"Mines! package on {card_id}, mines already lie there: redraw the package [Normandy M4 MSR 1 p.30]"
         )
-    units, pk = package_units_v4(s, package, pk, o, prot)  # L557: one function per step (review E4)
+    units, pk = resolve_package_units(s, package, pk, o, prot)  # one function per step
     var, units = package_variant(s, package, pk, o, units, prot)
     package_counter_types(s, package, o, units, prot)
-    places = package_places(s, units, kid, o, pk, prot)
+    places = package_places(s, units, card_id, o, pk, prot)
     # ---- markers (Mines, Incoming) onto the trigger card
-    contact_place_markers(s, c, kid, o, pk, prot, var)
+    contact_place_markers(s, c, card_id, o, pk, prot, var)
     # ---- place units
-    new_units = contact_place_units(s, c, units, kid, o, package, pk, places, prot, trigger, var)
+    new_units = contact_place_units(s, c, units, card_id, o, package, pk, places, prot, trigger, var)
     contact_tail(s, new_units, prot)  # fired-over PC markers (8.4.4), Point Blank shift, return fire
-    package_mine_check(s, kid, pk, prot)
-    state.clear_pc(c)  # v4: availability only via the countermix (8.3); L550: a second marker stays
-    prot.append(f"Remove PC marker from {kid} [8.2.4]")
-    ak = fire.update_activity(s)
-    if ak:
-        prot.append(ak)
-    state.save_state(s, f"Contact on {kid}: package {package} {pk['name']}; " + "; ".join(prot), "8.3 p.62, 8.4 p.63")
+    package_mine_check(s, card_id, pk, prot)
+    state.clear_pc(c)  # campaign: availability only via the countermix (8.3); a second marker stays
+    prot.append(f"Remove PC marker from {card_id} [8.2.4]")
+    activity_note = fire.update_activity(s)
+    if activity_note:
+        prot.append(activity_note)
+    state.save_state(
+        s, f"Contact on {card_id}: package {package} {pk['name']}; " + "; ".join(prot), "8.3 p.62, 8.4 p.63"
+    )
     print("CONTACT [RULE 8.3 p.62, 8.4.3 p.63]")
     briefing.print_board(prot, s)

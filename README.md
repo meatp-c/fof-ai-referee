@@ -19,16 +19,16 @@ paste the first prompt.
 | `tool/fof.py` | command-line entry point; `fof.py help` lists the commands, `fof.py help <command>` shows one |
 | `tool/fof/` | the engine as a package: `rules` (tables), `state`, `keys` (register of the state keys), `geometry` (LOS), `fire` (VOF/PDF/Crossfire), `comms`, `commands` (orders), `fire_support`, `grenades`, `pickup`, `pyro`, `enemy`, `contact` (PC/packages), `combat` (NCM/hits), `vehicles`, `setup`, `events`, `campaign`, `phase`, `briefing`, `messages`, `cli` |
 | `tests/` | unit tests on a synthetic board (`python3 -m pytest tests`), no game data needed |
-| `tool/zug.py` | one call per game step: probe in a scratch copy, book only if every command is legal, then git commit |
+| `tool/step.py` | one call per game step: probe in a scratch copy, book only if every command is legal, then git commit |
 | `tool/build_rules_index.py` | builds the rule text index from your own rulebook PDF, used by `fof.py rule <no>` |
 | `templates/mission_template.json` | skeleton of a mission setup (fill it from your Mission Book) |
 | `templates/action_cards_template.json` | skeleton of an action card archive (optional, for ":NN" card lookups) |
-| `GLOSSARY.md` | German identifiers, JSON keys and values used inside the engine |
+| `GLOSSARY.md` | the keys of the game state and the setup file |
 | `ARCHITECTURE.md` | how the engine is built: module map, game state, the way of a command, phase machine, conventions (for developers) |
 
 ## How it works
 1. **The AI runs the tool.** The AI needs a shell (for example Claude with a code/terminal environment, or any
-   agent that can run `python3`). The tool keeps the full board in `<game>/spielstand.json`.
+   agent that can run `python3`). The tool keeps the full board in `<game>/game_state.json`.
 2. **You describe, the tool decides.** You say "Move 2/2 to 44" or "E" (success) or "4" (a value you read off a card).
    The AI translates that into a tool call. Illegal steps come back as `VIOLATION: ... [RULE x.y p.n]` and nothing is saved.
 3. **Board instructions come back.** Every booked step prints `Board:` lines (markers to place, flip, remove) and ends
@@ -36,7 +36,7 @@ paste the first prompt.
 4. **Status on demand.** `fof.py status` prints a full board briefing and writes `<game>/BRIEFING.md`.
    That file is what the AI reads after a context reset.
 5. **Probe, then book.** The AI tests each step in a scratch copy of the game folder first, then books it for real.
-   `tool/zug.py` does both in one call (commands on stdin) and commits the game folder if it is a git repository.
+   `tool/step.py` does both in one call (commands on stdin) and commits the game folder if it is a git repository.
 
 ## Requirements
 - Python 3.9 or newer, no extra packages (pytest only for the tests, ruff only for formatting: `ruff format`, `ruff check`).
@@ -54,7 +54,7 @@ project/
 1. Rule texts (once): `python3 tool/build_rules_index.py --rules "<Series Rules PDF>" --clarifications "<Clarifications PDF>" --extra "<Mission Book PDF>"`
 2. Mission setup: copy `templates/mission_template.json`, fill every `<...>` from your Mission Book
    (units with their counter values, terrain card values, packages, event tables, fire support, assets).
-   Keys stay German, see GLOSSARY.md.
+   The keys are explained in GLOSSARY.md.
 3. `python3 tool/fof.py new my_mission.json game1` creates the game folder `game1` and makes it current.
    It refuses a folder that already holds a game; add `--force` to overwrite it.
 4. Before turn 1 the tool lists what is still missing (terrain per card, objectives, setup positions, visibility ...).
@@ -62,12 +62,12 @@ project/
 
 ## Commands
 `python3 tool/fof.py help` prints the command list, `help <command>` the usage of one command. English names
-and the German originals both work. Most used:
+and the German names of earlier releases both work. Most used:
 ```
 status | check | rule <no> | search <term> | options
 phase next | event ? yes <R#> | event ? no
 hq <HQ> | card ? <number> | activate <HQ> | order <HQ|GI> <unit> <action id> [--target=<card>] [--success=yes|no] [--area=C1|open] | done
-gi ? <number> | enemycheck | enemyaction <enemy> "<result>" | pc reveal <card> <A|B|C> | pc <card> | pc contact <card> <package> --direction=Front|Left|Right
+gi ? <number> | gi skill <HQ> | enemycheck | enemyaction <enemy> "<result>" | pc reveal <card> <A|B|C> | pc <card> | pc contact <card> <package> --direction=Front|Left|Right
 ncm <unit> | ncm next | hit <unit> HIT|PIN|MISS [letters] | mine <unit> yes|no | capture <enemy> <guard> | endturn
 setup <unit> <card> [--area=C1] [--platoon=<n>] [--asset=<type>] | terrain <card> <type> | extend <row> <col> <type>
 objective primary|route|cop|concentration ... | visibility <light> | illum <card> <top> [<bottom>]
@@ -80,6 +80,7 @@ retreat <unit> [<card>]           3.5.2 retreat of a Paralyzed/Litter Team (mand
 grenade response <unit> --success=yes|no   7.10.5 free grenade response after a Point Blank attack (no Command)
 xp promote <unit> --from=Green|Line --steps=n | xp skill <HQ> <skill>   promotions and skill purchases between missions (12.3, 12.7)
 undo <entry no> --reason=..       restore the state after that entry, lists the discarded entries for the board
+                                  (<game>/commands.txt keeps every command that changed the game, in order)
 vehicle move <v> <card> | vehicle fire <unit> <target> | vehicle cf <v> --unit= --success= | vehicle spot <v> --target= --success= | vehicle done <unit>
 vehicle enemy | vehicle react <unit> <target> | vehicle traffic <terrain> normal|slow|no   AT Combat & Vehicle Movement Phase 3.6 (10.5)
 at <AT number>|:<card no>         resolve the open AT draw (10.5.3, 10.6)
@@ -92,15 +93,16 @@ Action ids follow the Action Menus (4.2.2a Move, 4.2.2b Move a Platoon, 4.2.2c I
   (offensive missions, night patrols, combat patrols, reattempts, counter attacks, tanks and AT guns, campaign
   experience). Several hundred turns of real play.
 - Korea (Naktong River, Mission 1): face-down cards, attempt plans, Human Wave, no prisoners, heat casualties, the
-  Naktong counter attack and enemy tank priorities, played at the table through attempt 1 and most of attempt 2
-  (including the planned counter attack with Human Waves and a T-34/85).
+  Naktong counter attack and enemy tank priorities, played at the table to the end of the mission (three attempts,
+  rain and night turns, the planned counter attack with Human Waves and a T-34/85) and through the between-missions
+  sequence.
 - One code base: the same `fof.py` is the file used in play, so every fix found at the table lands here.
   `CHANGELOG.md` lists the changes.
 - Vehicles and AT combat (chapter 10) cover the WWII rows of the Vehicle and AT Weapons chart as used in Normandy
-  Missions 6 and 7, plus the Korea rows used in Naktong Mission 1 (T-34/85, SU-76M, M26, Quad .50, 57mm and 75mm RCL). Not implemented: helicopters/air assault, urban combat (13.0), enemy reconstitution (6.5.2).
+  Missions 6 and 7, plus the Korea rows used in Naktong Mission 1 (T-34/85, SU-76M, M26, Quad .50, 57mm and 75mm RCL). Not implemented: helicopters/air assault, urban combat (13.0), Final Protective Fire and Final Protective Lines, the setup of defensive missions (MLR, PC placement by row).
   Other campaigns need their own setup data and may need code for their special rules.
 - Where the rules are unclear the tool uses a documented reading. `fof.py options` lists these, and output marks
-  them as `[open Uxx]`. You can switch them in the setup's `optionen`.
+  them as `[open Uxx]`. You can switch them in the setup's `options`.
 - The engine trusts the values you enter for draws. It does not draw cards.
 
 ## Tests

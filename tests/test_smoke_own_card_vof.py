@@ -7,10 +7,10 @@ from fof import pyro  # L556: split from commands
 def test_pyro_smoke_keeps_vof_on_own_card(board):
 
     s = board
-    s["einheiten"]["HMG"] = unit("22", ziel="23")
-    s["einheiten"]["German"] = unit("23", side="Feind")
+    s["units"]["HMG"] = unit("22", target="23")
+    s["units"]["German"] = unit("23", side="Enemy")
     prot = []
-    pyro._pyro_smoke(s, "HC Smoke", "22", {"--wert": "2"}, prot)
-    e = s["einheiten"]["HMG"]
-    assert e["ziel"] == "22" and e.get("_rauch_ziel") == "23", (e, prot)
+    pyro._pyro_smoke(s, "HC Smoke", "22", {"--value": "2"}, prot)
+    e = s["units"]["HMG"]
+    assert e["target"] == "22" and e.get("_smoke_target") == "23", (e, prot)
     assert any("its VOF stays on 22" in p for p in prot), prot

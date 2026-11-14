@@ -9,16 +9,16 @@ from conftest import unit
 
 from fof import briefing, campaign, cli, comms, history, messages, options, rules, setup, state
 
-M1_SETUP = state.ROOT / "normandy" / "aufbau_normandy_m1.json"
+M1_SETUP = state.ROOT / "normandy" / "setup_normandy_m1.json"
 
 
 @pytest.fixture
 def cli_game(tmp_path, monkeypatch, capsys):
-    """A fresh game from the M1 setup in tmp_path (FOF_PARTIE); run(argv) -> (exit code, output)."""
+    """A fresh game from the M1 setup in tmp_path (FOF_GAME); run(argv) -> (exit code, output)."""
     if not M1_SETUP.exists():
-        pytest.skip("mission setup normandy/aufbau_normandy_m1.json not available")
+        pytest.skip("mission setup normandy/setup_normandy_m1.json not available")
     game = tmp_path / "game"
-    monkeypatch.setenv("FOF_PARTIE", str(game))
+    monkeypatch.setenv("FOF_GAME", str(game))
 
     def run(argv):
         try:
@@ -35,24 +35,24 @@ def cli_game(tmp_path, monkeypatch, capsys):
 
 
 def saved(game):
-    return json.loads((game / "spielstand.json").read_text(encoding="utf-8"))
+    return json.loads((game / "game_state.json").read_text(encoding="utf-8"))
 
 
 # ---- H10: line
 
 
 def test_h10_line_usage_is_one_text_and_names_the_unit():
-    assert cli.usage("line") == cli.usage("leitung") == "line <card> ok|cut | line lay <card> <unit>"
+    assert cli.usage("line") == cli.usage("line") == "line <card> ok|cut | line lay <card> <unit>"
 
 
-@pytest.mark.parametrize("args", [["legen", "21"], ["legen"], ["21"]])
+@pytest.mark.parametrize("args", [["lay", "21"], ["lay"], ["21"]])
 def test_h10_line_missing_arguments_are_violations(board, args):
     with pytest.raises(rules.Violation, match=r"Usage: line <card> ok\|cut \| line lay <card> <unit>"):
         comms.cmd_line(board, args)
 
 
 def test_h10_line_wrong_result_word_names_the_usage(board):
-    board["leitung_checks"] = {"21": "test"}
+    board["line_checks"] = {"21": "test"}
     with pytest.raises(rules.Violation, match="Usage: line"):
         comms.cmd_line(board, ["21", "maybe"])
 
@@ -70,7 +70,7 @@ def stub_save(monkeypatch):
 
 def test_h11_set_without_equals_and_bad_steps(board, stub_save):
     board["phase"] = "3.1"  # before turn 1: no --reason needed
-    board["einheiten"]["1/1"] = unit("21")
+    board["units"]["1/1"] = unit("21")
     with pytest.raises(rules.Violation, match="field=value expected"):
         setup.cmd_values(board, ["1/1", "vof_rating", "A"])
     with pytest.raises(rules.Violation, match="whole number"):
@@ -80,12 +80,12 @@ def test_h11_set_without_equals_and_bad_steps(board, stub_save):
     with pytest.raises(rules.Violation, match="Usage: set"):
         setup.cmd_values(board, ["1/1"])
     setup.cmd_values(board, ["1/1", "steps=2", "vof_rating=A"])
-    assert board["einheiten"]["1/1"]["steps"] == 2 and board["einheiten"]["1/1"]["vof_rating"] == "A"
+    assert board["units"]["1/1"]["steps"] == 2 and board["units"]["1/1"]["vof_rating"] == "A"
     assert stub_save == ["1/1: steps = 2 (from the counter); 1/1: vof_rating = A (from the counter)"]
 
 
 def test_h11_drop_phone_line_and_ammo_numbers(board, stub_save):
-    board["einheiten"]["1/1"] = unit("21", leitungen=2)
+    board["units"]["1/1"] = unit("21", lines=2)
     with pytest.raises(rules.Violation, match="whole number"):
         setup.cmd_drop(board, ["1/1", "Leitung:x"])
     with pytest.raises(rules.Violation, match="at least 1"):
@@ -93,7 +93,7 @@ def test_h11_drop_phone_line_and_ammo_numbers(board, stub_save):
     with pytest.raises(rules.Violation, match="whole number"):
         setup.cmd_drop(board, ["1/1", "MG:x"])
     setup.cmd_drop(board, ["1/1", "Leitung:2"])
-    assert board["einheiten"]["1/1"]["leitungen"] == 0 and board["karten"]["21"]["leitung_assets"] == 2
+    assert board["units"]["1/1"]["lines"] == 0 and board["cards"]["21"]["line_assets"] == 2
 
 
 def test_h11_visibility_extend_illum_numbers(board, stub_save):
@@ -120,18 +120,18 @@ def test_h11_pyro_without_colon_and_bare_option_values(board):
         setup.setup_pyro(board, "1/1", e, {"--pyro": True}, [])
     prot = []
     setup.setup_pyro(board, "1/1", e, {"--pyro": "RSP:CF"}, prot)
-    assert board["pyro_belegung"] == {"RSP": "CF"}
-    board["co_tac_mittel"] = "telefon"
+    assert board["pyro_codes"] == {"RSP": "CF"}
+    board["co_tac_medium"] = "phone"
     with pytest.raises(rules.Violation, match="--lines"):
-        setup.setup_lines(board, "1/1", e, {"--leitungen": "x"}, [])
+        setup.setup_lines(board, "1/1", e, {"--lines": "x"}, [])
     with pytest.raises(rules.Violation, match="value is missing"):
-        setup.setup_lines(board, "1/1", e, {"--leitungen": True}, [])
+        setup.setup_lines(board, "1/1", e, {"--lines": True}, [])
 
 
 def test_h11_edges_without_colour_is_a_violation():
     with pytest.raises(rules.Violation, match="--edges"):
-        setup.parse_edges("oben")
-    assert setup.parse_edges("oben:weiss")["oben"] == "weiss"
+        setup.parse_edges("top")
+    assert setup.parse_edges("top:white")["top"] == "white"
 
 
 # ---- H12: missing arguments through the CLI and in the handlers
@@ -185,18 +185,18 @@ def test_h12_cli_minimum_arguments(cli_game, argv, usage):
     ],
 )
 def test_h12_cli_handler_arguments(cli_game, argv, text):
-    before = (cli_game.game / "spielstand.json").read_text(encoding="utf-8")
+    before = (cli_game.game / "game_state.json").read_text(encoding="utf-8")
     code, out = cli_game(argv)
     assert code == 2 and text in out, out
     assert "Traceback" not in out
-    assert (cli_game.game / "spielstand.json").read_text(encoding="utf-8") == before  # nothing saved
+    assert (cli_game.game / "game_state.json").read_text(encoding="utf-8") == before  # nothing saved
 
 
 def test_h12_xp_promote_and_skill_numbers(board):
-    board["kampagne"] = {}
-    board["missionsende"] = True
-    board["einheiten"]["1/1"] = unit("21")
-    board["einheiten"]["CO HQ"] = unit("21", typ="HQ")
+    board["campaign"] = {}
+    board["mission_end"] = True
+    board["units"]["1/1"] = unit("21")
+    board["units"]["CO HQ"] = unit("21", type="HQ")
     with pytest.raises(rules.Violation, match="whole number"):
         campaign.cmd_xp(board, ["promote", "1/1", "--from=Green", "--steps=x"])
     with pytest.raises(rules.Violation, match="at least one step"):
@@ -207,10 +207,10 @@ def test_h12_xp_promote_and_skill_numbers(board):
 
 
 def test_h12_rule_lookup_without_compact_line_and_empty_search(tmp_path, monkeypatch):
-    (tmp_path / "regelindex.json").write_text(
-        json.dumps({"9.9": {"titel": "Test", "seite": 99, "zeile_kompakt": None}}), encoding="utf-8"
+    (tmp_path / "rule_index.json").write_text(
+        json.dumps({"9.9": {"title": "Test", "page": 99, "line_compact": None}}), encoding="utf-8"
     )
-    (tmp_path / "regelbuch_kompakt.txt").write_text("line one\n", encoding="utf-8")
+    (tmp_path / "rulebook_compact.txt").write_text("line one\n", encoding="utf-8")
     monkeypatch.setattr(state, "DATA", tmp_path)
     with pytest.raises(rules.Violation, match="no line in the compact rule text"):
         cli.cmd_rule(["9.9"])
@@ -226,28 +226,28 @@ def test_m5_new_refuses_an_existing_game_unless_force(cli_game):
     (game / "marker.txt").write_text("x", encoding="utf-8")
     code, out = cli_game(["note", "first entry"])
     assert code == 0
-    entries = len(saved(game)["protokoll"])
+    entries = len(saved(game)["protocol"])
     code, out = cli_game(["new", str(M1_SETUP)])
     assert code == 2 and "already holds a game" in out and "--force" in out
-    assert len(saved(game)["protokoll"]) == entries
+    assert len(saved(game)["protocol"]) == entries
     code, out = cli_game(["new", str(M1_SETUP), "--force"])
     assert code == 0, out
-    assert len(saved(game)["protokoll"]) == 1
+    assert len(saved(game)["protocol"]) == 1
 
 
 def test_m5_helpers(tmp_path, board):
     folder = tmp_path / "g"
     assert state.check_new_game_folder(str(folder)) == folder  # absolute path: ROOT / abs is abs
     folder.mkdir()
-    (folder / "spielstand.json").write_text("{}", encoding="utf-8")
+    (folder / "game_state.json").write_text("{}", encoding="utf-8")
     with pytest.raises(rules.Violation, match="already holds a game"):
         state.check_new_game_folder(str(folder))
     assert state.check_new_game_folder(str(folder), force=True) == folder
-    board["optionen"] = {"U99_nonsense": True}
+    board["options"] = {"U99_nonsense": True}
     with pytest.raises(rules.Violation, match="Unknown options in setup: U99_nonsense"):
         setup.check_new_game(board)
-    board["optionen"] = {}
-    board["einheiten"]["1/1"] = unit("99")
+    board["options"] = {}
+    board["units"]["1/1"] = unit("99")
     with pytest.raises(rules.Violation, match="unknown card 99"):
         setup.check_new_game(board)
 
@@ -256,25 +256,25 @@ def test_m5_helpers(tmp_path, board):
 
 
 def patrol_board(board):
-    board["kampagne"] = {"versuch": 1}
-    board["patrouille_mission"] = True
-    board["missionsende"] = True
-    board["patrouille"] = {"platoon": "1", "erledigt": ["1"]}
-    board["einheiten"]["1st PLT HQ"] = unit("11", typ="HQ", ebene="PLT", platoon="1")
-    board["einheiten"]["2nd PLT HQ"] = unit("11", typ="HQ", ebene="PLT", platoon="2")
-    board["einheiten"]["1/2"] = unit("11", platoon="2")
-    board["einheiten"]["1/1"] = unit("11", platoon="1")
+    board["campaign"] = {"attempt": 1}
+    board["patrol_mission"] = True
+    board["mission_end"] = True
+    board["patrol"] = {"platoon": "1", "completed": ["1"]}
+    board["units"]["1st PLT HQ"] = unit("11", type="HQ", level="PLT", platoon="1")
+    board["units"]["2nd PLT HQ"] = unit("11", type="HQ", level="PLT", platoon="2")
+    board["units"]["1/2"] = unit("11", platoon="2")
+    board["units"]["1/1"] = unit("11", platoon="1")
     return board
 
 
 @pytest.mark.parametrize(
     "args, text",
     [
-        (["naechste", "7"], "Platoon 7 unknown"),
-        (["naechste", "2", "--mit=Nobody"], "Unit 'Nobody' unknown"),
-        (["naechste", "2", "--mit=1/1"], "only Weapons Teams"),
-        (["naechste", "2", "--mit"], "needs a value"),
-        (["naechste"], "Usage: patrol"),
+        (["next", "7"], "Platoon 7 unknown"),
+        (["next", "2", "--with=Nobody"], "Unit 'Nobody' unknown"),
+        (["next", "2", "--with=1/1"], "only Weapons Teams"),
+        (["next", "2", "--with"], "needs a value"),
+        (["next"], "Usage: patrol"),
     ],
 )
 def test_m6_patrol_next_checks_before_saving(board, stub_save, args, text):
@@ -282,13 +282,13 @@ def test_m6_patrol_next_checks_before_saving(board, stub_save, args, text):
     with pytest.raises(rules.Violation, match=text):
         campaign.cmd_patrol(s, args)
     assert stub_save == []  # the reattempt reset was not saved
-    assert "patrouille_wechsel" not in s and s["kampagne"]["versuch"] == 1
+    assert "patrol_change" not in s and s["campaign"]["attempt"] == 1
 
 
 def test_m6_platoon_hq_in_the_patrol_reserve_counts(board):
     s = patrol_board(board)
-    s["patrouille_reserve"] = {"3rd PLT HQ": {"einheit": unit(None, typ="HQ", ebene="PLT", platoon="3")}}
-    s["einheiten"]["BN HQ"] = unit("11", typ="HQ", ebene="BN")
+    s["patrol_reserve"] = {"3rd PLT HQ": {"unit": unit(None, type="HQ", level="PLT", platoon="3")}}
+    s["units"]["BN HQ"] = unit("11", type="HQ", level="BN")
     units = campaign.units_after_reattempt(s)
     assert "3rd PLT HQ" in units and "BN HQ" not in units
     campaign.check_patrol_choice(units, "3", [])
@@ -300,13 +300,13 @@ def test_m6_platoon_hq_in_the_patrol_reserve_counts(board):
 
 
 def test_m38_unknown_vehicle_type_is_a_consistency_error(board):
-    board["einheiten"]["Tank"] = unit("21", typ="Vehicle", fahrzeug="M4 Sherman")
-    board["einheiten"]["Gun"] = unit("31", side="Feind", typ="AT Gun", at_waffe="77mm")
+    board["units"]["Tank"] = unit("21", type="Vehicle", vehicle="M4 Sherman")
+    board["units"]["Gun"] = unit("31", side="Enemy", type="AT Gun", at_weapon="77mm")
     errors = briefing.consistency_check(board)
     assert any(x.startswith("Tank: Unknown vehicle type 'M4 Sherman'") and "M4 Sherman 75mm" in x for x in errors)
     assert any(x.startswith("Gun: Unknown AT weapon '77mm'") and "75mm AT Gun" in x for x in errors)
-    board["einheiten"]["Tank"]["fahrzeug"] = "M4 Sherman 75mm"
-    board["einheiten"]["Gun"]["at_waffe"] = "75mm AT Gun"
+    board["units"]["Tank"]["vehicle"] = "M4 Sherman 75mm"
+    board["units"]["Gun"]["at_weapon"] = "75mm AT Gun"
     assert briefing.vehicle_type_errors(board) == []
 
 
@@ -326,9 +326,9 @@ def test_low_messages_board_removed_and_gi_exceptions_consistent():
 
 
 def test_low_marker_summary_friendly_point_blank_upper_right(board):
-    board["einheiten"]["1/1"] = unit("22", ziel="22")
-    board["einheiten"]["G1"] = unit("22", side="Feind", ziel="22")
-    board["einheiten"]["G1"]["vof_rating"] = "H"
+    board["units"]["1/1"] = unit("22", target="22")
+    board["units"]["G1"] = unit("22", side="Enemy", target="22")
+    board["units"]["G1"]["vof_rating"] = "H"
     out = state.marker_summary(board)["22"]
     top, cf, friendly_pb, enemy_pb = out
     assert top is None and not cf
@@ -340,13 +340,13 @@ def test_low_marker_summary_friendly_point_blank_upper_right(board):
 
 
 def test_options_text_opt_and_int_opt_bare_flags():
-    assert options.text_opt({}, "--ziel") is None
-    assert options.text_opt({}, "--ziel", default="x") == "x"
-    assert options.text_opt({"--ziel": "21"}, "--ziel") == "21"
-    with pytest.raises(rules.Violation, match="--ziel needs a value: fire <unit>"):
-        options.text_opt({"--ziel": True}, "--ziel", "fire <unit> --target=..")
+    assert options.text_opt({}, "--target") is None
+    assert options.text_opt({}, "--target", default="x") == "x"
+    assert options.text_opt({"--target": "21"}, "--target") == "21"
+    with pytest.raises(rules.Violation, match="--target needs a value: fire <unit>"):
+        options.text_opt({"--target": True}, "--target", "fire <unit> --target=..")
     with pytest.raises(rules.Violation, match="value is missing"):
-        options.int_opt({"--wert": True}, "--wert", "cover value", 1)
+        options.int_opt({"--value": True}, "--value", "cover value", 1)
     assert options.parse_opts(["--force"]) == {"--force": True}
 
 
@@ -362,37 +362,37 @@ def test_save_state_uses_the_loaded_text_and_checks_once(cli_game, monkeypatch):
     real_read = pathlib.Path.read_text
 
     def no_state_read(self, *a, **k):
-        assert self.name != "spielstand.json", "spielstand.json read again by save_state"
+        assert self.name != "game_state.json", "game_state.json read again by save_state"
         return real_read(self, *a, **k)
 
     monkeypatch.setattr(pathlib.Path, "read_text", no_state_read)
     state.save_state(s, "cached", None)
     assert calls == [1]
     monkeypatch.setattr(pathlib.Path, "read_text", real_read)
-    assert saved(game)["protokoll"][-1]["text"] == "cached"
+    assert saved(game)["protocol"][-1]["text"] == "cached"
     # changed on disk behind our back: the old file is read again, as before
     on_disk = saved(game)
     on_disk["phase"] = "3.7.4"
-    (game / "spielstand.json").write_text(json.dumps(on_disk) + "\n\n", encoding="utf-8")
-    phase, entries, loader = state._disk_before_save(game / "spielstand.json")
-    assert phase == "3.7.4" and entries == len(on_disk["protokoll"]) and loader()["phase"] == "3.7.4"
+    (game / "game_state.json").write_text(json.dumps(on_disk) + "\n\n", encoding="utf-8")
+    phase, entries, loader = state._disk_before_save(game / "game_state.json")
+    assert phase == "3.7.4" and entries == len(on_disk["protocol"]) and loader()["phase"] == "3.7.4"
 
 
 # ---- structure: undo lives in history.py
 
 
 def test_undo_moved_to_history_and_still_works(cli_game):
-    assert cli.BY_GERMAN["zurueck"][2] == "history.cmd_undo"
-    assert state.cmd_undo.__doc__.startswith("Moved to history.cmd_undo")
+    assert cli.BY_NAME["undo"][1] == "history.cmd_undo"
+    assert state.cmd_undo.__doc__.startswith("Alias of history.cmd_undo")
     for i in range(3):
         assert cli_game(["note", f"n{i}"])[0] == 0
-    entries = len(saved(cli_game.game)["protokoll"])
+    entries = len(saved(cli_game.game)["protocol"])
     code, out = cli_game(["undo", "2", "--reason=test"])
     assert code == 0, out
     s = saved(cli_game.game)
-    assert len(s["protokoll"]) == 3 and s["protokoll"][-1]["text"].startswith("Undo to entry 2 (test)")
+    assert len(s["protocol"]) == 3 and s["protocol"][-1]["text"].startswith("Undo to entry 2 (test)")
     assert entries == 4
     with pytest.raises(rules.Violation, match="undo <entry no>"):
         history.cmd_undo(s, ["x"])
-    with pytest.raises(rules.Violation, match="--grund needs a value"):
+    with pytest.raises(rules.Violation, match="--reason needs a value"):
         history.cmd_undo(s, ["1", "--reason"])

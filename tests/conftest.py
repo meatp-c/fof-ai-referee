@@ -14,13 +14,9 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
-# pyproject.toml puts werkzeuge/ on the path (pytest pythonpath); the public kit (tool/fof, no pyproject) needs this
+# pyproject.toml puts tool/ on the path (pytest pythonpath); the public kit (no pyproject) needs this
 if importlib.util.find_spec("fof") is None:
-    for folder in ("werkzeuge", "tool"):
-        cand = ROOT / folder
-        if (cand / "fof").is_dir():
-            sys.path.insert(0, str(cand))
-            break
+    sys.path.insert(0, str(ROOT / "tool"))
 
 
 def pytest_configure(config):
@@ -39,32 +35,32 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
-def card(row, col, elevation=1, edges="weiss", **extra):
+def card(row, col, elevation=1, edges="white", **extra):
     c = {
-        "reihe": row,
-        "spalte": col,
+        "row": row,
+        "column": col,
         "elevation": elevation,
         "terrain": "Open Fields",
-        "raender": edges,
+        "edges": edges,
         "cover": [],
-        "extern": [],
+        "external": [],
     }
     c.update(extra)
     return c
 
 
-def unit(kid, side="US", vof="S", rng="L", steps=3, **extra):
+def unit(card_id, side="US", vof="S", rng="L", steps=3, **extra):
     e = {
-        "karte": kid,
-        "seite": side,
-        "typ": "Squad",
+        "card": card_id,
+        "side": side,
+        "type": "Squad",
         "steps": steps,
         "status": [],
-        "bereich": "offen",
-        "ziel": None,
+        "area": "open",
+        "target": None,
         "vof_rating": vof,
-        "reichweite": rng,
-        "erfahrung": "Line",
+        "range": rng,
+        "experience": "Line",
         "spotted": True,
     }
     e.update(extra)
@@ -73,9 +69,9 @@ def unit(kid, side="US", vof="S", rng="L", steps=3, **extra):
 
 @pytest.fixture(autouse=True)
 def isolated_game_dir(tmp_path, monkeypatch):
-    """Every test plays in its own folder: nothing can reach the real game via .aktuelle_partie (incident 22.10., L209).
-    Tests that need another folder set FOF_PARTIE themselves (monkeypatch.setenv wins, it runs later)."""
-    monkeypatch.setenv("FOF_PARTIE", str(tmp_path))
+    """Every test plays in its own folder: nothing can reach the real game via .current_game (incident 22.10., L209).
+    Tests that need another folder set FOF_GAME themselves (monkeypatch.setenv wins, it runs later)."""
+    monkeypatch.setenv("FOF_GAME", str(tmp_path))
     monkeypatch.setenv("FOF_KEY_CHECK", "1")  # L530: every state a test saves must use registered keys (fof/keys.py)
     return tmp_path
 
@@ -84,23 +80,23 @@ def isolated_game_dir(tmp_path, monkeypatch):
 def board():
     """3 rows x 3 columns, card ids 11..33 (row, column), all open fields with white edges, day."""
     s = {
-        "sicht": "tag",
-        "typ": "offensiv",
-        "zug": 1,
+        "sight": "day",
+        "type": "offensive",
+        "turn": 1,
         "phase": "3.3.1b",
-        "karten": {f"{r}{c}": card(r, c) for r in (1, 2, 3) for c in (1, 2, 3)},
-        "einheiten": {},
-        "kommandos": {},
-        "impuls_ausgegeben": {},
-        "impuls_aktionen": {},
-        "protokoll": [],
-        "optionen": {},
+        "cards": {f"{r}{c}": card(r, c) for r in (1, 2, 3) for c in (1, 2, 3)},
+        "units": {},
+        "commands": {},
+        "impulse_spent": {},
+        "impulse_actions": {},
+        "protocol": [],
+        "options": {},
     }
     return s
 
 
 def m6_state(n):
-    """State after entry n of Normandy Mission 6 (tests/fixtures, built by make_m6_fixtures.py from normandy_m6/verlauf)."""
+    """State after entry n of Normandy Mission 6 (tests/fixtures, built by make_m6_fixtures.py from normandy_m6/history)."""
     s = json.loads((FIXTURES / "m6_base.json").read_text(encoding="utf-8"))
     s.update(json.loads((FIXTURES / f"m6_{n}.json").read_text(encoding="utf-8")))
     return s
@@ -108,20 +104,20 @@ def m6_state(n):
 
 @pytest.fixture
 def m6_game(tmp_path, monkeypatch):
-    """Factory m6_game(n): writes the M6 state n as tmp_path/spielstand.json, sets FOF_PARTIE, returns the state."""
+    """Factory m6_game(n): writes the M6 state n as tmp_path/game_state.json, sets FOF_GAME, returns the state."""
 
     def load(n):
         s = m6_state(n)
-        (tmp_path / "spielstand.json").write_text(json.dumps(s, indent=1, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setenv("FOF_PARTIE", str(tmp_path))
+        (tmp_path / "game_state.json").write_text(json.dumps(s, indent=1, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setenv("FOF_GAME", str(tmp_path))
         return s
 
     return load
 
 
 def saved_state():
-    """The spielstand.json of the current test game (FOF_PARTIE)."""
-    return json.loads((pathlib.Path(os.environ["FOF_PARTIE"]) / "spielstand.json").read_text(encoding="utf-8"))
+    """The game_state.json of the current test game (FOF_GAME)."""
+    return json.loads((pathlib.Path(os.environ["FOF_GAME"]) / "game_state.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -149,16 +145,16 @@ def fof_cli(capsys):
 @pytest.fixture
 def cli_game(board, tmp_path, monkeypatch, fof_cli):
     """L529 (review T1): factory cli_game(**fields) creates a game with 'new' from the synthetic board (no mission data,
-    runs in the public kit too) in tmp_path/game, sets FOF_PARTIE and returns the folder; drive it with fof_cli."""
+    runs in the public kit too) in tmp_path/game, sets FOF_GAME and returns the folder; drive it with fof_cli."""
 
     def make(**fields):
         s = copy.deepcopy(board)
-        s.update(mission="synthetic", max_zuege=10)
+        s.update(mission="synthetic", max_turns=10)
         s.update(fields)
-        setup_file = tmp_path / "aufbau.json"
+        setup_file = tmp_path / "setup.json"
         setup_file.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
         game = tmp_path / "game"
-        monkeypatch.setenv("FOF_PARTIE", str(game))
+        monkeypatch.setenv("FOF_GAME", str(game))
         code, out = fof_cli("new", str(setup_file))
         assert code == 0, out
         return game
@@ -167,10 +163,8 @@ def cli_game(board, tmp_path, monkeypatch, fof_cli):
 
 
 def fof_subprocess(*argv):
-    """The real entry point (werkzeuge/fof.py or the kit's tool/fof.py) in a subprocess with the test's FOF_PARTIE."""
-    tool = ROOT / "werkzeuge" / "fof.py"
-    if not tool.exists():
-        tool = ROOT / "tool" / "fof.py"
+    """The real entry point tool/fof.py in a subprocess with the test's FOF_GAME."""
+    tool = ROOT / "tool" / "fof.py"
     return subprocess.run([sys.executable, str(tool), *argv], capture_output=True, text=True, env=dict(os.environ))
 
 
@@ -182,45 +176,45 @@ def b36(monkeypatch):
     """3x3 board in phase 3.6 with the Naktong tank priority list; save_state/print_board stubbed."""
     from fof import briefing, state
 
-    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protokoll"].append({"text": text}))
+    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protocol"].append({"text": text}))
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
     return {
-        "sicht": "tag",
-        "typ": "offensiv",
-        "zug": 1,
+        "sight": "day",
+        "type": "offensive",
+        "turn": 1,
         "phase": "3.6",
-        "karten": {f"{r}{c}": card(r, c) for r in (1, 2, 3) for c in (1, 2, 3)},
-        "einheiten": {},
-        "kommandos": {},
-        "impuls_ausgegeben": {},
-        "impuls_aktionen": {},
-        "protokoll": [],
-        "optionen": {},
+        "cards": {f"{r}{c}": card(r, c) for r in (1, 2, 3) for c in (1, 2, 3)},
+        "units": {},
+        "commands": {},
+        "impulse_spent": {},
+        "impulse_actions": {},
+        "protocol": [],
+        "options": {},
         "mission": "x",
-        "terrain_katalog": {"Open Fields": {"fahrzeuge": True}},
-        "sonderregeln": {"panzer_prioritaeten": True},
+        "terrain_catalog": {"Open Fields": {"vehicles": True}},
+        "special_rules": {"tank_priorities": True},
     }
 
 
-def t34(kid, **kw):
+def t34(card_id, **kw):
     from fof import rules
 
-    kw.setdefault("fahrzeug", "T-34/85")
+    kw.setdefault("vehicle", "T-34/85")
     return unit(
-        kid,
-        side="Feind",
+        card_id,
+        side="Enemy",
         vof=kw.pop("vof", None),
         rng=kw.pop("rng", None),
         steps=1,
-        typ="Vehicle",
+        type="Vehicle",
         spotted=True,
         status=[rules.ACTIVATED],
         **kw,
     )
 
 
-def bazooka(kid, **kw):
-    return unit(kid, typ="Weapons Team", steps=1, at_waffe="M1A1 Bazooka", vof=kw.pop("vof", None), rng="C", **kw)
+def bazooka(card_id, **kw):
+    return unit(card_id, type="Weapons Team", steps=1, at_weapon="M1A1 Bazooka", vof=kw.pop("vof", None), rng="C", **kw)
 
 
 @pytest.fixture
@@ -230,19 +224,19 @@ def b342(monkeypatch):
 
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
     s = {
-        "sicht": "tag",
-        "typ": "offensiv",
-        "zug": 2,
+        "sight": "day",
+        "type": "offensive",
+        "turn": 2,
         "phase": "3.4.2",
-        "karten": {f"{r}{c}": card(r, c) for r in (1, 2, 3, 4) for c in (1, 2, 3)},
-        "einheiten": {},
-        "kommandos": {},
-        "impuls_ausgegeben": {},
-        "impuls_aktionen": {},
-        "protokoll": [],
-        "optionen": {},
-        "feind_taktik": "Hasty",
-        "aktivitaet": "Contact",
+        "cards": {f"{r}{c}": card(r, c) for r in (1, 2, 3, 4) for c in (1, 2, 3)},
+        "units": {},
+        "commands": {},
+        "impulse_spent": {},
+        "impulse_actions": {},
+        "protocol": [],
+        "options": {},
+        "enemy_tactic": "Hasty",
+        "activity": "Contact",
         "mission": "x",
     }
     saved = []
@@ -255,26 +249,26 @@ def b342(monkeypatch):
             from fof import rules
 
             raise rules.Violation("Check prevents saving: " + "; ".join(errors))
-        st["protokoll"].append({"text": text})
+        st["protocol"].append({"text": text})
         saved.append(text)
 
     monkeypatch.setattr(state, "save_state", save)
     return s
 
 
-def german(kid, vof="A", **kw):
-    kw.setdefault("typname", "German Squad")
-    return unit(kid, side="Feind", vof=vof, **kw)
+def german(card_id, vof="A", **kw):
+    kw.setdefault("type_name", "German Squad")
+    return unit(card_id, side="Enemy", vof=vof, **kw)
 
 
 def _hq_board(board, monkeypatch, phase="3.3.1b"):
     from fof import briefing, state
 
-    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protokoll"].append({"text": text}))
+    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protocol"].append({"text": text}))
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
     s = board
     s["phase"] = phase
-    s["kommandos"]["1st PLT HQ"] = {"verfuegbar": 6, "gespart": 0, "aktiviert": True, "fertig": False}
-    s["einheiten"]["1st PLT HQ"] = unit("22", vof=None, typ="HQ", ebene="PLT", platoon="1", steps=1)
-    s["aktiver_hq"] = "1st PLT HQ"
+    s["commands"]["1st PLT HQ"] = {"available": 6, "saved": 0, "activated": True, "done": False}
+    s["units"]["1st PLT HQ"] = unit("22", vof=None, type="HQ", level="PLT", platoon="1", steps=1)
+    s["active_hq"] = "1st PLT HQ"
     return s

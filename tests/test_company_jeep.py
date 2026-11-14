@@ -14,19 +14,19 @@ def _board(board):
     from fof import vehicles
 
     s = board
-    s["einheiten"]["Jeep"] = vehicles.company_jeep_unit("21")
-    s["einheiten"]["1st PLT HQ"] = unit("21", typ="HQ", ebene="PLT", platoon="1", steps=1, erfahrung="Green")
-    s["einheiten"]["2nd PLT HQ"] = unit("21", typ="HQ", ebene="PLT", platoon="2", steps=1)
-    s["einheiten"]["1/W/1"] = unit("21", typ="Weapons Team", platoon="1", steps=1, erfahrung="Veteran")
-    s["einheiten"]["2/W/1"] = unit("21", typ="Weapons Team", platoon="1", steps=1)
-    s["einheiten"]["1/1"] = unit("21", platoon="1", steps=3)
+    s["units"]["Jeep"] = vehicles.company_jeep_unit("21")
+    s["units"]["1st PLT HQ"] = unit("21", type="HQ", level="PLT", platoon="1", steps=1, experience="Green")
+    s["units"]["2nd PLT HQ"] = unit("21", type="HQ", level="PLT", platoon="2", steps=1)
+    s["units"]["1/W/1"] = unit("21", type="Weapons Team", platoon="1", steps=1, experience="Veteran")
+    s["units"]["2/W/1"] = unit("21", type="Weapons Team", platoon="1", steps=1)
+    s["units"]["1/1"] = unit("21", platoon="1", steps=3)
     return s
 
 
 def _embark(s, n):
 
     prot = []
-    pickup.embark_jeep(s, types.SimpleNamespace(z=s["einheiten"][n], target_name=n, prot=prot))
+    pickup.embark_jeep(s, types.SimpleNamespace(recipient=s["units"][n], target_name=n, prot=prot))
     return prot
 
 
@@ -46,23 +46,23 @@ def test_jeep_carries_two_steps_of_infantry(board):
 def test_experience_as_per_driver_and_passenger(board):
     s = _board(board)
     _embark(s, "1st PLT HQ")
-    assert s["einheiten"]["Jeep"]["erfahrung"] == "Green"
+    assert s["units"]["Jeep"]["experience"] == "Green"
     _embark(s, "1/W/1")
-    assert s["einheiten"]["Jeep"]["erfahrung"] == "Veteran"
+    assert s["units"]["Jeep"]["experience"] == "Veteran"
     _embark(s, "1/W/1")  # gets off again
-    assert "an_bord" not in s["einheiten"]["1/W/1"] and s["einheiten"]["Jeep"]["erfahrung"] == "Green"
+    assert "on_board" not in s["units"]["1/W/1"] and s["units"]["Jeep"]["experience"] == "Green"
 
 
 def test_no_activation_without_a_driver(board):
     from fof import rules, vehicles
 
     s = _board(board)
-    ctx = types.SimpleNamespace(z=s["einheiten"]["Jeep"], target_name="Jeep", prot=[])
+    ctx = types.SimpleNamespace(recipient=s["units"]["Jeep"], target_name="Jeep", prot=[])
     with pytest.raises(rules.Violation, match="nobody on board"):
         vehicles.order_4_2_1i(s, ctx)
     _embark(s, "2/W/1")
     vehicles.order_4_2_1i(s, ctx)
-    assert rules.ACTIVATED in s["einheiten"]["Jeep"]["status"]
+    assert rules.ACTIVATED in s["units"]["Jeep"]["status"]
 
 
 def test_embarked_hq_activates_itself_others_need_an_eligible_hq(board):
@@ -85,7 +85,7 @@ def test_activation_by_an_hq_off_board_needs_visual_verbal(board):
     s = _board(board)
     _embark(s, "1/W/1")
     assert vehicles.order_check(s, "1st PLT HQ", "Jeep", "4.2.1i")
-    s["einheiten"]["1st PLT HQ"]["karte"] = "22"
+    s["units"]["1st PLT HQ"]["card"] = "22"
     with pytest.raises(rules.Violation, match="Visual-Verbal"):
         vehicles.order_check(s, "1st PLT HQ", "Jeep", "4.2.1i")
 
@@ -95,18 +95,18 @@ def test_passengers_ride_along_exposed(board):
 
     s = _board(board)
     _embark(s, "1/W/1")
-    vehicles.at36(s)["aktion"] = {"einheit": "Jeep", "plan": [], "bewegt": False}
+    vehicles.at36(s)["action"] = {"unit": "Jeep", "plan": [], "moved": False}
     vehicles.do_move(s, "Jeep", "22", None, [])
-    assert s["einheiten"]["1/W/1"]["karte"] == "22" and rules.EXPOSED in s["einheiten"]["1/W/1"]["status"]
-    assert s["einheiten"]["2/W/1"]["karte"] == "21"
+    assert s["units"]["1/W/1"]["card"] == "22" and rules.EXPOSED in s["units"]["1/W/1"]["status"]
+    assert s["units"]["2/W/1"]["card"] == "21"
 
 
 def test_naktong_setup_has_the_company_jeep():
-    p = pathlib.Path(__file__).resolve().parents[1] / "korea" / "aufbau_naktong_m1.json"
+    p = pathlib.Path(__file__).resolve().parents[1] / "korea" / "setup_naktong_m1.json"
     if not p.exists():
         pytest.skip("Naktong setup not in this copy")
-    j = json.load(open(p, encoding="utf-8"))["einheiten"]["Jeep"]
-    assert j["kompanie_jeep"] and j["fahrzeug"] == "Jeep" and j["steps"] == 0
+    j = json.load(open(p, encoding="utf-8"))["units"]["Jeep"]
+    assert j["company_jeep"] and j["vehicle"] == "Jeep" and j["steps"] == 0
 
 
 @pytest.mark.game_data
@@ -115,13 +115,13 @@ def test_embark_and_activate_through_the_command_line(m6_game, fof_cli, tmp_path
     from fof import rules, vehicles
 
     s = m6_game(622)
-    s["einheiten"]["Jeep"] = vehicles.company_jeep_unit("53")
-    (tmp_path / "spielstand.json").write_text(json.dumps(s, indent=1, ensure_ascii=False), encoding="utf-8")
+    s["units"]["Jeep"] = vehicles.company_jeep_unit("53")
+    (tmp_path / "game_state.json").write_text(json.dumps(s, indent=1, ensure_ascii=False), encoding="utf-8")
     code, out = fof_cli("order", "3rd PLT HQ", "Jeep", "4.2.1i")
     assert code == 2 and "nobody on board" in out
     code, out = fof_cli("order", "3rd PLT HQ", "3/AT", "4.2.2h", "--what=jeep")
     assert code == 0, out
-    assert saved_state()["einheiten"]["3/AT"]["an_bord"] == "Jeep"
+    assert saved_state()["units"]["3/AT"]["on_board"] == "Jeep"
     code, out = fof_cli("order", "3rd PLT HQ", "Jeep", "4.2.1i")
     assert code == 0, out
-    assert rules.ACTIVATED in saved_state()["einheiten"]["Jeep"]["status"]
+    assert rules.ACTIVATED in saved_state()["units"]["Jeep"]["status"]

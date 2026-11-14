@@ -18,7 +18,7 @@ It is the working contract that made the setup reliable over several hundred gam
 The AI does not see the board. Everything goes through text:
 1. The player announces each move in chat, in short form ("Move 2/2 44", "Cff illum arty 35", "E", "M", "4").
 2. The AI runs the tool in a shell (`python3 tool/fof.py ...`). The tool holds the full state
-   (units, cards, markers, VOF/PDF, Commands, turn, phase) in `<game>/spielstand.json` and refuses anything illegal
+   (units, cards, markers, VOF/PDF, Commands, turn, phase) in `<game>/game_state.json` and refuses anything illegal
    with `VIOLATION: ...` before saving.
 3. `fof.py status` prints a complete briefing of the board; it is also written to `<game>/BRIEFING.md`.
 4. Photos of the board or of counters: the AI transcribes the values once into the project notes (see 7), then uses
@@ -57,7 +57,7 @@ VOF, PDF, Crossfire and Activity Level are derived by the tool from the units' f
   `M` = not drawn. Several draws are answered in the order the AI listed them.
 - A bare number is a value the player read off the card (random number, helmet number, small number).
 - `:NN` is the **number of the Action card**. The AI looks up the value itself in the player's action card archive
-  (`data/karten.json`, transcribed by the player; field `zufall` holds the R# columns "2".."12").
+  (`data/action_cards.json`, transcribed by the player; field `random` holds the R# columns "2".."12").
 - Always name the random number column when asking: "draw a card, R10" (or R8, R5, R2 ...).
 - Combat Effects: ask **card by card**, and on each card only one group of units with the same NCM.
 - When a unit moves onto a card that already has a cover marker, ask "under cover or open?" unless the player said it.

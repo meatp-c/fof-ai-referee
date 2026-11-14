@@ -25,30 +25,30 @@ def test_direction(board):
 def test_los_blocked_by_higher_card_between(board):
     ok, _ = geometry.los(board, "11", "13")
     assert ok
-    board["karten"]["12"]["elevation"] = 2
+    board["cards"]["12"]["elevation"] = 2
     ok, reason = geometry.los(board, "11", "13")
     assert not ok and "5.2.2" in reason
 
 
 def test_higher_observer_sees_over_lower_card(board):
     """[RULE 5.2.2] dark edges block on the same level; a higher card sees over a lower one between, both ways."""
-    board["karten"]["12"]["raender"] = "gruen"
+    board["cards"]["12"]["edges"] = "green"
     ok, reason = geometry.los(board, "11", "13")
     assert not ok and "dark edges" in reason  # same level: the dark edges of 12 block
-    board["karten"]["11"]["elevation"] = 2
+    board["cards"]["11"]["elevation"] = 2
     assert geometry.los(board, "11", "13")[0]  # higher observer sees over 12
     assert geometry.los(board, "13", "11")[0]  # and is seen from 13 (reciprocal)
     assert geometry.los(board, "31", "33")[0]  # control: white edges on 32, same level
 
 
 def test_incoming_blocks_los_out_and_through_but_not_into(board):
-    board["karten"]["12"]["extern"].append({"typ": "Incoming", "wert": -3, "quelle": "test"})
+    board["cards"]["12"]["external"].append({"type": "Incoming", "value": -3, "source": "test"})
     assert not geometry.los(board, "12", "13")[0]  # out of the card
     assert not geometry.los(board, "11", "13")[0]  # through the card
     assert geometry.los(board, "11", "12")[0]  # into the card
 
 
 def test_limited_visibility_shortens_los_to_one_card(board):
-    board["sicht"] = "eingeschraenkt"
+    board["sight"] = "limited"
     assert geometry.los(board, "11", "12")[0]
     assert not geometry.los(board, "11", "13")[0]

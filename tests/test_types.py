@@ -12,7 +12,7 @@ ANNOTATED = ("state.py", "rules.py", "options.py", "comms.py")
 
 def test_annotated_modules_pass_mypy():
     root = pathlib.Path(__file__).resolve().parents[1]
-    pkg = next(p for p in (root / "werkzeuge" / "fof", root / "tool" / "fof") if p.is_dir())
+    pkg = root / "tool" / "fof"
     out, err, code = mypy_api.run(
         ["--ignore-missing-imports", "--follow-imports=silent", "--python-version", "3.10"]
         + [str(pkg / f) for f in ANNOTATED]

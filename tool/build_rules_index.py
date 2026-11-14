@@ -7,12 +7,12 @@ No rule text ships with this kit (copyright GMT Games). Run this once with the P
         [--clarifications "Clarifications May 2025.pdf"] [--extra "Normandy Mission Book.pdf" ...]
 
 Needs `pdftotext` (poppler-utils). It writes into data/:
-    regelbuch.txt                      rulebook in reading order (form feed = page break)
-    regelbuch_kompakt.txt              same without empty lines (fof.py quotes from this file)
-    regelindex.json                    {rule: {"titel", "seite", "zeile_txt", "zeile_kompakt"}}
-    clarifications_2025_05_kompakt.txt (optional) errata/clarifications, checked by `rule`
-    <name>_kompakt.txt                 (optional) any further PDF, included in `search`
-The German file names are kept because the engine reads them (see GLOSSARY.md).
+    rulebook.txt                       rulebook in reading order (form feed = page break)
+    rulebook_compact.txt               same without empty lines (fof.py quotes from this file)
+    rule_index.json                    {rule: {"title", "page", "line_txt", "line_compact"}}
+    clarifications_2025_05_compact.txt (optional) errata/clarifications, checked by `rule`
+    <name>_compact.txt                 (optional) any further PDF, included in `search`
+Files built by an earlier release under their German names are still read by fof.py.
 """
 
 import argparse
@@ -35,12 +35,12 @@ def compact(text):
     return "\n".join(l for l in text.split("\n") if l.strip())
 
 
-def build_index(txt, komp_lines):
+def build_index(txt, compact_lines):
     """Index rule headings like '6.4.2 Hit Effects' with page (form feeds) and line numbers."""
     pat = re.compile(r"^(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)\s+([A-Z][^\.]{2,80}?)\s*$")
     index, page, ln, toc_done = {}, 1, 0, False
     pos = {}
-    for i, l in enumerate(komp_lines, 1):
+    for i, l in enumerate(compact_lines, 1):
         pos.setdefault(l.strip(), i)
     for line in txt.split("\n"):
         ln += 1
@@ -55,10 +55,10 @@ def build_index(txt, komp_lines):
         m = pat.match(s)
         if m and m.group(1) not in index:
             index[m.group(1)] = {
-                "titel": m.group(2).strip(),
-                "seite": page,
-                "zeile_txt": ln,
-                "zeile_kompakt": pos.get(s),
+                "title": m.group(2).strip(),
+                "page": page,
+                "line_txt": ln,
+                "line_compact": pos.get(s),
             }
     return index
 
@@ -70,11 +70,11 @@ def main():
     ap.add_argument("--extra", nargs="*", default=[], help="further PDFs for `search` (mission books, player aids)")
     a = ap.parse_args()
     DATA.mkdir(exist_ok=True)
-    txt = pdf_to_text(a.rules, DATA / "regelbuch.txt")
-    komp = compact(txt)
-    (DATA / "regelbuch_kompakt.txt").write_text(komp, encoding="utf-8")
-    idx = build_index(txt, komp.split("\n"))
-    (DATA / "regelindex.json").write_text(json.dumps(idx, indent=1, ensure_ascii=False), encoding="utf-8")
+    txt = pdf_to_text(a.rules, DATA / "rulebook.txt")
+    compact_text = compact(txt)
+    (DATA / "rulebook_compact.txt").write_text(compact_text, encoding="utf-8")
+    idx = build_index(txt, compact_text.split("\n"))
+    (DATA / "rule_index.json").write_text(json.dumps(idx, indent=1, ensure_ascii=False), encoding="utf-8")
     print(len(idx), "rule headings indexed")
     if not idx:
         print(
@@ -82,12 +82,12 @@ def main():
         )
     if a.clarifications:
         t = pdf_to_text(a.clarifications, DATA / "clarifications.txt")
-        (DATA / "clarifications_2025_05_kompakt.txt").write_text(compact(t), encoding="utf-8")
+        (DATA / "clarifications_2025_05_compact.txt").write_text(compact(t), encoding="utf-8")
     for p in a.extra:
         p = pathlib.Path(p)
         name = re.sub(r"[^a-z0-9]+", "_", p.stem.lower()).strip("_")
         t = pdf_to_text(p, DATA / f"{name}.txt")
-        (DATA / f"{name}_kompakt.txt").write_text(compact(t), encoding="utf-8")
+        (DATA / f"{name}_compact.txt").write_text(compact(t), encoding="utf-8")
         print("added", name)
 
 

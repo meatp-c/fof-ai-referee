@@ -11,7 +11,7 @@ from fof import fire_support  # L556: split from commands
 def quiet(monkeypatch):
     from fof import briefing, state
 
-    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protokoll"].append({"text": text}))
+    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protocol"].append({"text": text}))
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
 
 
@@ -20,31 +20,31 @@ def test_attempt_plan_sets_turns_visibility_and_enemy_values(board):
     from fof import campaign
 
     s = board
-    s["kampagne"] = {"versuch": 1}
-    s["versuch_plan"] = {
+    s["campaign"] = {"attempt": 1}
+    s["attempt_plan"] = {
         "1": {
-            "max_zuege": 6,
-            "sicht": {"1-4": {"licht": 0}, "5": {"licht": 1}, "6": {"licht": 4}},
-            "feind_erfahrung": "Veteran",
-            "paket_munition": {"HMG": 6, "Mortar": 4},
+            "max_turns": 6,
+            "sight": {"1-4": {"light": 0}, "5": {"light": 1}, "6": {"light": 4}},
+            "enemy_experience": "Veteran",
+            "package_ammo": {"HMG": 6, "Mortar": 4},
         }
     }
-    s["einheiten"]["NKPA HMG 1"] = unit(
+    s["units"]["NKPA HMG 1"] = unit(
         "33",
-        side="Feind",
-        typ="Weapons Team",
-        typname="NKPA HMG",
+        side="Enemy",
+        type="Weapons Team",
+        type_name="NKPA HMG",
         tripod=True,
-        munition={"typ": "MG", "punkte": 2, "start": 2},
+        ammo={"type": "MG", "points": 2, "start": 2},
     )
     prot = []
     campaign.apply_attempt_plan(s, prot)
-    assert s["max_zuege"] == 6 and s["feind_erfahrung_versuch"] == "Veteran"
-    assert s["einheiten"]["NKPA HMG 1"]["munition"] == {"typ": "MG", "punkte": 6, "start": 6}
-    assert s["licht"] == 0 and s["sicht"] == "tag"
-    s["zug"] = 6
+    assert s["max_turns"] == 6 and s["enemy_experience_attempt"] == "Veteran"
+    assert s["units"]["NKPA HMG 1"]["ammo"] == {"type": "MG", "points": 6, "start": 6}
+    assert s["light"] == 0 and s["sight"] == "day"
+    s["turn"] = 6
     campaign.apply_turn_visibility(s, prot)
-    assert s["licht"] == 4 and s["sicht"] == "eingeschraenkt"
+    assert s["light"] == 4 and s["sight"] == "limited"
     assert any("Visibility turn 6" in p for p in prot)
 
 
@@ -54,12 +54,12 @@ def test_face_down_cards_block_los_and_are_revealed_from_units(board):
 
     s = board
     for k in ("21", "22", "23", "31", "32", "33"):
-        s["karten"][k].update(verdeckt=True, raender="gruen", terrain="Face down (FD)")
-    s["zug"], s["phase"], s["aufstellung_fertig"] = 2, "3.3.1b", True
-    s["einheiten"]["1/1"] = unit("11")
+        s["cards"][k].update(face_down=True, edges="green", terrain="Face down (FD)")
+    s["turn"], s["phase"], s["setup_done"] = 2, "3.3.1b", True
+    s["units"]["1/1"] = unit("11")
     out = geometry.reveal_candidates(s)
     assert set(out) == {"21", "22"}  # adjacent cards always; row 3 hidden behind the dark face-down row 2
-    s["karten"]["21"].update(verdeckt=False, raender="weiss")
+    s["cards"]["21"].update(face_down=False, edges="white")
     assert "31" in geometry.reveal_candidates(s)
 
 
@@ -67,9 +67,9 @@ def test_reveal_lock_stops_orders(board):
     from fof import contact, rules
 
     s = board
-    s["karten"]["21"].update(verdeckt=True)
-    s["zug"], s["phase"], s["aufstellung_fertig"] = 2, "3.3.1b", True
-    s["einheiten"]["1/1"] = unit("11")
+    s["cards"]["21"].update(face_down=True)
+    s["turn"], s["phase"], s["setup_done"] = 2, "3.3.1b", True
+    s["units"]["1/1"] = unit("11")
     with pytest.raises(rules.Violation, match="reveal the face-down cards"):
         contact.mine_lock(s)
 
@@ -79,13 +79,13 @@ def test_enemy_without_prisoners_converts_captured_us_teams(board, quiet):
     from fof import phase
 
     s = board
-    s["gefangene_nehmen"] = {"US": True, "Feind": False}
-    s["einheiten"]["Paralyzed Team 1"] = unit("22", typ="Paralyzed Team", steps=1, vof=None)
-    s["einheiten"]["NKPA Squad 1"] = unit("22", side="Feind")
+    s["take_prisoners"] = {"US": True, "Enemy": False}
+    s["units"]["Paralyzed Team 1"] = unit("22", type="Paralyzed Team", steps=1, vof=None)
+    s["units"]["NKPA Squad 1"] = unit("22", side="Enemy")
     prot = []
     phase.check_capture(s, prot)
-    assert "Paralyzed Team 1" not in s["einheiten"]
-    assert s["karten"]["22"].get("casualties") == 1
+    assert "Paralyzed Team 1" not in s["units"]
+    assert s["cards"]["22"].get("casualties") == 1
     assert any("no prisoners" in p for p in prot)
 
 
@@ -94,13 +94,13 @@ def test_human_wave_is_never_pinned_and_hits_are_casualties(board, quiet):
     from fof import combat, rules
 
     s = board
-    s["einheiten"]["NKPA Squad 1"] = unit("33", side="Feind", human_wave=True, letzter_step="Fire Team")
+    s["units"]["NKPA Squad 1"] = unit("33", side="Enemy", human_wave=True, last_step="Fire Team")
     combat.cmd_hit(s, ["NKPA Squad 1", "PIN"])
-    assert rules.PINNED not in s["einheiten"]["NKPA Squad 1"]["status"]
+    assert rules.PINNED not in s["units"]["NKPA Squad 1"]["status"]
     combat.cmd_hit(s, ["NKPA Squad 1", "HIT", "PL"])
-    assert s["karten"]["33"]["casualties_feind"] == 2  # "PL" read as "CC"
+    assert s["cards"]["33"]["casualties_enemy"] == 2  # "PL" read as "CC"
     # the last step becomes a Fire Team that keeps the Human Wave hit rule and is not Pinned
-    ft = [e for e in s["einheiten"].values() if e.get("typ") == "Fire Team"]
+    ft = [e for e in s["units"].values() if e.get("type") == "Fire Team"]
     assert len(ft) == 1 and ft[0].get("human_wave") and rules.PINNED not in ft[0]["status"]
 
 
@@ -109,18 +109,18 @@ def test_heat_casualties_open_a_draw_for_newly_exposed_units(board):
     from fof import commands, state
 
     s = board
-    s["hitze"] = {"bis_zug": 2}
-    s["einheiten"]["1/1"] = unit("11")
-    commands.mark(s["einheiten"]["1/1"], "Exposed")
+    s["heat"] = {"until_turn": 2}
+    s["units"]["1/1"] = unit("11")
+    commands.mark(s["units"]["1/1"], "Exposed")
     state.heat_check(s)
-    assert s["hitze_offen"] == ["1/1"]
-    s["wetter"] = 2
-    s["hitze_offen"] = []
-    commands.mark(s["einheiten"]["1/1"], "Pinned")
-    s["einheiten"]["1/1"]["status"].remove("Exposed")
-    commands.mark(s["einheiten"]["1/1"], "Exposed")
+    assert s["heat_open"] == ["1/1"]
+    s["weather"] = 2
+    s["heat_open"] = []
+    commands.mark(s["units"]["1/1"], "Pinned")
+    s["units"]["1/1"]["status"].remove("Exposed")
+    commands.mark(s["units"]["1/1"], "Exposed")
     state.heat_check(s)
-    assert s["hitze_offen"] == []  # ignored during Rain
+    assert s["heat_open"] == []  # ignored during Rain
 
 
 # ---- L484 Naktong counter attack cards
@@ -129,38 +129,38 @@ def test_naktong_counter_attack_marks_the_right_us_cards(board, quiet):
 
     s = board
     for c in (1, 2, 3):
-        s["karten"][f"4{c}"] = card(4, c)
-    s["sonderregeln"] = {"gegenangriff": {"modus": "naktong", "zuege": 3}}
-    s["feind_taktik"] = "Hasty"
-    s["karten"]["43"]["pc"] = "B"
+        s["cards"][f"4{c}"] = card(4, c)
+    s["special_rules"] = {"counterattack": {"mode": "naktong", "turns": 3}}
+    s["enemy_tactic"] = "Hasty"
+    s["cards"]["43"]["pc"] = "B"
     for k in ("11", "12", "13", "21", "22", "23", "31", "32"):
-        s["einheiten"][f"US {k}"] = unit(k)
+        s["units"][f"US {k}"] = unit(k)
     prot = []
     events.enemy_event(s, {"id": "counter_attack", "text": "Counter Attack"}, {}, prot)
-    marked = {k for k, c in s["karten"].items() if c.get("pc") == "A"}
+    marked = {k for k, c in s["cards"].items() if c.get("pc") == "A"}
     # 32 next to the PC on 43 and to the empty 33/41/42; 31 next to empty 41/42; 22/23 next to the empty 33; 11-13 and 21 are inside
     assert marked == {"22", "23", "31", "32"}
-    assert s["feind_taktik"] == "Offensive Assault"
+    assert s["enemy_tactic"] == "Offensive Assault"
 
 
 # ---- L488 enemy tank priorities
 def _tank_board(board):
     s = board
     s["phase"] = "3.6"
-    s["sonderregeln"] = {"panzer_prioritaeten": ["..."]}
-    for k, c in s["karten"].items():
-        c.update(cc=0, fahrzeuge=True)
-    s["karten"]["13"]["cc"] = 2
-    s["einheiten"]["T-34/85 1"] = unit(
+    s["special_rules"] = {"tank_priorities": ["..."]}
+    for k, c in s["cards"].items():
+        c.update(cc=0, vehicles=True)
+    s["cards"]["13"]["cc"] = 2
+    s["units"]["T-34/85 1"] = unit(
         "31",
-        side="Feind",
-        typ="Vehicle",
-        fahrzeug="T-34/85",
+        side="Enemy",
+        type="Vehicle",
+        vehicle="T-34/85",
         vof="H",
         rng="V",
         steps=2,
         status=["Activated"],
-        munition={"typ": "Tank", "punkte": 4, "start": 4},
+        ammo={"type": "Tank", "points": 4, "start": 4},
     )
     return s
 
@@ -169,31 +169,31 @@ def test_tank_moves_to_the_closest_better_card(board, quiet):
     from fof import vehicles
 
     s = _tank_board(board)
-    s["karten"]["22"]["cc"] = 1
+    s["cards"]["22"]["cc"] = 1
     st = vehicles.at36(s)
     prot = vehicles.enemy_tank_action(s, st, "T-34/85 1", {})
     assert "priority 3" in prot[0] and "22" in prot[0]
-    assert [x["karte"] for x in st["aktion"]["plan"] if x["art"] == "tankmove"] == ["22"]
+    assert [x["card"] for x in st["action"]["plan"] if x["kind"] == "tankmove"] == ["22"]
 
 
 def test_tank_without_better_card_stays(board, quiet):
     from fof import vehicles
 
     s = _tank_board(board)
-    s["karten"]["13"]["cc"] = 0
+    s["cards"]["13"]["cc"] = 0
     st = vehicles.at36(s)
     prot = vehicles.enemy_tank_action(s, st, "T-34/85 1", {})
     assert "stays" in prot[-1]
-    assert "Moved/Fired" in s["einheiten"]["T-34/85 1"]["status"]
+    assert "Moved/Fired" in s["units"]["T-34/85 1"]["status"]
 
 
 def test_tank_concentrates_fire_on_a_bazooka_under_its_vof(board, quiet):
     from fof import rules, vehicles
 
     s = _tank_board(board)
-    s["einheiten"]["T-34/85 1"]["ziel"] = "21"
-    s["einheiten"]["2/W/1"] = unit(
-        "21", typ="Weapons Team", steps=1, at_waffe="M20 Bazooka", munition={"typ": "RKT", "punkte": 3, "start": 3}
+    s["units"]["T-34/85 1"]["target"] = "21"
+    s["units"]["2/W/1"] = unit(
+        "21", type="Weapons Team", steps=1, at_weapon="M20 Bazooka", ammo={"type": "RKT", "points": 3, "start": 3}
     )
     st = vehicles.at36(s)
     with pytest.raises(rules.Violation, match="priority 2"):
@@ -204,10 +204,10 @@ def test_out_of_ammo_tank_leaves(board, quiet):
     from fof import combat
 
     s = _tank_board(board)
-    e = s["einheiten"]["T-34/85 1"]
+    e = s["units"]["T-34/85 1"]
     prot = []
     combat.out_of_ammo(s, "T-34/85 1", e, prot)
-    assert "T-34/85 1" not in s["einheiten"]
+    assert "T-34/85 1" not in s["units"]
 
 
 def test_korea_chart_lines_and_rcl_exposed():
@@ -215,7 +215,7 @@ def test_korea_chart_lines_and_rcl_exposed():
 
     assert vehicles.CHART["T-34/85"][0] == (-5, -3, -1, 0) and vehicles.CHART["T-34/85"][4] == 3
     assert "57mm RCL" in vehicles.AMBUSH_WEAPONS
-    rcl = unit("11", typ="Weapons Team", vof="H", at_waffe="75mm RCL", status=["Exposed"])
+    rcl = unit("11", type="Weapons Team", vof="H", at_weapon="75mm RCL", status=["Exposed"])
     assert not fire.can_fire(rcl)
 
 
@@ -224,9 +224,9 @@ def _rg_board(board, limit=None):
     s = board
     s["assets_pool"] = {"Rifle Grenade": 6}
     for n in ("1/1", "2/1", "1/2"):
-        s["einheiten"][n] = unit("11", platoon=n[-1])
+        s["units"][n] = unit("11", platoon=n[-1])
     if limit:
-        s["rifle_grenade_je_platoon"] = limit
+        s["rifle_grenades_per_platoon"] = limit
     return s
 
 
@@ -234,9 +234,9 @@ def test_rifle_grenade_normandy_one_per_platoon(board):
     from fof import rules, setup
 
     s = _rg_board(board)
-    setup.setup_assets(s, "1/1", s["einheiten"]["1/1"], {"--asset": "Rifle Grenade"}, [])
+    setup.setup_assets(s, "1/1", s["units"]["1/1"], {"--asset": "Rifle Grenade"}, [])
     with pytest.raises(rules.Violation, match="at most 1 per platoon"):
-        setup.setup_assets(s, "1/1", s["einheiten"]["1/1"], {"--asset": "Rifle Grenade"}, [])
+        setup.setup_assets(s, "1/1", s["units"]["1/1"], {"--asset": "Rifle Grenade"}, [])
 
 
 def test_rifle_grenade_naktong_two_shot_counter_on_one_unit(board):
@@ -244,14 +244,14 @@ def test_rifle_grenade_naktong_two_shot_counter_on_one_unit(board):
 
     s = _rg_board(board, limit=2)
     prot = []
-    setup.setup_assets(s, "1/1", s["einheiten"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
+    setup.setup_assets(s, "1/1", s["units"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
     with pytest.raises(rules.Violation, match="stays with one unit"):
-        setup.setup_assets(s, "2/1", s["einheiten"]["2/1"], {"--asset": "Rifle Grenade"}, prot)
-    setup.setup_assets(s, "1/1", s["einheiten"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
-    assert s["einheiten"]["1/1"]["assets"] == ["Rifle Grenade", "Rifle Grenade"]
+        setup.setup_assets(s, "2/1", s["units"]["2/1"], {"--asset": "Rifle Grenade"}, prot)
+    setup.setup_assets(s, "1/1", s["units"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
+    assert s["units"]["1/1"]["assets"] == ["Rifle Grenade", "Rifle Grenade"]
     with pytest.raises(rules.Violation, match="at most 2 per platoon"):
-        setup.setup_assets(s, "1/1", s["einheiten"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
-    setup.setup_assets(s, "1/2", s["einheiten"]["1/2"], {"--asset": "Rifle Grenade"}, prot)
+        setup.setup_assets(s, "1/1", s["units"]["1/1"], {"--asset": "Rifle Grenade"}, prot)
+    setup.setup_assets(s, "1/2", s["units"]["1/2"], {"--asset": "Rifle Grenade"}, prot)
     assert s["assets_pool"]["Rifle Grenade"] == 3
 
 
@@ -260,15 +260,15 @@ def test_free_radio_from_pool_goes_to_one_unit_once(board):
     from fof import rules, setup
 
     s = board
-    s["funk_frei"] = [{"typ": "SCR536", "netz": "CO TAC"}]
-    s["einheiten"]["CO XO"] = unit("12", typ="HQ", funk=[])
-    s["einheiten"]["CO 1 Sgt"] = unit("12", typ="HQ", funk=[])
+    s["radio_free"] = [{"type": "SCR536", "net": "CO TAC"}]
+    s["units"]["CO XO"] = unit("12", type="HQ", radio=[])
+    s["units"]["CO 1 Sgt"] = unit("12", type="HQ", radio=[])
     prot = []
-    setup.setup_device(s, "CO XO", s["einheiten"]["CO XO"], {"--geraet": "SCR536"}, prot)
-    assert s["einheiten"]["CO XO"]["funk"] == [{"typ": "SCR536", "netz": "CO TAC"}]
-    assert s["funk_frei"] == []
+    setup.setup_device(s, "CO XO", s["units"]["CO XO"], {"--device": "SCR536"}, prot)
+    assert s["units"]["CO XO"]["radio"] == [{"type": "SCR536", "net": "CO TAC"}]
+    assert s["radio_free"] == []
     with pytest.raises(rules.Violation):
-        setup.setup_device(s, "CO 1 Sgt", s["einheiten"]["CO 1 Sgt"], {"--geraet": "SCR536"}, prot)
+        setup.setup_device(s, "CO 1 Sgt", s["units"]["CO 1 Sgt"], {"--device": "SCR536"}, prot)
 
 
 def test_free_radio_follows_phone_choice(board):
@@ -276,10 +276,10 @@ def test_free_radio_follows_phone_choice(board):
 
     s = board
     s["co_hq"] = "CO HQ"
-    s["funk_frei"] = [{"typ": "SCR536", "netz": "CO TAC"}]
-    s["einheiten"]["CO HQ"] = unit("12", typ="HQ", funk=[{"typ": "SCR536", "netz": "CO TAC"}])
-    setup.setup_net(s, "CO HQ", s["einheiten"]["CO HQ"], {"--netz": "telefon"}, [])
-    assert s["funk_frei"] == [{"typ": "EE8", "netz": "CO TAC"}]
+    s["radio_free"] = [{"type": "SCR536", "net": "CO TAC"}]
+    s["units"]["CO HQ"] = unit("12", type="HQ", radio=[{"type": "SCR536", "net": "CO TAC"}])
+    setup.setup_net(s, "CO HQ", s["units"]["CO HQ"], {"--net": "phone"}, [])
+    assert s["radio_free"] == [{"type": "EE8", "net": "CO TAC"}]
 
 
 # ---- L493 a face-down card seen only over another face-down card waits for it (5.2.2)
@@ -288,17 +288,17 @@ def test_reveal_waits_for_nearer_face_down_card(board):
 
     s = board
     for k in ("22", "23"):
-        s["karten"][k].update(verdeckt=True, raender="gruen", terrain="Face down (FD)", elevation=1)
-    s["karten"]["21"].update(elevation=2, raender="weiss")
-    s["zug"], s["phase"], s["aufstellung_fertig"] = 2, "3.3.1b", True
-    s["einheiten"]["1/1"] = unit("21")
+        s["cards"][k].update(face_down=True, edges="green", terrain="Face down (FD)", elevation=1)
+    s["cards"]["21"].update(elevation=2, edges="white")
+    s["turn"], s["phase"], s["setup_done"] = 2, "3.3.1b", True
+    s["units"]["1/1"] = unit("21")
     cand = geometry.reveal_candidates(s)
     assert {"22", "23"} <= set(cand)
     assert geometry.reveal_dependencies(s, cand) == {"23": ["22"]}
     lines = briefing.reveal_lines(s)
     assert any(z.startswith("Reveal face-down card 22") for z in lines)
     assert any(z.startswith("WAIT with face-down card 23") for z in lines)
-    s["karten"]["22"].update(verdeckt=False, elevation=2, raender="gruen", terrain="Open on 1 Hill")
+    s["cards"]["22"].update(face_down=False, elevation=2, edges="green", terrain="Open on 1 Hill")
     assert "23" not in geometry.reveal_candidates(s)  # 2-2-1: the Hill closes the line
 
 
@@ -307,14 +307,14 @@ def test_building_table_reference_follows_campaign_table(board):
     from fof import contact
 
     s = board
-    s["karten"]["22"]["gebaeude_tabelle"] = "Village"
-    s["gebaeude_tabelle"] = {
-        "_quelle": "CSR 6 S.14, R# Spalte 5",
+    s["cards"]["22"]["building_table"] = "Village"
+    s["building_table"] = {
+        "_source": "CSR 6 S.14, R# Spalte 5",
         "Village": {"1-2": "Strong Building", "3-4": "Light Building", "5": "Basic Cover"},
     }
     assert contact.building_table_ref(s, "22") == (5, "CSR 6 p.14")
-    s["gebaeude_tabelle"] = {
-        "_quelle": "CSR 8 S.15, R# Spalte 8",
+    s["building_table"] = {
+        "_source": "CSR 8 S.15, R# Spalte 8",
         "Village": {"1-3": "Strong Building", "7-8": "Basic Cover"},
     }
     assert contact.building_table_ref(s, "22") == (8, "CSR 8 p.15")
@@ -327,14 +327,14 @@ def test_sniper_vof_marker_is_announced(board):
     from fof import rules, state
 
     s = board
-    s["einheiten"]["Sniper 1"] = unit("33", side="Feind", vof="S!", typ="Sniper", steps=1)
-    s["einheiten"]["AT"] = unit("13", typ="Assault Team", steps=1)
+    s["units"]["Sniper 1"] = unit("33", side="Enemy", vof="S!", type="Sniper", steps=1)
+    s["units"]["AT"] = unit("13", type="Assault Team", steps=1)
     old = copy.deepcopy(s)
-    s["einheiten"]["Sniper 1"]["ziel"] = "13"
+    s["units"]["Sniper 1"]["target"] = "13"
     assert state.sniper_vof_cards(s) == {"13": ["Sniper 1"]}
     assert any("place the Sniper VOF marker" in z for z in state.marker_changes(old, s))
     pinned = copy.deepcopy(s)
-    pinned["einheiten"]["Sniper 1"]["status"].append(rules.PINNED)
+    pinned["units"]["Sniper 1"]["status"].append(rules.PINNED)
     assert any("remove the Sniper VOF marker" in z for z in state.marker_changes(s, pinned))
 
 
@@ -345,14 +345,14 @@ def test_detached_team_not_exposed(board):
     from fof import commands, rules
 
     s = board
-    s["einheiten"]["1/1"] = unit("12", status=[rules.EXPOSED], platoon="1")
-    s["einheiten"]["2/1"] = unit("12", platoon="1")
+    s["units"]["1/1"] = unit("12", status=[rules.EXPOSED], platoon="1")
+    s["units"]["2/1"] = unit("12", platoon="1")
     for n in ("1/1", "2/1"):
-        ctx = SimpleNamespace(z=s["einheiten"][n], o={}, target_name=n, prot=[])
+        ctx = SimpleNamespace(recipient=s["units"][n], o={}, target_name=n, prot=[])
         commands._order_detach_team(s, ctx)
-    teams = [e for e in s["einheiten"].values() if e["typ"] == "Assault Team"]
+    teams = [e for e in s["units"].values() if e["type"] == "Assault Team"]
     assert [rules.EXPOSED in e["status"] for e in teams] == [False, False]
-    assert rules.EXPOSED in s["einheiten"]["1/1"]["status"]
+    assert rules.EXPOSED in s["units"]["1/1"]["status"]
 
 
 # ---- L497 package infiltration attempt: 2 cards adjusted for Experience (Naktong CSR 3, Normandy CSR 6)
@@ -365,29 +365,29 @@ def test_package_infiltration_cards_follow_experience(b342):
     from fof import contact, rules
 
     s = b342
-    s["kampagne"] = {}
-    s["karten"]["11"]["pc"] = "A"
-    s["einheiten"]["1/1"] = unit("11")
+    s["campaign"] = {}
+    s["cards"]["11"]["pc"] = "A"
+    s["units"]["1/1"] = unit("11")
     pk = {
         "name": "Infiltrators",
         "spotted": True,
         "place_vof": True,
-        "infiltration_regel": "Naktong CSR 3 p.13",
-        "einheiten": [
+        "infiltration_rule": "Naktong CSR 3 p.13",
+        "units": [
             {
-                "einheit": "NKPA Squad",
-                "typ": "Squad",
+                "unit": "NKPA Squad",
+                "type": "Squad",
                 "vof_rating": "S",
-                "reichweite": "L",
+                "range": "L",
                 "steps": 3,
-                "platz": "max",
+                "place": "max",
                 "infiltration": True,
-                "erfahrung": "Green",
+                "experience": "Green",
             }
         ],
     }
     with pytest.raises(rules.Violation, match=r"1 Action cards \(2, experience Green\).*Naktong CSR 3 p.13"):
-        contact.pc_contact_v4(s, "11", "A1", copy.deepcopy(pk), {"--richtung": "Front"})
+        contact.pc_contact_campaign(s, "11", "A1", copy.deepcopy(pk), {"--direction": "Front"})
 
 
 # ---- L498 Limited Visibility at the start of a turn: fire beyond the adjacent card lapses (9.1)
@@ -395,13 +395,13 @@ def test_limited_visibility_ends_fire_beyond_adjacent(board):
     from fof import fire
 
     s = board
-    s["einheiten"]["1/1"] = unit("11", ziel="31")
-    s["einheiten"]["E"] = unit("31", side="Feind")
-    assert fire.is_firing(s["einheiten"]["1/1"])
-    s["sicht"] = "eingeschraenkt"
+    s["units"]["1/1"] = unit("11", target="31")
+    s["units"]["E"] = unit("31", side="Enemy")
+    assert fire.is_firing(s["units"]["1/1"])
+    s["sight"] = "limited"
     prot = []
     fire.cease_fire_on_los_loss(s, prot)
-    assert s["einheiten"]["1/1"]["ziel"] is None and prot
+    assert s["units"]["1/1"]["target"] is None and prot
 
 
 def test_end_turn_rechecks_los_after_new_visibility(board, quiet):
@@ -409,12 +409,12 @@ def test_end_turn_rechecks_los_after_new_visibility(board, quiet):
     from fof import phase
 
     s = board
-    s.update(phase="3.8", mission="x", max_zuege=6, kampagne={})
-    s["versuch_plan"] = {"1": {"sicht": {"1": {"licht": 0, "wetter": 0}, "2-6": {"licht": 3, "wetter": 0}}}}
-    s["einheiten"]["1/1"] = unit("11", ziel="31")
-    s["einheiten"]["E"] = unit("31", side="Feind")
+    s.update(phase="3.8", mission="x", max_turns=6, campaign={})
+    s["attempt_plan"] = {"1": {"sight": {"1": {"light": 0, "weather": 0}, "2-6": {"light": 3, "weather": 0}}}}
+    s["units"]["1/1"] = unit("11", target="31")
+    s["units"]["E"] = unit("31", side="Enemy")
     phase.cmd_end_turn(s, [])
-    assert s["zug"] == 2 and s["sicht"] == "eingeschraenkt" and s["einheiten"]["1/1"]["ziel"] is None
+    assert s["turn"] == 2 and s["sight"] == "limited" and s["units"]["1/1"]["target"] is None
 
 
 # ---- L499 Heat Casualty on a 2-step squad: the last step becomes a generic Fire Team (6.4.3)
@@ -422,11 +422,11 @@ def test_heat_casualty_on_two_step_squad_leaves_fire_team(board, quiet):
     from fof import events
 
     s = board
-    s["einheiten"]["2/1"] = unit("12", steps=2, letzter_step="Fire Team")
-    s["hitze_offen"] = ["2/1"]
-    events.cmd_heat(s, ["2/1", "ja"])
-    assert "2/1" not in s["einheiten"]
-    ft = [e for e in s["einheiten"].values() if e["typ"] == "Fire Team" and e["karte"] == "12"]
+    s["units"]["2/1"] = unit("12", steps=2, last_step="Fire Team")
+    s["heat_open"] = ["2/1"]
+    events.cmd_heat(s, ["2/1", "yes"])
+    assert "2/1" not in s["units"]
+    ft = [e for e in s["units"].values() if e["type"] == "Fire Team" and e["card"] == "12"]
     assert ft
 
 
@@ -434,12 +434,12 @@ def test_heat_new_fire_team_opens_fire(board, quiet):
     from fof import events
 
     s = board
-    s["einheiten"]["2/1"] = unit("12", steps=2, letzter_step="Fire Team", rng="C")
-    s["einheiten"]["E"] = unit("22", side="Feind")
-    s["hitze_offen"] = ["2/1"]
-    events.cmd_heat(s, ["2/1", "ja"])
-    ft = [e for e in s["einheiten"].values() if e["typ"] == "Fire Team" and e["karte"] == "12"]
-    assert ft and ft[0]["ziel"] == "22"
+    s["units"]["2/1"] = unit("12", steps=2, last_step="Fire Team", rng="C")
+    s["units"]["E"] = unit("22", side="Enemy")
+    s["heat_open"] = ["2/1"]
+    events.cmd_heat(s, ["2/1", "yes"])
+    ft = [e for e in s["units"].values() if e["type"] == "Fire Team" and e["card"] == "12"]
+    assert ft and ft[0]["target"] == "22"
     assert "Pinned" not in ft[0]["status"]  # L500: no HIT, no Pinned
 
 
@@ -448,23 +448,23 @@ def test_heat_takes_r4_value(board, quiet):
     from fof import events
 
     s = board
-    s["einheiten"]["AT"] = unit("12")
-    s["hitze_offen"] = ["AT"]
+    s["units"]["AT"] = unit("12")
+    s["heat_open"] = ["AT"]
     events.cmd_heat(s, ["AT", "3"])
-    assert s["einheiten"]["AT"]["steps"] == 3 and "hitze_offen" not in s
-    s["hitze_offen"] = ["AT"]
+    assert s["units"]["AT"]["steps"] == 3 and "heat_open" not in s
+    s["heat_open"] = ["AT"]
     events.cmd_heat(s, ["AT", "1"])
-    assert s["einheiten"]["AT"]["steps"] == 2
+    assert s["units"]["AT"]["steps"] == 2
 
 
 # ---- L503 reattempt names the removal of saved Commands (3.9 step 11)
 def test_reattempt_names_saved_commands_removal():
     from fof import campaign
 
-    s = {"kommandos": {"CO XO": {"gespart": 4}}, "feuermissionen": {}, "assets_pool": {}}
+    s = {"commands": {"CO XO": {"saved": 4}}, "fire_missions": {}, "assets_pool": {}}
     prot = []
     campaign.reset_pools_and_events(s, prot)
-    assert s["kommandos"]["CO XO"]["gespart"] == 0
+    assert s["commands"]["CO XO"]["saved"] == 0
     assert any("step 11" in x for x in prot)
 
 
@@ -474,12 +474,12 @@ def test_setup_fire_update_only_after_a_placement(board, quiet):
     from fof import setup
 
     s = board
-    s.update(phase="3.1", mission="x", max_zuege=6, kampagne={}, reattempt_setup=True, assets_pool={"HC Smoke": 2})
-    s["einheiten"]["1/1"] = unit("11")
-    s["einheiten"]["E"] = unit("31", side="Feind")
+    s.update(phase="3.1", mission="x", max_turns=6, campaign={}, reattempt_setup=True, assets_pool={"HC Smoke": 2})
+    s["units"]["1/1"] = unit("11")
+    s["units"]["E"] = unit("31", side="Enemy")
     setup.cmd_setup(s, ["1/1", "--asset=HC Smoke"])
-    assert s["einheiten"]["1/1"]["assets"] == ["HC Smoke"]
-    assert s["einheiten"]["1/1"]["ziel"] is None and s["einheiten"]["E"]["ziel"] is None
+    assert s["units"]["1/1"]["assets"] == ["HC Smoke"]
+    assert s["units"]["1/1"]["target"] is None and s["units"]["E"]["target"] is None
 
 
 # ---- L505 3.9 step 8 again in 'reattempt done': a cover freed by a used-up LAT takes the enemy in the open
@@ -487,15 +487,15 @@ def test_enemy_into_cover_after_lat_used_up(board):
     from fof import campaign
 
     s = board
-    s["karten"]["22"]["cover"] = [{"id": "C1", "typ": "Foxholes", "wert": 1}]
-    s["einheiten"]["FT"] = unit("22", side="Feind", steps=1)
-    s["einheiten"]["AT"] = unit("22", steps=1, bereich="C1")
+    s["cards"]["22"]["cover"] = [{"id": "C1", "type": "Foxholes", "value": 1}]
+    s["units"]["FT"] = unit("22", side="Enemy", steps=1)
+    s["units"]["AT"] = unit("22", steps=1, area="C1")
     prot = []
     campaign.enemy_into_cover(s, prot)
-    assert s["einheiten"]["FT"]["bereich"] == "offen"  # the US team still holds the foxholes
-    del s["einheiten"]["AT"]  # used up in step 3
+    assert s["units"]["FT"]["area"] == "open"  # the US team still holds the foxholes
+    del s["units"]["AT"]  # used up in step 3
     campaign.enemy_into_cover(s, prot)
-    assert s["einheiten"]["FT"]["bereich"] == "C1" and "step 8" in prot[-1]
+    assert s["units"]["FT"]["area"] == "C1" and "step 8" in prot[-1]
 
 
 def test_reattempt_done_puts_enemies_into_free_cover(board, quiet):
@@ -503,13 +503,13 @@ def test_reattempt_done_puts_enemies_into_free_cover(board, quiet):
     from fof import campaign
 
     s = board
-    s.update(phase="3.1", mission="x", max_zuege=6, kampagne={"versuch": 2}, reattempt_setup=True)
-    s["karten"]["11"]["staging"] = True
-    s["karten"]["22"]["cover"] = [{"id": "C1", "typ": "Foxholes", "wert": 1}]
-    s["einheiten"]["1/1"] = unit("11")
-    s["einheiten"]["FT"] = unit("22", side="Feind", steps=1)
+    s.update(phase="3.1", mission="x", max_turns=6, campaign={"attempt": 2}, reattempt_setup=True)
+    s["cards"]["11"]["staging"] = True
+    s["cards"]["22"]["cover"] = [{"id": "C1", "type": "Foxholes", "value": 1}]
+    s["units"]["1/1"] = unit("11")
+    s["units"]["FT"] = unit("22", side="Enemy", steps=1)
     campaign.reattempt_done(s)
-    assert s["einheiten"]["FT"]["bereich"] == "C1" and not s.get("reattempt_setup")
+    assert s["units"]["FT"]["area"] == "C1" and not s.get("reattempt_setup")
 
 
 # ---- L506 secured cards of the reattempt setup: the snapshot at the end of the attempt (3.9 step 5, U42)
@@ -518,10 +518,10 @@ def test_secured_for_reattempt_uses_the_snapshot(board):
 
     s = board
     s["pc_start"] = {"22": "C", "23": "C"}
-    s["einheiten"]["AT"] = unit("22", steps=1)
+    s["units"]["AT"] = unit("22", steps=1)
     assert campaign.secured_for_reattempt(s, "22")  # no snapshot: momentary occupation
-    s["reattempt_gesichert"] = ["22"]
-    del s["einheiten"]["AT"]  # used up in step 3
+    s["reattempt_secured"] = ["22"]
+    del s["units"]["AT"]  # used up in step 3
     assert campaign.secured_for_reattempt(s, "22") and not campaign.is_secured(s, "22")
     assert not campaign.secured_for_reattempt(s, "23")  # empty at the end of the attempt
 
@@ -530,26 +530,26 @@ def test_secured_for_reattempt_uses_the_snapshot(board):
 def test_free_device_is_kept_in_the_setup_units():
     from fof import setup
 
-    e = {"typ": "Staff", "funk": []}
+    e = {"type": "Staff", "radio": []}
     s = {
-        "funk_frei": [{"typ": "SCR536", "netz": "CO TAC"}],
-        "einheiten": {"CO XO": e},
-        "aufbau_einheiten": {"CO XO": {"typ": "Staff", "funk": []}},
+        "radio_free": [{"type": "SCR536", "net": "CO TAC"}],
+        "units": {"CO XO": e},
+        "setup_units": {"CO XO": {"type": "Staff", "radio": []}},
     }
     prot = []
-    setup.setup_device(s, "CO XO", e, {"--geraet": "SCR536"}, prot)
-    assert s["aufbau_einheiten"]["CO XO"]["funk"] == [{"typ": "SCR536", "netz": "CO TAC"}]
-    assert s["funk_frei"] == []
+    setup.setup_device(s, "CO XO", e, {"--device": "SCR536"}, prot)
+    assert s["setup_units"]["CO XO"]["radio"] == [{"type": "SCR536", "net": "CO TAC"}]
+    assert s["radio_free"] == []
 
 
 # ---- L508 Heat Casualties end with the attempt (turn counter restarts)
 def test_heat_casualties_end_with_the_attempt():
     from fof import campaign
 
-    s = {"kommandos": {}, "feuermissionen": {}, "assets_pool": {}, "hitze": {"bis_zug": 6}}
+    s = {"commands": {}, "fire_missions": {}, "assets_pool": {}, "heat": {"until_turn": 6}}
     prot = []
     campaign.reset_pools_and_events(s, prot)
-    assert "hitze" not in s and any("Heat Casualties end" in x for x in prot)
+    assert "heat" not in s and any("Heat Casualties end" in x for x in prot)
 
 
 # ---- L509 a Move where an Infiltrate is possible is refused unless --plain=yes
@@ -557,14 +557,14 @@ def test_move_refused_when_infiltrate_possible(board, quiet):
     from fof import commands, fire, rules
 
     s = board
-    s["einheiten"]["2/2"] = unit("21")
-    e = s["einheiten"]["2/2"]
+    s["units"]["2/2"] = unit("21")
+    e = s["units"]["2/2"]
     assert not commands.infiltrate_possible(s, e, "22")
     orig = fire.vof_against
     fire.vof_against = lambda s_, k, side: ("S", 0) if k == "21" and side == "US" else None
     try:
         assert commands.infiltrate_possible(s, e, "22")
-        at = unit("21", typ="Assault Team", steps=1)
+        at = unit("21", type="Assault Team", steps=1)
         assert commands.infiltrate_possible(s, at, "22")  # Assault Teams may infiltrate (4.2.5)
         e["status"] = [rules.EXPOSED]
         assert not commands.infiltrate_possible(s, e, "22")
@@ -577,10 +577,10 @@ def test_grenade_vof_counts_as_under_fire(board):
     from fof import enemy
 
     s = board
-    s["einheiten"]["E"] = unit("31", side="Feind", grenade=[-4])
-    assert enemy.under_fire(s, s["einheiten"]["E"])
-    s["einheiten"]["E"].pop("grenade")
-    assert not enemy.under_fire(s, s["einheiten"]["E"])
+    s["units"]["E"] = unit("31", side="Enemy", grenade=[-4])
+    assert enemy.under_fire(s, s["units"]["E"])
+    s["units"]["E"].pop("grenade")
+    assert not enemy.under_fire(s, s["units"]["E"])
 
 
 # ---- L511 a Platoon Infiltrate/Move counts as the single action of every member (4.2)
@@ -590,26 +590,51 @@ def test_platoon_infiltrate_books_single_action(board, monkeypatch):
     from fof import commands
 
     s = _hq_board(board, monkeypatch)
-    s["einheiten"]["1/1"] = unit("22", platoon="1")
-    s["einheiten"]["2/1"] = unit("22", platoon="1")
-    s["einheiten"]["E"] = unit("33", side="Feind", ziel="22")
+    s["units"]["1/1"] = unit("22", platoon="1")
+    s["units"]["2/1"] = unit("22", platoon="1")
+    s["units"]["E"] = unit("33", side="Enemy", target="22")
     commands.cmd_order(
-        s, ["1st PLT HQ", "1st PLT HQ", "4.2.2d", "--target=12", "--success=1st PLT HQ:ja,1/1:ja,2/1:ja"]
+        s, ["1st PLT HQ", "1st PLT HQ", "4.2.2d", "--target=12", "--success=1st PLT HQ:yes,1/1:yes,2/1:yes"]
     )
     for n in ("1st PLT HQ", "1/1", "2/1"):
-        assert "4.2.2c" in s["impuls_aktionen"][n]
+        assert "4.2.2c" in s["impulse_actions"][n]
 
 
 # ---- L512 a 'PLT HQ' column of the Fire Support Available Table covers every PLT HQ (7.16.1)
 def test_plt_hq_column_makes_every_plt_hq_an_observer(board):
 
     s = board
-    s["cff_beobachter"] = {"Arty FO": 4, "CO HQ": 3, "PLT HQ": 2}
-    s["cff_tabelle"] = {"81mm HE": {"Arty FO": 3, "CO HQ": 3, "PLT HQ": 2}}
-    hmg = unit("21", typ="HQ", ebene="PLT")
+    s["cff_observers"] = {"Arty FO": 4, "CO HQ": 3, "PLT HQ": 2}
+    s["cff_table"] = {"81mm HE": {"Arty FO": 3, "CO HQ": 3, "PLT HQ": 2}}
+    hmg = unit("21", type="HQ", level="PLT")
     assert fire_support.cff_observer_key(s, "HMG PLT HQ", hmg) == "PLT HQ"
-    assert fire_support.cff_observer_key(s, "CO HQ", unit("21", typ="HQ", ebene="CO")) == "CO HQ"
+    assert fire_support.cff_observer_key(s, "CO HQ", unit("21", type="HQ", level="CO")) == "CO HQ"
     assert fire_support.cff_observer_key(s, "1/1", unit("21")) == "1/1"
-    s["cff_beobachter"].pop("PLT HQ")
-    s["cff_tabelle"]["81mm HE"].pop("PLT HQ")
+    s["cff_observers"].pop("PLT HQ")
+    s["cff_table"]["81mm HE"].pop("PLT HQ")
     assert fire_support.cff_observer_key(s, "HMG PLT HQ", hmg) == "HMG PLT HQ"
+
+
+def test_reattempt_clears_dropped_assets(board):
+    """L581: 3.9 step 6 also removes Assets dropped on a card (assets_ground); the pool is refilled."""
+    from fof import campaign
+
+    card_id = next(iter(board["cards"]))
+    board["cards"][card_id]["assets_ground"] = ["Rifle Grenade"]
+    campaign.reset_cards(board, [])
+    assert "assets_ground" not in board["cards"][card_id]
+
+
+def test_reattempt_enemy_into_deep_bunker_places_no_vof(board, quiet):
+    """L582: an enemy put into a Deep Bunker by 3.9 step 8 exerts no VOF (Naktong CSR 7)."""
+    from fof import campaign, fire
+
+    s = board
+    s["cards"]["22"]["cover"] = [
+        {"id": "C1", "type": "Deep Bunker", "value": 5, "field": True},
+        {"id": "C2", "type": "Basic Cover", "value": 1},
+    ]
+    s["units"]["FT"] = unit("22", side="Enemy", steps=1)
+    campaign.enemy_into_cover(s, [])
+    assert s["units"]["FT"]["area"] == "C1" and s["units"]["FT"]["deep_bunker"] == "C1"
+    assert not fire.can_fire(s["units"]["FT"])

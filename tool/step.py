@@ -2,7 +2,7 @@
 """One call per game step: probe in a scratch copy, book for real only if every command is legal, then git commit.
 
 Usage (commands on stdin, one fof command line per line; '#' lines are ignored):
-    python3 werkzeuge/zug.py [--probe] [--all] [--msg "commit text"] [--partie <folder>] <<'EOF'
+    python3 tool/step.py [--probe] [--all] [--msg "commit text"] [--game <folder>] <<'EOF'
     hq "1st PLT HQ"
     card ? 5
     order "1st PLT HQ" 2/1 4.2.2c --target=32 --success=yes
@@ -10,11 +10,13 @@ Usage (commands on stdin, one fof command line per line; '#' lines are ignored):
 
   --probe   only the scratch run, nothing is booked or committed
   --all     print every output line (default: all but the ALLOWED header lines)
-  --msg     commit message (default: "<partie> T<turn>: <first command>")
+  --msg     commit message (default: "<game> T<turn>: <first command>")
+  --game    game folder (default: the one named in .current_game)
 
 Exit code 0 booked (or probe ok), 2 a VIOLATION in the probe (nothing booked), 1 other error.
-L470: replaces the probe/book/commit/lock-cleanup sequence of three to four separate calls.
-L529: the verdict comes from fof.py's exit code (0 legal, 2 VIOLATION, anything else an error such as a traceback or
+replaces the probe/book/commit/lock-cleanup sequence of three to four separate calls. named step.py (until
+ it had a German name); the German option name and the file names of earlier releases are still accepted.
+the verdict comes from fof.py's exit code (0 legal, 2 VIOLATION, anything else an error such as a traceback or
 'No game state'), not from the word VIOLATION in the text: informational lines, help texts and notes may contain it.
 """
 
@@ -28,20 +30,23 @@ import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parent  # same root as fof.state.ROOT: the folder above the tool folder (werkzeuge/ or tool/)
+ROOT = HERE.parent  # same root as fof.state.ROOT: the folder above tool/
 FOF = HERE / "fof.py"
+sys.path.insert(0, str(HERE))
+from fof import migrate  # noqa: E402  (file names of earlier releases)
+
 ATTRIBUTION = os.environ.get("FOF_COMMIT_TRAILER", "")
 
 
 def parse_args(argv):
-    opts = {"probe": False, "all": False, "msg": None, "partie": None}
+    opts = {"probe": False, "all": False, "msg": None, "game": None}
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in ("--probe", "--all"):
             opts[a[2:]] = True
-        elif a in ("--msg", "--partie") and i + 1 < len(argv):
-            opts[a[2:]] = argv[i + 1]
+        elif migrate.OPTION_WORDS.get(a, a) in ("--msg", "--game") and i + 1 < len(argv):
+            opts[migrate.OPTION_WORDS.get(a, a)[2:]] = argv[i + 1]
             i += 1
         else:
             raise SystemExit(f"unknown argument {a}")
@@ -60,7 +65,10 @@ def read_commands(text):
 
 def run(cmd, game_dir):
     """Run one fof command against game_dir; returns (exit code, output)."""
-    env = dict(os.environ, FOF_PARTIE=str(game_dir), PYTHONUTF8="1")
+    env = dict(os.environ, FOF_GAME=str(game_dir), PYTHONUTF8="1")
+    # drop the variable name of earlier releases, never FOF_GAME itself (without it the probe would run
+    # against the real game from .current_game and every step would be booked twice)
+    env.pop(migrate.ENV["FOF_GAME"], None)
     p = subprocess.run(
         [sys.executable, str(FOF), *cmd], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8"
     )
@@ -68,7 +76,7 @@ def run(cmd, game_dir):
 
 
 def verdict(rc, out):
-    """L529: 'ok', 'violation' (exit 2, cli.main) or 'error' (any other exit code, or a traceback in the output)."""
+    """'ok', 'violation' (exit 2, cli.main) or 'error' (any other exit code, or a traceback in the output)."""
     if rc == 2:
         return "violation"
     if rc != 0 or "Traceback (most recent call last)" in out:
@@ -98,10 +106,12 @@ def clear_locks():
                 pass
 
 
-def commit(partie, msg):
+def commit(game, msg):
     clear_locks()
-    paths = [partie, "data", "normandy", HERE.name, "tests", "export_en"]
-    git("add", "-A", *[p for p in paths if (ROOT / p).exists()])
+    paths = [p for p in (game, "data", "normandy", HERE.name, "tests", "export_en") if (ROOT / p).exists()]
+    if not git("--no-optional-locks", "status", "--porcelain", "--", *paths).stdout.strip():
+        return "git: nothing to commit"  # a step that changed nothing leaves no lock file behind
+    git("add", "-A", *paths)
     body = msg + (f"\n\n{ATTRIBUTION}" if ATTRIBUTION else "")
     r = git("commit", "-q", "-m", body)
     clear_locks()
@@ -113,8 +123,8 @@ def commit(partie, msg):
 
 def turn_of(game_dir):
     try:
-        s = json.loads((game_dir / "spielstand.json").read_text(encoding="utf-8"))
-        return s.get("zug")
+        s = json.loads((game_dir / "game_state.json").read_text(encoding="utf-8"))
+        return migrate.state(s).get("turn")  # a game not yet saved since still has German keys
     except (OSError, ValueError):
         return None
 
@@ -124,15 +134,18 @@ def main():
     cmds = read_commands(sys.stdin.read())
     if not cmds:
         raise SystemExit("no commands on stdin")
-    partie = opts["partie"] or (ROOT / ".aktuelle_partie").read_text(encoding="utf-8").strip()
-    real = ROOT / partie
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="fofzug_"))
+    game = opts["game"] or migrate.path(ROOT, ".current_game").read_text(encoding="utf-8").strip()
+    real = ROOT / game
+    migrate.adopt(real)  # game_state.json and history/ instead of the names of an earlier release
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="fofstep_"))
     try:
-        probe = scratch / pathlib.Path(partie).name  # L529: an absolute --partie must not resolve to the real folder
-        # L474: undo needs the snapshots, so the probe copies verlauf only then
-        needs_history = any(c and c[0] in ("undo", "zurueck") for c in cmds)
-        shutil.copytree(real, probe, ignore=None if needs_history else shutil.ignore_patterns("verlauf"))
-        (probe / "verlauf").mkdir(exist_ok=True)
+        probe = scratch / pathlib.Path(game).name  # an absolute --game must not resolve to the real folder
+        # undo needs the snapshots, so the probe copies history only then
+        needs_history = any(
+            c and c[0] in ("undo", *[g for g, e in migrate.COMMANDS_DE.items() if e == "undo"]) for c in cmds
+        )
+        shutil.copytree(real, probe, ignore=None if needs_history else shutil.ignore_patterns("history"))
+        (probe / "history").mkdir(exist_ok=True)
         for c in cmds:
             rc, out = run(c, probe)
             v = verdict(rc, out)
@@ -157,8 +170,8 @@ def main():
                 f"STOPPED: {'violation' if rc == 2 else f'error exit {rc}'} in the real run of command {i + 1}; {done}"
             )
             sys.exit(1)
-    msg = opts["msg"] or f"{partie} T{turn_of(real)}: {' '.join(cmds[0])}"
-    print(commit(partie, msg))
+    msg = opts["msg"] or f"{game} T{turn_of(real)}: {' '.join(cmds[0])}"
+    print(commit(game, msg))
 
 
 if __name__ == "__main__":

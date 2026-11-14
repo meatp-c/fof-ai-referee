@@ -1,5 +1,127 @@
 # Changelog
 
+## 2026-11-14 (ninth release)
+The engine is now English inside as well. Until this release the game state, the setup files and the words the engine
+used internally for commands, options and values were German, and GLOSSARY.md translated them. Now the keys and values
+in the game state and in setup files are English (`units`, `card`, `side: Enemy`, `area: open`, ...), and so are the
+command names, sub-commands and options inside the engine, and the names of files, folders and the step runner.
+- Older files keep working: a game, setup file or undo snapshot from an earlier release is converted when the engine
+  loads it and saved in English from then on. Nothing has to be changed by hand. `tool/fof/migrate.py` holds the
+  German words and is the only module that contains them; a test refuses a German key anywhere else.
+- German command names, sub-commands, option names and option values still work on the command line as aliases
+  (`befehl` for `order`, `--ziel` for `--target`, `ja` for `yes`).
+- The rule index written by `build_rules_index.py` uses English keys (`title`, `page`, `line_txt`, `line_compact`); an
+  index built with an earlier release is still read.
+- File and folder names are English: `<game>/game_state.json`, `<game>/history/` (undo snapshots), `.current_game`,
+  `data/rulebook.txt`, `data/rulebook_compact.txt`, `data/rule_index.json`, `data/<name>_compact.txt`,
+  `data/action_cards.json`; the environment variable is `FOF_GAME`. The step runner is `tool/step.py` (until now
+  `zug.py`, option `--game`). A game folder of an earlier release is renamed to the new names when it is loaded, and
+  rule texts built by an earlier release are read under their old names, so there is nothing to rename by hand.
+- GLOSSARY.md now lists the English keys of the game state and the setup file; the mission and action card templates
+  use them too.
+- The regression games of the full project (357 and 98 commands) give the same exit code for every command and the
+  same final state as before, apart from the key names; the test scripts of these games now use the English command
+  names.
+- Counter names: an optional `counter_names` table in the setup gives the names printed on the enemy counters, in the
+  order you keep them; a newly placed counter gets the first free name, and a counter that leaves the map frees its
+  name again. An optional `enemy_prefix` (e.g. NKPA) goes in front of every enemy counter name. L563, L564
+- Step runner fix: the renamed `tool/step.py` ran its probe against the real game instead of the scratch copy, so
+  every step was booked twice and `--probe` booked once. The probe runs in the copy again, and a test checks the
+  folder it hands to `fof.py`. A game played with the faulty runner shows each protocol entry twice. L565
+- Weapons platoon attachments: a team of a platoon with its own PLT HQ (the HMG Platoon in Naktong Mission 1)
+  that is attached to a rifle platoon with `setup <team> --platoon=<n>` stays in its own platoon, so its PLT HQ
+  and the rifle platoon's HQ can both order it. Until now the attachment moved it out of the HMG Platoon. L566
+- A booked attempt now names its draw as well (number of Action cards with base, experience and modifiers, and
+  the success symbol), not only the prompt before the draw, so the cards drawn at the table can be checked against
+  the booking. The source text of a terrain type read from the board is English; older games are translated when
+  loaded. L567
+- The Command lines name the save limit of 4.1.3 (Green 3, Line 6, Veteran 9 by day), so it is clear before
+  `done` which Commands would be lost. An enemy spotter's Target marker is announced as a board change when the
+  spotter is placed. L568
+- The draw breakdown of a Concentrate Fire names the extra card of a tripod MG (7.11.2). L569
+- A unit on its Fire Team side now opens fire with its Fire Team VOF even if its front side has none: an enemy
+  spotter flipped by an F or A hit (8.10) and a US HQ on its Fire Team side never opened fire before. L570
+- New command `names lat card`: the generic team counters are called by counter type and card (`AT 45`, `FT 33`,
+  `P 55`, `L 42`, enemy teams with the enemy prefix) and are renamed, with a board line, when their type or card
+  changes. Without it the numbered names stay. L571
+- Clean-up without a change in behaviour: a never-called function, an unused constant and a few unused
+  parameters and variables removed. L572
+- Identifiers derived from German abbreviations renamed to English (`card_id`, `action_id`, `target_card`,
+  `recipient`, ...); no change in behaviour. L573
+- Comments and docstrings describe what the code does; the change history (entry numbers, review ids) moved out
+  of the code. L574
+- The internal labels v2/v3/v4 gave way to names that say what they mean (`is_campaign`, `pc_contact_campaign`,
+  `place_series_unit`, ...), and the eighteen most branched functions were split into smaller ones. L575-L577
+- `correct number <card> <card number>` fixes a terrain card number that was entered wrongly. L578
+- The retreat of a Paralyzed or Litter Team (3.5.2) now updates the Activity level; a retreat that lowered the
+  level could not be booked before. L579
+- The status lists Assets dropped on a card (Rifle Grenades, smoke of a removed unit) as 'lying here'; the cover
+  key of a vehicle wreck is registered. L580
+- A reattempt (3.9) also removes Assets dropped on the cards; they go back to the refilled pool. L581
+- An enemy unit that step 8 of a reattempt puts into a Deep Bunker places no VOF (Naktong CSR 7). L582
+- Enemy spotter priority 1 (Target marker card, 8.10) keeps its LOS requirement (developer ruling); L583 withdrawn. L584
+- Tests: 581 tests in the full project (the kit skips those that need mission data). L560-L584
+- Rulings and fixes from the first Naktong mission:
+  - A unit on its Fire Team side takes orders from any HQ or Staff, like a Limited Action Team, until it is back on
+    its front side (4.0; BGG 3455337, 3677806). L585
+  - `gi skill <HQ>` uses the General Initiative skill at any time during the General Initiative impulse, also after
+    the draw and after other GI Commands (BGG 3597449). L586
+  - A CO Staff gets its Initiative Command once per turn; calling `hq` for it a second time no longer grants another
+    one. L587
+  - A grenaded enemy that leaves the map (Fall Back off-map, retreat over the edge) leaves a Grenade Miss on its
+    card (7.10.4). L588
+  - Deep Bunkers work for both sides: a US unit inside places no VOF and is refused Spot, Concentrate Fire, Grenade
+    Attack and Deploy Pyrotechnic. The messages name the campaign rule for Normandy, Vietnam and Naktong. L589
+  - `xp promote` without `--result` takes the unit level from table 12.6 instead of raising the whole unit; the step
+    mix set by `reconstitute` is kept for the promotions of that between-missions phase. L590
+- Undo snapshots no longer carry a copy of the whole protocol, only the number of entries; `undo` cuts the protocol
+  from the current one. The `history/` folder of a long game shrinks to about a quarter. Snapshots written by an
+  earlier release are still read. L592
+- Command log: every command line that changed the game is appended to `<game>/commands.txt` as typed (refused and
+  read-only commands are left out), so a played game can be replayed line by line with `fof.py`. L593
+- Announcements and hints:
+  - Marker changes also name a VOF that comes or goes beneath the top VOF marker of a card. L595
+  - An enemy Fall Back without `--target` takes the card the priorities of 8.6.3 leave; on a tie the message lists
+    the tied cards and the R# column. L596
+  - The draw prompt of a Call for Fire names own units on the target card and the card a Short would hit; the
+    booking warns when own units lie under the Fire Mission. L597
+  - Seek Cover on a building card names the column and source of the campaign's building table; Ammo Resupply names
+    the cards of mission row 1; the Command line after a draw subtracts Commands already spent in the impulse (event
+    payment) from the impulse limit. L598
+  - Move within a Card is refused where an Infiltrate within the Card is possible (`--plain=yes` for an intended
+    Move), as for a Move to an Adjacent Card. L599
+  - `--unit` of a Grenade Attack or Concentrate Fire accepts a Cover marker id (`--unit=C1`); a single Spotted enemy
+    needs no `--unit`. L600
+  - With `names lat card` a new team gets its card name at once; a retreat is listed once; `step.py` does not
+    commit a step that changed nothing. L601
+  - An open 'Company ahead' or 'Screaming for Action' event is named at the start of every Command impulse; the
+    Enemy Higher HQ Event segment says at once when a Planned Counter Attack needs no draw. L602, L603
+  - The step list of an enemy Infiltrate leaves out diagonal steps across a PDF (5.1.2). L604
+  - The extra Command of a General Initiative skill is checked: a PLT HQ's skill serves units of that platoon, a CO
+    HQ's or Staff's skill only its holder (12.7). L605
+  - Shift Fire: a unit that cannot follow the new PDF and ceases fire opens fire again at once on a target it can
+    reach (6.1.1, 6.3.5). L606
+- Enemy reconstitution (6.5.2): two or more unpinned enemy Fire/Assault Teams with a Good Order Leader, not on a
+  card with opposing units, get the chart result 'Attempt to Reconstitute Squad' (row P5 of the LAT/Pinned
+  hierarchy). `enemyaction <team> "Attempt to Reconstitute Squad" --success=yes|no [--type=<counter type>]` swaps
+  the teams for a squad counter that is free in the counter mix and has no more firepower than the teams; with
+  several eligible types the counter is picked by R#. L607
+- Reconstitution on the US side (6.5.2): the CO HQ is reconstituted from the XO first, then any PLT HQ, the Arty FO
+  and the CO Staff by rank, and a CO Staff may give the order as well as the BN HQ (`order <Staff> <unit> 4.2.1e`).
+  A reconstituted squad returns as its own counter with the values it was set up with, takes at most as many teams
+  as it has steps, and gets its experience from the teams by table 12.6. A BN HQ lost on the map gives no orders in
+  the following turn. L608-L610
+- Rules added after a review of the coverage table:
+  - Concentrated Fire markers are removed when the firing unit shifts or ceases fire, loses its line of fire or
+    leaves the board, or when the target moves to another card or cover marker (7.11.5). L611
+  - Lone Mortar Reaction (8.6.5): a G!-rated one-step enemy mortar alone on a card with opposing units flips to its
+    Fire Team side and opens fire; a mortar on its Fire Team side fires as a Fire Team. L612
+  - An enemy team flipped for lack of ammo becomes Unspotted when it falls back out of LOS and leaves play in the
+    Clean Up Phase while Unspotted (8.11.1, errata of May 2025). L613
+  - Concentrate Fire is refused for a unit with fewer than 2 ammo points (7.18.4). L614
+  - Snipers pick their target card by the sniper priorities of 6.1.1 (card with an HQ, Staff or Leader first). L615
+  - A Church Tower marker holds one step (5.3.3). L616
+
 ## 2026-11-07 (eighth release)
 This release comes mostly from a full review of the engine code rather than from play at the table. The fixes come
 with tests. It also adds the company jeep for Naktong River Mission 1.

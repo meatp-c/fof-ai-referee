@@ -2,12 +2,16 @@
 data/*
 !data/README.txt
 # Game folders and state
+*/game_state.json
 */spielstand.json
 */BRIEFING.md
+*/commands.txt
+.current_game
 .aktuelle_partie
 partie*/
 game*/
 # Python
 __pycache__/
 *.pyc
+*/history/
 */verlauf/

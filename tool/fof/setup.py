@@ -3,13 +3,27 @@
 import copy
 import re
 
-from . import briefing, campaign, combat, commands, comms, fire, fire_support, geometry, messages, options, rules, state
+from . import (
+    briefing,
+    campaign,
+    combat,
+    commands,
+    comms,
+    fire,
+    fire_support,
+    geometry,
+    messages,
+    migrate,
+    options,
+    rules,
+    state,
+)
 
 
 def check_new_game(s):
-    """Review M5 (L335): validate a freshly built game state before 'new' switches .aktuelle_partie or writes anything:
+    """validate a freshly built game state before 'new' switches .current_game or writes anything:
     unknown rules options of the setup and the consistency check (a Violation instead of a half-created game)."""
-    unknown = [k for k in s.get("optionen", {}) if k not in rules.DEFAULT_OPTIONS]
+    unknown = [k for k in s.get("options", {}) if k not in rules.DEFAULT_OPTIONS]
     if unknown:
         raise rules.Violation("Unknown options in setup: " + ", ".join(unknown))
     errors = briefing.consistency_check(s)
@@ -18,7 +32,7 @@ def check_new_game(s):
 
 
 def _usage(command):
-    from . import cli  # lazy: the usage texts live in the command table (review Struktur 8)
+    from . import cli  # lazy: the usage texts live in the command table
 
     return cli.usage(command)
 
@@ -29,30 +43,30 @@ def cmd_setup(s, args):
         raise rules.Violation(
             "Setup and attachments only before turn 1 starts (phase 3.1); no regrouping afterwards [RULE 2.3.3 p.10]"
         )
-    rules.need([a for a in args[:1] if not a.startswith("--")], 1, _usage("setup"))  # L332
+    rules.need([a for a in args[:1] if not a.startswith("--")], 1, _usage("setup"))
     n = args[0]
     e = state.unit(s, n)
-    if e["seite"] != "US":
+    if e["side"] != "US":
         raise rules.Violation("Friendly units only")
     o = options.parse_opts(args[1:])
     prot = []
     if "--platoon" in o:
         assign_platoon(s, n, e, options.text_opt(o, "--platoon", _usage("setup")), prot)
-    if state.is_v4(s):
-        setup_v4(s, n, e, o, prot)
-        e = s["einheiten"].get(n, e)
-    kz = [a for a in args[1:] if not a.startswith("--")]
-    if kz:
-        k = kz[0]
+    if state.is_campaign(s):
+        setup_campaign_options(s, n, e, o, prot)
+        e = s["units"].get(n, e)
+    positional = [a for a in args[1:] if not a.startswith("--")]
+    if positional:
+        k = positional[0]
         if place_mortar_teams(s, n, k, prot):
             state.save_state(s, "Setup: " + "; ".join(prot), "2.3.3 p.10, 2.3.5 p.10")
             briefing.print_board(prot, s)
             return
-        if n not in s["einheiten"]:
+        if n not in s["units"]:
             raise rules.Violation(f"{n} is no longer in play")
-        if s.get("patrouille_mission"):
+        if s.get("patrol_mission"):
             check_patrol_setup(s, n, e, k, o)
-        elif s.get("aufstellung_feld") and not s.get("reattempt_setup"):
+        elif s.get("setup_field") and not s.get("reattempt_setup"):
             check_field_setup(s, n, e, k, o)
         elif not state.card(s, k).get("staging") and not (
             s.get("reattempt_setup") and campaign.secured_for_reattempt(s, k)
@@ -65,11 +79,11 @@ def cmd_setup(s, args):
     if not prot:
         raise rules.Violation(
             "setup <unit> <staging card> and/or --platoon=<no>|none"
-            + (" | --net= --mortar= --jeep= --asset= --lines= --pyro= --device=" if state.is_v4(s) else "")
+            + (" | --net= --mortar= --jeep= --asset= --lines= --pyro= --device=" if state.is_campaign(s) else "")
         )
-    if kz and (s.get("reattempt_setup") or s.get("patrouille_mission")):
-        # L504: only after a placement; handing out assets/pyro/platoons moves nobody, fire waits for 3.9 step 14
-        # L181 [6.1.1, 6.1.2, 8.1]: after repositioning, fire and the Activity level follow the new positions
+    if positional and (s.get("reattempt_setup") or s.get("patrol_mission")):
+        # only after a placement; handing out assets/pyro/platoons moves nobody, fire waits for 3.9 step 14
+        # [6.1.1, 6.1.2, 8.1]: after repositioning, fire and the Activity level follow the new positions
         fire.cease_fire_on_los_loss(s, prot)
         fire.enemy_cease_fire(s, prot)
         fire.open_fire(s, prot)
@@ -82,124 +96,132 @@ def cmd_setup(s, args):
 
 def assign_platoon(s, n, e, p, prot):
     """--platoon=<no>|none: attachments and company units to a platoon for the whole mission [RULE 2.3.2/2.3.3 p.10]."""
-    if (state.is_hq(e) or e["typ"] == "Squad") and not e.get(
-        "attachment"
-    ):  # L75: Engineers are a squad attachment (2.3.2)
+    if (state.is_hq(e) or e["type"] == "Squad") and not e.get("attachment"):  # Engineers are a squad attachment (2.3.2)
         raise rules.Violation(
             f"{n} belongs permanently to its platoon; attachments and company units can be assigned [RULE 2.3.2 p.10]"
         )
-    hqs = {x.get("platoon"): m for m, x in s["einheiten"].items() if x.get("ebene") == "PLT"}
-    if p == "keiner":
-        e["platoon"], e["attached_an"] = None, []
+    hqs = {x.get("platoon"): m for m, x in s["units"].items() if x.get("level") == "PLT"}
+    # a team of a weapons platoon with its own PLT HQ (e.g. the HMG Platoon, Naktong S.17: the HMG PLT HQ
+    # commands all HMG teams, also when attached to other platoons) keeps its platoon; the attachment adds the
+    # rifle platoon's HQ in attached_to, so both HQs can order it (comms: same platoon or listed in attached_to)
+    home = e.get("platoon")
+    keeps = home is not None and home in hqs and not str(home).isdigit()
+    if p == "none":
+        if keeps:
+            e["attached_to"] = []
+            prot.append(f"{n} attached to no rifle platoon; orders from {hqs[home]} [RULE 2.3.3 p.10]")
+            return
+        e["platoon"], e["attached_to"] = None, []
         prot.append(
             f"{n} assigned to no platoon; orders from the CO HQ and CO Staff (XO, 1st Sgt) [RULE 2.3.3 p.10, 4.0 p.18]"
         )
     else:
         if p not in hqs:
             raise rules.Violation(f"Platoon {p} unknown; available: {', '.join(sorted(k for k in hqs if k))}")
-        e["platoon"], e["attached_an"] = p, [hqs[p]]
+        if keeps and p != home:
+            e["attached_to"] = [hqs[p]]
+            prot.append(
+                f"{n} attached to {hqs[p]} for the whole mission; {hqs[home]} keeps command as well [RULE 2.3.3 p.10]"
+            )
+            return
+        e["platoon"], e["attached_to"] = p, [hqs[p]]
         prot.append(f"{n} assigned to {hqs[p]} for the whole mission [RULE 2.3.3 p.10]")
 
 
 def place_mortar_teams(s, n, k, prot):
     """CSR 2: 'setup "Mtr Sec" <staging card>' after choosing teams moves the three Mortar Teams; True if it applied."""
     if not (
-        n not in s["einheiten"]
-        and n == "Mtr Sec"
-        and s.get("moerser_wahl") == "teams"
-        and state.card(s, k).get("staging")
+        n not in s["units"] and n == "Mtr Sec" and s.get("mortar_choice") == "teams" and state.card(s, k).get("staging")
     ):
         return False
-    for tn in s.get("reserve_einheiten", {}):
-        if tn in s["einheiten"]:
-            s["einheiten"][tn]["karte"] = k
+    for team_name in s.get("reserve_units", {}):
+        if team_name in s["units"]:
+            s["units"][team_name]["card"] = k
     prot.append(f"Mortar Teams into the Staging Area {k}")
     return True
 
 
 def check_patrol_setup(s, n, e, k, o):
     """Combat Patrol setup: the patrol on row 1, the others into the fortifications of row 1 or the COP [MSR 1, 2.6.1]."""
-    kc = state.card(s, k)
-    cop = s.get("ziele", {}).get("cop")
-    if e.get("stationaer"):
-        if kc["reihe"] != 1 and k != cop:
+    card = state.card(s, k)
+    cop = s.get("objectives", {}).get("cop")
+    if e.get("stationary"):
+        if card["row"] != 1 and k != cop:
             raise rules.Violation(
                 f"{n} is not on patrol: only into the fortifications of row 1 or into the Combat Outpost [MSR 1]"
             )
         if k == cop:
             platoons = {
-                x.get("platoon")
-                for m, x in s["einheiten"].items()
-                if x["seite"] == "US" and x.get("karte") == cop and m != n
+                x.get("platoon") for m, x in s["units"].items() if x["side"] == "US" and x.get("card") == cop and m != n
             }
             if e.get("platoon") and platoons - {None, e.get("platoon")}:
                 raise rules.Violation("Units of at most one platoon in the Combat Outpost [MSR 1]")
-        if kc.get("cover") and not o.get("--bereich"):  # L55: "Place any others in the fortifications on Row 1"
+        if card.get("cover") and not o.get("--area"):  # "Place any others in the fortifications on Row 1"
             raise rules.Violation(
                 f"{n} is not on patrol: set it up in the fortifications, --area="
-                + "|".join(c["id"] for c in kc["cover"])
+                + "|".join(c["id"] for c in card["cover"])
                 + " [Normandy M3 p.26 MSR 1: 'Place any others in the fortifications on Row 1']"
             )
-    elif kc["reihe"] != 1:
+    elif card["row"] != 1:
         raise rules.Violation("The patrol sets up on Row 1 [2.6.1, MSR 4]")
 
 
 def check_field_setup(s, n, e, k, o):
-    """L75 [Normandy M4 p.28]: "Place 2 Foxholes per card in Row 1 ... any one card in Row 2; some units from one
+    """[Normandy M4 p.28]: "Place 2 Foxholes per card in Row 1 ... any one card in Row 2; some units from one
     platoon of your choice may be placed on this card. All other units start on Row 1." """
-    af = s["aufstellung_feld"]
-    kc = state.card(s, k)
-    if k == af.get("zusatzkarte"):
+    af = s["setup_field"]
+    card = state.card(s, k)
+    if k == af.get("extra_card"):
         if not e.get("platoon"):
             raise rules.Violation(
-                f"Only units of one platoon on {k}; {n} belongs to no platoon (first setup <unit> --platoon=..) [{af.get('regel', 'Normandy M4 p.28')}]"
+                f"Only units of one platoon on {k}; {n} belongs to no platoon (first setup <unit> --platoon=..) [{af.get('rule', 'Normandy M4 p.28')}]"
             )
         platoons = {
-            x.get("platoon") for m, x in s["einheiten"].items() if x["seite"] == "US" and x.get("karte") == k and m != n
+            x.get("platoon") for m, x in s["units"].items() if x["side"] == "US" and x.get("card") == k and m != n
         }
         if platoons - {e.get("platoon")}:
             raise rules.Violation(
-                f"Units of platoon {', '.join(sorted(str(p) for p in platoons))} already stand on {k}; one platoon only [{af.get('regel', 'Normandy M4 p.28')}]"
+                f"Units of platoon {', '.join(sorted(str(p) for p in platoons))} already stand on {k}; one platoon only [{af.get('rule', 'Normandy M4 p.28')}]"
             )
-    elif kc.get("reihe") not in af.get("reihen", [1]):
+    elif card.get("row") not in af.get("rows", [1]):
         raise rules.Violation(
-            f"Setup only on row {', '.join(str(r) for r in af.get('reihen', [1]))}"
-            + (f" or on {af['zusatzkarte']} (units of one platoon)" if af.get("zusatzkarte") else "")
-            + f" [{af.get('regel', 'Normandy M4 p.28')}]"
+            f"Setup only on row {', '.join(str(r) for r in af.get('rows', [1]))}"
+            + (f" or on {af['extra_card']} (units of one platoon)" if af.get("extra_card") else "")
+            + f" [{af.get('rule', 'Normandy M4 p.28')}]"
         )
     _st = sum(
         state.steps(x)
-        for m, x in s["einheiten"].items()
-        if x["seite"] == "US" and x.get("karte") == k and m != n and not x.get("fahrzeug")  # L193
-    ) + (0 if e.get("fahrzeug") else state.steps(e))
+        for m, x in s["units"].items()
+        if x["side"] == "US" and x.get("card") == k and m != n and not x.get("vehicle")
+    ) + (0 if e.get("vehicle") else state.steps(e))
     if _st > 16:
-        raise rules.Violation(f"Stacking: {k} would hold {_st} US steps, at most 16 per card [RULE 5.1.5 p.32]")  # L76
-    if kc.get("cover") and not o.get("--bereich"):
+        raise rules.Violation(f"Stacking: {k} would hold {_st} US steps, at most 16 per card [RULE 5.1.5 p.32]")
+    if card.get("cover") and not o.get("--area"):
         raise rules.Violation(
-            f"{k} has cover ({', '.join(c['id'] + ' ' + c['typ'] for c in kc['cover'])}): give --area=open|"
-            + "|".join(c["id"] for c in kc["cover"])
+            f"{k} has cover ({', '.join(c['id'] + ' ' + c['type'] for c in card['cover'])}): give --area=open|"
+            + "|".join(c["id"] for c in card["cover"])
         )
 
 
 def place_unit(s, n, e, k, o, prot):
     """Put the unit on card k (checks done), optionally under a cover marker (reattempt, patrol, field setup)."""
-    if e.get("karte") != k:
-        # L181: a unit placed on another card during reattempt/patrol setup no longer fires at its old target
-        e["ziel"] = None
-        e.pop("ziel_offen", None)
-        e.pop("konzentriert", None)
-    e["karte"], e["bereich"] = k, "offen"
-    for m, x in s["einheiten"].items():  # L454: the Arty Jeep and the Arty FO on board are set up together
-        if x is not e and (e.get("an_bord") == m or x.get("an_bord") == n):
-            x["karte"] = k
+    if e.get("card") != k:
+        # a unit placed on another card during reattempt/patrol setup no longer fires at its old target
+        e["target"] = None
+        e.pop("target_open", None)
+        e.pop("concentrated", None)
+    e["card"], e["area"] = k, "open"
+    for m, x in s["units"].items():  # the Arty Jeep and the Arty FO on board are set up together
+        if x is not e and (e.get("on_board") == m or x.get("on_board") == n):
+            x["card"] = k
             prot.append(
-                f"{m} {'carries' if (x.get('arty_jeep') or x.get('kompanie_jeep')) else 'on board of'} {n}: also on {k}"
+                f"{m} {'carries' if (x.get('arty_jeep') or x.get('company_jeep')) else 'on board of'} {n}: also on {k}"
             )
-    if o.get("--bereich") and (s.get("reattempt_setup") or s.get("patrouille_mission") or s.get("aufstellung_feld")):
-        commands.set_area(s, e, options.text_opt(o, "--bereich", _usage("setup")))
+    if o.get("--area") and (s.get("reattempt_setup") or s.get("patrol_mission") or s.get("setup_field")):
+        commands.set_area(s, e, options.text_opt(o, "--area", _usage("setup")))
     prot.append(
-        f"{n} {'into the Staging Area' if state.card(s, k).get('staging') else 'on card' if (s.get('patrouille_mission') or s.get('aufstellung_feld')) else 'on the secured card'} {k}"
-        + (f" under {e['bereich']}" if e["bereich"] != "offen" else "")
+        f"{n} {'into the Staging Area' if state.card(s, k).get('staging') else 'on card' if (s.get('patrol_mission') or s.get('setup_field')) else 'on the secured card'} {k}"
+        + (f" under {e['area']}" if e["area"] != "open" else "")
     )
 
 
@@ -212,26 +234,26 @@ def cmd_radio(s, args):
         for t in briefing.radio_overview(s):
             print("- " + t)
         return
-    if args[0] == "pruefen":
-        rules.need(args, 2, _usage("radio"))  # L332
-    if args[0] == "pruefen" and len(args) == 2:
-        # L98: every unit <HQ> can reach
+    if args[0] == "check":
+        rules.need(args, 2, _usage("radio"))
+    if args[0] == "check" and len(args) == 2:
+        # every unit <HQ> can reach
         a = args[1]
         state.unit(s, a)
         ok, no_ = [], []
-        for n, e in s["einheiten"].items():
-            if n == a or e["seite"] != "US":
+        for n, e in s["units"].items():
+            if n == a or e["side"] != "US":
                 continue
             try:
                 comms.communication(s, a, n)
                 ok.append(n)
             except rules.Violation:
                 no_.append(n)
-        s.pop("_hinweise", None)
+        s.pop("_hints", None)
         print(f"{a} reaches: " + (", ".join(ok) if ok else "nobody") + " [RULE 4.3 p.27]")
         print(f"{a} does not reach: " + (", ".join(no_) if no_ else "-"))
         return
-    if args[0] == "pruefen":
+    if args[0] == "check":
         a, b = args[1], args[2]
         state.unit(s, a), state.unit(s, b)
         try:
@@ -239,27 +261,27 @@ def cmd_radio(s, args):
             print(f"{messages.ALLOWED}: {a} and {b} in communication {messages.rule('4.3 p.27')}")
         except rules.Violation as v:
             print(f"{messages.VIOLATION}: {v}")
-        for h in dict.fromkeys(s.pop("_hinweise", [])):
+        for h in dict.fromkeys(s.pop("_hints", [])):
             print(f"{messages.NOTE}: " + h)
         return
-    if args[0] == "schaden":
-        rules.need(args, 4, _usage("radio"))  # L332
-        kid, type_, result = args[1], args[2], args[3]
-        c = state.card(s, kid)
-        g = [x for x in c.get("assets", []) if x["typ"] == type_ and x.get("schaden_offen")]
+    if args[0] == "damage":
+        rules.need(args, 4, _usage("radio"))
+        card_id, type_, result = args[1], args[2], args[3]
+        c = state.card(s, card_id)
+        g = [x for x in c.get("assets", []) if x["type"] == type_ and x.get("damage_open")]
         if not g:
-            raise rules.Violation(f"On {kid} there is no {type_} with a pending damage draw")
-        if result == "zerstoert":
+            raise rules.Violation(f"On {card_id} there is no {type_} with a pending damage draw")
+        if result == "destroyed":
             c["assets"].remove(g[0])
-            s.setdefault("funk_zerstoert", []).append(f"{g[0]['typ']} {g[0]['netz']}")
-            prot = [f"{type_} {g[0]['netz']} on {kid} destroyed, removed from play [RULE 4.3.5 p.30]"]
-        elif result == "heil":
-            g[0]["schaden_offen"] = False
+            s.setdefault("radio_destroyed", []).append(f"{g[0]['type']} {g[0]['net']}")
+            prot = [f"{type_} {g[0]['net']} on {card_id} destroyed, removed from play [RULE 4.3.5 p.30]"]
+        elif result == "intact":
+            g[0]["damage_open"] = False
             prot = [
-                f"{type_} {g[0]['netz']} lies on {kid}, can be picked up with 4.2.2h (--what={type_}) [RULE 4.3.5 p.30]"
+                f"{type_} {g[0]['net']} lies on {card_id}, can be picked up with 4.2.2h (--what={type_}) [RULE 4.3.5 p.30]"
             ]
         else:
-            raise rules.Violation(f"intact (heil) | destroyed (zerstoert); usage: {_usage('radio')}")
+            raise rules.Violation(f"intact (intact) | destroyed (destroyed); usage: {_usage('radio')}")
         state.save_state(s, "; ".join(prot), "4.3.5 p.30")
         briefing.print_board(prot, s)
         return
@@ -271,53 +293,53 @@ def cmd_drop(s, args):
     rules.need(args, 2, _usage("drop"))
     n, what = args[0], args[1]
     e = state.unit(s, n)
-    c = state.card(s, e["karte"])
+    c = state.card(s, e["card"])
     if what.lower() == "casualty":
-        if not e.get("traegt_casualties"):
+        if not e.get("carries_casualties"):
             raise rules.Violation(f"{n} is not carrying a casualty")
-        e["traegt_casualties"] -= 1
+        e["carries_casualties"] -= 1
         c["casualties"] = c.get("casualties", 0) + 1
         prot = [
-            f"{n} drops a casualty on {e['karte']}"
-            + (" (CCP: evacuation in Clean Up)" if s.get("ccp") == e["karte"] else "")
+            f"{n} drops a casualty on {e['card']}"
+            + (" (CCP: evacuation in Clean Up)" if s.get("ccp") == e["card"] else "")
         ]
-    elif ":" in what and what.split(":")[0].upper() == "AMMO":  # L550 (review K10): name the ammo types
+    elif ":" in what and what.split(":")[0].upper() == "AMMO":  # name the ammo types
         raise rules.Violation(f"Ammo by type: drop <unit> <{'|'.join(rules.AMMO_CAPACITY)}>:<n>")
     elif ":" in what and what.split(":")[0] in rules.AMMO_CAPACITY:
-        rules.int_value(what.partition(":")[2], "drop <ammo type>:<n>")  # L331: 'MG:x' was a ValueError in ammo_drop
+        rules.int_value(what.partition(":")[2], "drop <ammo type>:<n>")  # 'MG:x' was a ValueError in ammo_drop
         prot = []
         combat.ammo_drop(s, e, n, what, prot)
     elif what in (e.get("assets") or []):
-        # L99 [RULE 5.1.6B p.33]: put an asset counter (smoke, rifle grenade, pyro ...) on the card (assets_boden, Pick Up 4.2.2h)
+        # [RULE 5.1.6B p.33]: put an asset counter (smoke, rifle grenade, pyro ...) on the card (assets_ground, Pick Up 4.2.2h)
         e["assets"].remove(what)
-        c.setdefault("assets_boden", []).append(what)
-        prot = [f"{n} drops asset {what} on {e['karte']} (Pick Up 4.2.2h) [5.1.6B p.33]"]
-    elif what.startswith("Leitung"):
-        nz = rules.int_value(what.split(":", 1)[1], "drop Leitung:<n>") if ":" in what else 1  # L331
-        if nz < 1:
-            raise rules.Violation(f"drop Leitung:<n>: at least 1 Phone Line, got {nz}")
-        if e.get("leitungen", 0) < nz:
-            raise rules.Violation(f"{n} is not carrying {nz} Phone Line(s)")
-        e["leitungen"] -= nz
-        c["leitung_assets"] = c.get("leitung_assets", 0) + nz
-        prot = [f"{n} drops {nz} Phone Line(s) as an asset on {e['karte']} (no phone line marker) [5.1.6B, BGG D3]"]
+        c.setdefault("assets_ground", []).append(what)
+        prot = [f"{n} drops asset {what} on {e['card']} (Pick Up 4.2.2h) [5.1.6B p.33]"]
+    elif what.split(":", 1)[0].lower() in ("line", *migrate.german("line")):  # German alias
+        number = rules.int_value(what.split(":", 1)[1], "drop Line:<n>") if ":" in what else 1
+        if number < 1:
+            raise rules.Violation(f"drop Line:<n>: at least 1 Phone Line, got {number}")
+        if e.get("lines", 0) < number:
+            raise rules.Violation(f"{n} is not carrying {number} Phone Line(s)")
+        e["lines"] -= number
+        c["line_assets"] = c.get("line_assets", 0) + number
+        prot = [f"{n} drops {number} Phone Line(s) as an asset on {e['card']} (no phone line marker) [5.1.6B, BGG D3]"]
     else:
-        g = [x for x in comms.radios_of(e) if x["typ"] == what or f"{x['typ']} {x['netz']}" == what]
+        g = [x for x in comms.radios_of(e) if what in (x["type"], f"{x['type']} {x['net']}")]
         if not g:
             raise rules.Violation(f"{n} is not carrying '{what}'")
-        e["funk"].remove(g[0])
-        c.setdefault("assets", []).append({"typ": g[0]["typ"], "netz": g[0]["netz"], "schaden_offen": False})
-        prot = [f"{n} drops {g[0]['typ']} {g[0]['netz']} on {e['karte']}"]
+        e["radio"].remove(g[0])
+        c.setdefault("assets", []).append({"type": g[0]["type"], "net": g[0]["net"], "damage_open": False})
+        prot = [f"{n} drops {g[0]['type']} {g[0]['net']} on {e['card']}"]
     state.save_state(s, "; ".join(prot), "5.1.6B p.33")
     briefing.print_board(prot, s)
 
 
 def cmd_options(s, args):
-    if "optionen" not in s:
-        print("This mission has no open rules questions (no field 'optionen' in the setup).")
+    if "options" not in s:
+        print("This mission has no open rules questions (no field 'options' in the setup).")
         return
     for k, (std, txt) in rules.DEFAULT_OPTIONS.items():
-        if not state.is_v4(s) and int(re.match(r"U(\d+)", k).group(1)) > 13:
+        if not state.is_campaign(s) and int(re.match(r"U(\d+)", k).group(1)) > 13:
             continue
         value = state.option(s, k)
         print(
@@ -326,25 +348,25 @@ def cmd_options(s, args):
             + f"; default reading: {txt}"
         )
     print(
-        "Change only by the player's decision (E entry in data/klarstellungen.md) and by adjusting 'optionen' in the setup or game state."
+        "Change only by the player's decision (E entry in data/klarstellungen.md) and by adjusting 'options' in the setup or game state."
     )
 
 
 def cmd_multistory(s, args):
-    """L73 [RULE 5.3.3 p.38, 5.2.2B p.36] card carries the Multi-Story symbol: set the flag; if a building cover without
+    """[RULE 5.3.3 p.38, 5.2.2B p.36] card carries the Multi-Story symbol: set the flag; if a building cover without
     Upper Story already lies there, add the Upper Story marker with the same value."""
-    rules.need(args, 1, _usage("multistory"))  # L332
-    kid = args[0]
-    c = state.card(s, kid)
-    c["mehrstoeckig"] = True
-    prot = [f"card {kid}: Multi-Story symbol recorded [5.3.3 p.38]"]
-    has_upper_story = any(x["typ"] == "Upper Story" for x in c.get("cover", []))
-    building = [x for x in c.get("cover", []) if x["typ"] in ("Light Building", "Strong Building")]
+    rules.need(args, 1, _usage("multistory"))
+    card_id = args[0]
+    c = state.card(s, card_id)
+    c["multistory"] = True
+    prot = [f"card {card_id}: Multi-Story symbol recorded [5.3.3 p.38]"]
+    has_upper_story = any(x["type"] == "Upper Story" for x in c.get("cover", []))
+    building = [x for x in c.get("cover", []) if x["type"] in ("Light Building", "Strong Building")]
     if building and not has_upper_story:
-        uid = commands.new_cover_marker(s, kid, "Upper Story", building[0]["wert"])
-        next(x for x in c["cover"] if x["id"] == uid)["feld"] = True  # new_cover_marker just added uid to the card
+        uid = commands.new_cover_marker(s, card_id, "Upper Story", building[0]["value"])
+        next(x for x in c["cover"] if x["id"] == uid)["field"] = True  # new_cover_marker just added uid to the card
         prot.append(
-            f"Upper Story marker {uid} (+{building[0]['wert']}) on {kid} with the {building[0]['typ']} {building[0]['id']}; does not count towards the Cover Potential [5.3.3 p.38]"
+            f"Upper Story marker {uid} (+{building[0]['value']}) on {card_id} with the {building[0]['type']} {building[0]['id']}; does not count towards the Cover Potential [5.3.3 p.38]"
         )
     state.save_state(s, "; ".join(prot), "5.3.3 p.38")
     briefing.print_board(prot, s)
@@ -352,9 +374,22 @@ def cmd_multistory(s, args):
 
 def cmd_note(s, args):
     """Free text into the log (corrections, card numbers supplied later)."""
-    rules.need(args, 1, _usage("note"))  # L332: an empty note saved an entry 'NOTE: '
+    rules.need(args, 1, _usage("note"))  # an empty note saved an entry 'NOTE: '
     text = " ".join(args)
     state.save_state(s, "NOTE: " + text, None)
+    briefing.print_board([text], s)
+
+
+def cmd_names(s, args):
+    """names lat card|numbered: name the generic team counters by type and card, or leave them numbered."""
+    if len(args) != 2 or args[0] != "lat" or args[1] not in ("card", "numbered"):
+        raise rules.Violation(f"Usage: {_usage('names')}")
+    if args[1] == "card":
+        s["lat_names"] = "card"
+    else:
+        s.pop("lat_names", None)
+    text = f"Generic team counters are named {'by counter type and card' if args[1] == 'card' else 'by number'}"
+    state.save_state(s, text, None)
     briefing.print_board([text], s)
 
 
@@ -367,15 +402,15 @@ def cmd_visibility(s, args):
         )
         return
     o = options.parse_opts(args[1:])
-    s["licht"] = rules.int_value(args[0], "visibility <light>")  # L331
+    s["light"] = rules.int_value(args[0], "visibility <light>")
     s.pop("visibility", None)
     if len(args) > 1 and not args[1].startswith("--"):
-        s["wetter"] = rules.int_value(args[1], "visibility <light> <weather>")  # L331
-        if o.get("--nur_zug") == "ja":
-            s["wetter_nur_zug"] = True
+        s["weather"] = rules.int_value(args[1], "visibility <light> <weather>")
+        if o.get("--this-turn-only") == "yes":
+            s["weather_this_turn_only"] = True
         else:
-            s.pop("wetter_nur_zug", None)  # L551 (review K12): weather set for good is not reset in Clean Up
-    elif o.get("--nur_zug") == "ja":
+            s.pop("weather_this_turn_only", None)  # weather set for good is not reset in Clean Up
+    elif o.get("--this-turn-only") == "yes":
         raise rules.Violation(
             "--this-turn-only=yes needs a weather value: visibility <light> <weather> --this-turn-only=yes"
         )
@@ -392,28 +427,28 @@ def cmd_visibility(s, args):
 
 def cmd_illum(s, args):
     """illum <card> <top> [<bottom>] [--origin=..] | illum <card> remove: [RULE 9.2 p.70] immediately, no Pending, removed in Clean Up."""
-    rules.need(args, 2, _usage("illum"))  # L332
-    kid = args[0]
-    c = state.card(s, kid)
-    if args[1] == "weg":
+    rules.need(args, 2, _usage("illum"))
+    card_id = args[0]
+    c = state.card(s, card_id)
+    if args[1] == "remove":
         c["illum"] = []
-        txt = f"Illumination on {kid} removed"
+        txt = f"Illumination on {card_id} removed"
     else:
         o = options.parse_opts(args[1:])
         remainder = [a for a in args[1:] if not a.startswith("--")]
         rules.need(remainder, 1, _usage("illum"))
         m = {
-            "oben": rules.int_value(remainder[0], "illum <card> <top>"),  # L331
-            "unten": rules.int_value(remainder[1], "illum <card> <top> <bottom>") if len(remainder) > 1 else None,
-            "quelle": options.text_opt(o, "--quelle", _usage("illum"), "?"),
+            "top": rules.int_value(remainder[0], "illum <card> <top>"),
+            "bottom": rules.int_value(remainder[1], "illum <card> <top> <bottom>") if len(remainder) > 1 else None,
+            "source": options.text_opt(o, "--origin", _usage("illum"), "?"),
         }
         c.setdefault("illum", []).append(m)
         txt = (
-            f"Illumination marker {m['oben']:+d}"
-            + (f"/{m['unten']:+d}" if m["unten"] is not None else "")
-            + f" ({m['quelle']}) on {kid}: "
-            f"top value for {kid}"
-            + (", bottom value for the adjacent cards" if m["unten"] is not None else "")
+            f"Illumination marker {m['top']:+d}"
+            + (f"/{m['bottom']:+d}" if m["bottom"] is not None else "")
+            + f" ({m['source']}) on {card_id}: "
+            f"top value for {card_id}"
+            + (", bottom value for the adjacent cards" if m["bottom"] is not None else "")
             + "; not cumulative, light plus illum never better than +0 [9.2]"
         )
         if geometry.light_weather(s)[1] >= 2:
@@ -427,46 +462,74 @@ def cmd_illum(s, args):
 def parse_edges(txt):
     if not txt:
         return None
-    if txt in ("weiss", "gruen"):
+    txt = options.english_value("--edges", txt)  # German edge words (oben, weiss, ...) as aliases
+    if txt in ("white", "green"):
         return txt
     r = {}
     for part in txt.split(","):
-        k, _, v = part.partition(":")  # L333: 'oben' without ':<colour>' was a ValueError
-        if k not in ("oben", "unten", "links", "rechts", "diagonal") or v not in ("weiss", "gruen"):
+        k, _, v = part.partition(":")  # 'top' without ':<colour>' was a ValueError
+        if k not in ("top", "bottom", "left", "right", "diagonal") or v not in ("white", "green"):
             raise rules.Violation(
-                "--edges=oben:weiss|gruen,unten:..,links:..,rechts:..,diagonal:.. (oben = toward the enemy)"
+                "--edges=top:white|green,bottom:..,left:..,right:..,diagonal:.. (top = toward the enemy)"
             )
         r[k] = v
-    for k in ("oben", "unten", "links", "rechts", "diagonal"):
-        r.setdefault(k, "gruen")
+    for k in ("top", "bottom", "left", "right", "diagonal"):
+        r.setdefault(k, "green")
     return r
 
 
-def set_terrain(s, kid, type_, o):
-    catalog = s.setdefault("terrain_katalog", {})
-    if type_ not in catalog and o.get("--typ-neu") == "ja":
-        # L482 [RULE 2.2.1 p.9]: a terrain type of a new deck (e.g. Naktong) is recorded from the card on the board once and
-        # then reused for every further card of that type
-        new = {"quelle": "beim Aufdecken vom Brett abgelesen (L482)"}
-        for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "hoehe_plus"):
-            if o.get("--" + k) is not None:
-                new[k] = options.int_opt(o, "--" + k, "--" + k)
-        if o.get("--raender"):
-            new["raender"] = parse_edges(options.text_opt(o, "--raender", "--edges=top:white,.."))
-        fz = o.get("--fahrzeuge")
-        if fz is not None:
-            fz_map = {"ja": True, "normal": True, "slow": "SLOW", "nein": False, "no": False}
-            if fz not in fz_map:
-                raise rules.Violation("--vehicles=normal|slow|no")
-            new["fahrzeuge"] = fz_map[fz]
-        catalog[type_] = new
-        s.setdefault("_hinweise", []).append(f"New terrain type {type_} recorded in the catalog: {new}")
+VEHICLE_PASSAGE = {"yes": True, "normal": True, "slow": "SLOW", "no": False}
+
+
+def _vehicle_passage(o):
+    """--vehicles=normal|slow|no as the card value."""
+    if o["--vehicles"] not in VEHICLE_PASSAGE:
+        raise rules.Violation("--vehicles=normal|slow|no")
+    return VEHICLE_PASSAGE[o["--vehicles"]]
+
+
+def _record_terrain_type(s, catalog, type_, o):
+    """[RULE 2.2.1 p.9] a terrain type of a new deck (e.g. Naktong) is recorded from the card on the board once and
+    then reused for every further card of that type."""
+    new = {"source": "read from the card on the board when revealed (L482)"}
+    for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "elevation_plus"):
+        if o.get("--" + k) is not None:
+            new[k] = options.int_opt(o, "--" + k, "--" + k)
+    if o.get("--edges"):
+        new["edges"] = parse_edges(options.text_opt(o, "--edges", "--edges=top:white,.."))
+    if o.get("--vehicles") is not None:
+        new["vehicles"] = _vehicle_passage(o)
+    catalog[type_] = new
+    s.setdefault("_hints", []).append(f"New terrain type {type_} recorded in the catalog: {new}")
+
+
+def _set_elevation(s, c, card_id, type_, o, plus):
+    """Elevation of the card and the dark edges of a Hill card underneath [RULE 2.2.1 p.9, 5.2.2A p.35]."""
+    hills = options.int_opt(o, "--hill", "--hill", 0)
+    # [RULE 2.2.1 p.9, 5.2.2A p.35] each Hill card +1; [Naktong CSR 8 p.14] an Embankment card itself is one level up
+    c["elevation"] = 1 + hills + plus
+    c.pop("face_down", None)  # entering the terrain of a face-down card flips it
+    if hills:
+        c["terrain"] = f"{type_} on {hills} Hill"
+        if c.get("edges") != "green" and o.get("--edges"):
+            s.setdefault("_hints", []).append(
+                f"{card_id}: white edges of the {type_} card ignored, the Hill card underneath has dark edges [5.2.2A p.35, BGG 3478872, 3447470]"
+            )
+        # [RULE 5.2.2A p.35] "The dark LOS borders on the Hill card supersede any light borders on the non-Hill Terrain card"
+        # (Shonai_Dweller BGG 3478872: "There is no white border if you a using terrain on top of a Hill card"); E9
+        c["edges"] = "green"
+
+
+def set_terrain(s, card_id, type_, o):
+    catalog = s.setdefault("terrain_catalog", {})
+    if type_ not in catalog and o.get("--new-type") == "yes":
+        _record_terrain_type(s, catalog, type_, o)
     if type_ not in catalog:
         raise rules.Violation(
-            f"Terrain type '{type_}' not in the catalog: {', '.join(k for k in catalog if k != 'Hill')}; unknown types with all values: --typ-neu=ja --cc=.. --cover_max=.. --cover_draw=.. --edges=.."
+            f"Terrain type '{type_}' not in the catalog: {', '.join(k for k in catalog if k != 'Hill')}; unknown types with all values: --new-type=yes --cc=.. [--cc2=..] --cover_max=.. --cover_draw=.. --edges=.. [--vehicles=normal|slow|no]"
         )
-    c = state.card(s, kid)
-    w = {k: v for k, v in catalog[type_].items() if k not in ("quelle",)}
+    c = state.card(s, card_id)
+    w = {k: v for k, v in catalog[type_].items() if k not in ("source",)}
     c["terrain"] = type_
     for k in (
         "cc",
@@ -474,74 +537,58 @@ def set_terrain(s, kid, type_, o):
         "burst",
         "cover_max",
         "cover_draw",
-        "raender",
-        "fahrzeuge",
-        "moerser_verbot",
+        "edges",
+        "vehicles",
+        "mortar_banned",
         "urban",
-        "gebaeude_tabelle",
+        "building_table",
         "op",
     ):
         if k in w:
             c[k] = w[k]
     for k in ("cc", "cc2", "burst", "cover_max", "cover_draw"):
-        if k == "cc2" and o.get("--cc2") in ("none", "keiner"):
-            c["cc2"] = None  # L455: a card printed without the second C&C value (e.g. a Hedgerow/Bocage with only +2)
+        if k == "cc2" and o.get("--cc2") == "none":
+            c["cc2"] = None  # a card printed without the second C&C value (e.g. a Hedgerow/Bocage with only +2)
         elif o.get("--" + k) is not None:
-            c[k] = options.int_opt(o, "--" + k, "--" + k)  # L333
-    if o.get("--raender"):
-        c["raender"] = parse_edges(options.text_opt(o, "--raender", "--edges=top:white,.."))
-    if o.get("--nr"):
-        c["kartennummer"] = options.text_opt(o, "--nr", "--no=<card number>")
-    hills = options.int_opt(o, "--hill", "--hill", 0)  # L333
-    # [RULE 2.2.1 p.9, 5.2.2A p.35] each Hill card +1; L482 [Naktong CSR 8 p.14] an Embankment card itself is one level up
-    c["elevation"] = 1 + hills + (w.get("hoehe_plus") or 0)
-    c.pop("verdeckt", None)  # L481: entering the terrain of a face-down card flips it
-    if hills:
-        c["terrain"] = f"{type_} on {hills} Hill"
-        if c.get("raender") != "gruen" and o.get("--raender"):
-            s.setdefault("_hinweise", []).append(
-                f"{kid}: white edges of the {type_} card ignored, the Hill card underneath has dark edges [5.2.2A p.35, BGG 3478872, 3447470]"
-            )
-        # L157 [RULE 5.2.2A p.35] "The dark LOS borders on the Hill card supersede any light borders on the non-Hill Terrain card"
-        # (Shonai_Dweller BGG 3478872: "There is no white border if you a using terrain on top of a Hill card"); E9
-        c["raender"] = "gruen"
-    fz = o.get("--fahrzeuge")
-    if fz is not None and o.get("--typ-neu") != "ja":
-        fz_map = {"ja": True, "normal": True, "slow": "SLOW", "nein": False, "no": False}
-        if fz not in fz_map:
-            raise rules.Violation("--vehicles=normal|slow|no")
-        c["fahrzeuge"] = fz_map[fz]
-    # L482: values the catalog of a new deck did not know yet are kept for further cards of the type (not the edges,
+            c[k] = options.int_opt(o, "--" + k, "--" + k)
+    if o.get("--edges"):
+        c["edges"] = parse_edges(options.text_opt(o, "--edges", "--edges=top:white,.."))
+    if o.get("--no"):
+        c["card_number"] = options.text_opt(o, "--no", "--no=<card number>")
+    _set_elevation(s, c, card_id, type_, o, w.get("elevation_plus") or 0)
+    if o.get("--vehicles") is not None and o.get("--new-type") != "yes":
+        c["vehicles"] = _vehicle_passage(o)
+    # values the catalog of a new deck did not know yet are kept for further cards of the type (not the edges,
     # which differ from card to card for some types)
-    for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "fahrzeuge"):
-        if catalog[type_].get(k) is None and c.get(k) is not None and (o.get("--" + k) is not None or k == "fahrzeuge"):
+    for k in ("cc", "cc2", "burst", "cover_max", "cover_draw", "vehicles"):
+        if catalog[type_].get(k) is None and c.get(k) is not None and (o.get("--" + k) is not None or k == "vehicles"):
             catalog[type_][k] = c[k]
-    missing = [k for k in ("cc", "cover_max", "cover_draw", "raender") if c.get(k) is None]
+    missing = [k for k in ("cc", "cover_max", "cover_draw", "edges") if c.get(k) is None]
     if missing:
         raise rules.Violation(
             f"{type_}: values not recorded ({', '.join(missing)}); read them from the board and give them with --{' --'.join(missing)} (UNVERIFIED in the catalog)"
         )
-    if "UNVERIFIZIERT" in catalog[type_].get("quelle", ""):
-        s.setdefault("_hinweise", []).append(
-            f"{type_}: catalog values partly UNVERIFIED ({catalog[type_]['quelle']}); check on the board"
+    if "UNVERIFIED" in catalog[type_].get("source", ""):
+        s.setdefault("_hints", []).append(
+            f"{type_}: catalog values partly UNVERIFIED ({catalog[type_]['source']}); check on the board"
         )
-    c.pop("hinweis", None)
+    c.pop("note", None)
 
 
 def cmd_terrain(s, args):
     """[RULE 2.2.1 p.9] Enter a randomly drawn terrain card: before turn 1 for all cards, later only for cards without terrain."""
     rules.need(args, 2, _usage("terrain"))
-    kid, type_ = args[0], args[1]
+    card_id, type_ = args[0], args[1]
     o = options.parse_opts(args[2:])
-    c = state.card(s, kid)
+    c = state.card(s, card_id)
     if c.get("staging"):
         raise rules.Violation("Staging cards stay face down (2.2.1)")
     if c.get("terrain") and not state.in_setup(s) and not geometry.face_down(c):
-        raise rules.Violation(f"{kid} already has terrain ({c['terrain']}); change only before turn 1")
-    set_terrain(s, kid, type_, o)
-    rt = c["raender"] if isinstance(c["raender"], str) else ", ".join(f"{a} {b}" for a, b in c["raender"].items())
+        raise rules.Violation(f"{card_id} already has terrain ({c['terrain']}); change only before turn 1")
+    set_terrain(s, card_id, type_, o)
+    rt = c["edges"] if isinstance(c["edges"], str) else ", ".join(f"{a} {b}" for a, b in c["edges"].items())
     prot = [
-        f"{kid}: {c['terrain']} (C&C +{c['cc']}"
+        f"{card_id}: {c['terrain']} (C&C +{c['cc']}"
         + (f"/+{c['cc2']}" if c.get("cc2") is not None else "")
         + f", Cover {c['cover_max']}/{c['cover_draw']}, edges {rt}"
         + (f", Elevation {c['elevation']}" if c.get("elevation", 1) > 1 else "")
@@ -556,25 +603,25 @@ def cmd_extend(s, args):
     rules.need(args, 3, _usage("extend"))
     r, c, type_ = rules.int_value(args[0], "extend <row>"), rules.int_value(args[1], "extend <row> <column>"), args[2]
     o = options.parse_opts(args[3:])
-    if r >= 10 or c >= 10:  # L551 (review K14): '210' would be row 2 column 10 and row 21 column 0 at once
+    if r >= 10 or c >= 10:  # '210' would be row 2 column 10 and row 21 column 0 at once
         raise rules.Violation(f"Row {r} column {c}: card ids are not unique from row or column 10 on; not supported")
-    kid = state.card_id(r, c)
-    if kid in s["karten"] or geometry.card_at(s, r, c):
+    card_id = state.card_id(r, c)
+    if card_id in s["cards"] or geometry.card_at(s, r, c):
         raise rules.Violation(f"Card at row {r} column {c} already exists")
     if r <= 1:
         raise rules.Violation("No extension behind the Staging Area")
-    if not any(abs(v["reihe"] - r) <= 1 and abs(v["spalte"] - c) <= 1 for v in s["karten"].values()):
+    if not any(abs(v["row"] - r) <= 1 and abs(v["column"] - c) <= 1 for v in s["cards"].values()):
         raise rules.Violation("Extension only adjacent to existing cards")
-    columns = [v["spalte"] for v in s["karten"].values() if not v.get("ausserhalb")]
+    columns = [v["column"] for v in s["cards"].values() if not v.get("outside")]
     outside = r > state.top_row(s) or c < min(columns) or c > max(columns)
-    s["karten"][kid] = {"terrain": None, "reihe": r, "spalte": c, "cover": [], "extern": [], "ausserhalb": outside}
+    s["cards"][card_id] = {"terrain": None, "row": r, "column": c, "cover": [], "external": [], "outside": outside}
     try:
-        set_terrain(s, kid, type_, o)
+        set_terrain(s, card_id, type_, o)
     except rules.Violation:
-        del s["karten"][kid]
+        del s["cards"][card_id]
         raise
     prot = [
-        f"Card {kid} (row {r}, column {c}) created: {s['karten'][kid]['terrain']}"
+        f"Card {card_id} (row {r}, column {c}) created: {s['cards'][card_id]['terrain']}"
         + (", outside the mission boundaries: off-limits to friendly units [2.4.1, 8.4.5]" if outside else "")
     ]
     state.save_state(s, "; ".join(prot), "8.4.5 p.65")
@@ -586,8 +633,8 @@ OBJECTIVE_USAGE_CONCENTRATION = "objective concentration <card> <fire asset, e.g
 OBJECTIVE_USAGE_PHASELINE = "objective phaseline <n> <row>"
 OBJECTIVE_USAGE_FORTIFY = "objective fortify <secured card> foxholes|deepbunker (between attempts) [Naktong M1 p.15]"
 OBJECTIVE_NAMES = {
-    "primaer": "Primary Objective",
-    "sekundaer": "Secondary Objective",
+    "primary": "Primary Objective",
+    "secondary": "Secondary Objective",
     "ap": "Attack Position",
     "ccp": "Casualty Collection Point",
     "cop": "Combat Outpost",
@@ -597,177 +644,180 @@ OBJECTIVE_NAMES = {
 def cmd_objective(s, args):
     """[RULE 2.4.1 p.10, Normandy M1 p.16] Primary/Secondary on row 3 (tool 4), Attack Position on row 2 (tool 3) next to an
     Objective; CCP anywhere before the mission starts (Normandy p.13, 5.1.7); Phase Lines between rows."""
-    if not state.is_v4(s):
+    if not state.is_campaign(s):
         raise rules.Violation("Tactical Controls only in campaign missions")
     if not state.in_setup(s):
         raise rules.Violation("Tactical Controls only before turn 1; later only CCP via 4.2.1l [RULE 2.4.1 p.10]")
-    z = s.setdefault("ziele", {})
-    # L332: every form needs at least two words (route and concentration were exempted and crashed with one)
+    objectives = s.setdefault("objectives", {})
+    # every form needs at least two words (route and concentration were exempted and crashed with one)
     rules.need(args, 2, _usage("objective"))
     kind = args[0]
     prot = []
     handler = OBJECTIVE_KINDS.get(kind)
     if handler is not None:
-        handler(s, z, args, prot)
+        handler(s, objectives, args, prot)
     elif kind in OBJECTIVE_NAMES:
-        objective_card(s, z, kind, args[1], prot)
+        objective_card(s, objectives, kind, args[1], prot)
     else:
         raise rules.Violation(f"Usage: {_usage('objective')}")
     state.save_state(s, "Tactical Control: " + "; ".join(prot), "2.4.1 p.10")
     briefing.print_board(prot, s)
 
 
-def objective_phaseline(s, z, args, prot):
+def objective_phaseline(s, objectives, args, prot):
     rules.need(args, 3, OBJECTIVE_USAGE_PHASELINE)
     n, row = args[1], rules.int_value(args[2], OBJECTIVE_USAGE_PHASELINE)
-    z.setdefault("phaselines", {})[n] = row
+    objectives.setdefault("phaselines", {})[n] = row
     prot.append(f"Phase Line {n} between row {row} and {row + 1}")
 
 
-def objective_route(s, z, args, prot):
+def objective_route(s, objectives, args, prot):
     rules.need(args, 3, OBJECTIVE_USAGE_ROUTE)
-    nr, kid = rules.int_value(args[1], OBJECTIVE_USAGE_ROUTE), args[2]
-    c = state.card(s, kid)
+    num, card_id = rules.int_value(args[1], OBJECTIVE_USAGE_ROUTE), args[2]
+    c = state.card(s, card_id)
     if (
-        not s.get("patrouille_mission")
-        or nr not in (1, 2, 3, 4)
-        or not 2 <= c["reihe"] <= state.top_row(s)
-        or c.get("ausserhalb")
+        not s.get("patrol_mission")
+        or num not in (1, 2, 3, 4)
+        or not 2 <= c["row"] <= state.top_row(s)
+        or c.get("outside")
     ):
         raise rules.Violation(OBJECTIVE_USAGE_ROUTE)
-    r = z.setdefault("route", {})
-    if kid in [v for k_, v in r.items() if int(k_) != nr]:
+    r = objectives.setdefault("route", {})
+    if card_id in [v for k_, v in r.items() if int(k_) != num]:
         raise rules.Violation("Route Points on four different cards [MSR 2]")
-    r[str(nr)] = kid
-    prot.append(f"Route Point {nr} on {kid}; enter in order 1-4, remove the marker on entering [MSR 2]")
+    r[str(num)] = card_id
+    prot.append(f"Route Point {num} on {card_id}; enter in order 1-4, remove the marker on entering [MSR 2]")
 
 
-def objective_concentration(s, z, args, prot):
-    # L56: Artillery Concentration before the mission starts or before each patrol (7.16.5, Normandy M3 p.24)
+def objective_concentration(s, objectives, args, prot):
+    # Artillery Concentration before the mission starts or before each patrol (7.16.5, Normandy M3 p.24)
     rules.need(args, 3, OBJECTIVE_USAGE_CONCENTRATION)
-    kid, ag = args[1], " ".join(args[2:])
-    state.card(s, kid)
-    if ag not in (s.get("fm_werte") or {}):
-        raise rules.Violation(f"Unknown fire asset: {ag}; available: {', '.join(s.get('fm_werte', {}))}")
-    s.setdefault("target_marker", {})[fire_support.target_marker_key(s, ag)] = kid
-    s["konzentration_gesetzt"] = True
+    card_id, ag = args[1], " ".join(args[2:])
+    state.card(s, card_id)
+    if ag not in (s.get("fm_values") or {}):
+        raise rules.Violation(f"Unknown fire asset: {ag}; available: {', '.join(s.get('fm_values', {}))}")
+    s.setdefault("target_marker", {})[fire_support.target_marker_key(s, ag)] = card_id
+    s["concentrations_placed"] = True
     prot.append(
-        f"Artillery Concentration: Target marker {fire_support.target_marker_key(s, ag)} on {kid}; Call for Fire of this fire asset on {kid} +1 card [RULE 7.16.5 p.59, Normandy M3 p.24]"
+        f"Artillery Concentration: Target marker {fire_support.target_marker_key(s, ag)} on {card_id}; Call for Fire of this fire asset on {card_id} +1 card [RULE 7.16.5 p.59, Normandy M3 p.24]"
     )
 
 
-def objective_fortify(s, z, args, prot):
-    """L478 [Naktong M1 p.15 Tactical Controls]: 'In between attempts, select two secured cards and place 2 new Foxholes
-    (if available) on one and 1 Deep Bunker (CSR 7) on the other' (versuch_plan.befestigung in the setup)."""
-    spec = s.get("befestigung_zwischen_versuchen")
+def objective_fortify(s, objectives, args, prot):
+    """[Naktong M1 p.15 Tactical Controls]: 'In between attempts, select two secured cards and place 2 new Foxholes
+    (if available) on one and 1 Deep Bunker (CSR 7) on the other' (attempt_plan.fortify in the setup)."""
+    spec = s.get("fortify_between_attempts")
     if not spec or not s.get("reattempt_setup"):
         raise rules.Violation("Fortifications only between attempts when the mission allows them [Naktong M1 p.15]")
     rules.need(args, 3, OBJECTIVE_USAGE_FORTIFY)
-    kid, what = args[1], args[2].lower()
+    card_id, what = args[1], args[2].lower()
     if what not in ("foxholes", "deepbunker"):
         raise rules.Violation(OBJECTIVE_USAGE_FORTIFY)
     from . import campaign
 
-    if not campaign.secured_for_reattempt(s, kid):  # L506
-        raise rules.Violation(f"{kid} is not a secured card [Naktong M1 p.15]")
-    done = s.setdefault("befestigung_gesetzt", {})
+    if not campaign.secured_for_reattempt(s, card_id):
+        raise rules.Violation(f"{card_id} is not a secured card [Naktong M1 p.15]")
+    done = s.setdefault("fortifications_placed", {})
     if what in done:
         raise rules.Violation(f"{what} already placed on {done[what]} in this break")
     other = done.get("deepbunker" if what == "foxholes" else "foxholes")
-    if other == kid:
+    if other == card_id:
         raise rules.Violation("Foxholes and Deep Bunker go on two different secured cards [Naktong M1 p.15]")
     if what == "foxholes":
         for _ in range(spec.get("foxholes", 2)):
-            prot.append(f"Foxholes marker {commands.new_cover_marker(s, kid, 'Foxholes', 1)} (+1) on {kid}")
+            prot.append(f"Foxholes marker {commands.new_cover_marker(s, card_id, 'Foxholes', 1)} (+1) on {card_id}")
     else:
-        v = s.get("cover_werte", {}).get("Deep Bunker", 5)
-        prot.append(f"Deep Bunker marker {commands.new_cover_marker(s, kid, 'Deep Bunker', v)} (+{v}) on {kid} [CSR 7]")
-    done[what] = kid
+        v = s.get("cover_values", {}).get("Deep Bunker", 5)
+        prot.append(
+            f"Deep Bunker marker {commands.new_cover_marker(s, card_id, 'Deep Bunker', v)} (+{v}) on {card_id} [CSR 7]"
+        )
+    done[what] = card_id
 
 
 OBJECTIVE_KINDS = {
-    "befestigung": objective_fortify,
+    "fortify": objective_fortify,
     "phaseline": objective_phaseline,
     "route": objective_route,
-    "konzentration": objective_concentration,
+    "concentration": objective_concentration,
 }
 
 
-def objective_card(s, z, kind, kid, prot):
-    """Primary/Secondary, Attack Position, CCP or Combat Outpost on card kid."""
-    c = state.card(s, kid)
+def objective_card(s, objectives, kind, card_id, prot):
+    """Primary/Secondary, Attack Position, CCP or Combat Outpost on card card_id."""
+    c = state.card(s, card_id)
     top = state.top_row(s)
-    # L456: the mission may name other rows (ziele_reihen, tool rows) and the objective the Attack Position must touch
-    # (ap_neben), e.g. Normandy M7 p.42: Primary row 6, Secondary row 5, Attack Position row 4 next to the Secondary
-    rows = s.get("ziele_reihen") or {}
-    src = s.get("ziele_quelle", "Normandy M1 p.16, M2 p.20")
-    if kind in ("primaer", "sekundaer"):
+    # the mission may name other rows (objective_rows, tool rows) and the objective the Attack Position must touch
+    # (ap_neighbours), e.g. Normandy M7 p.42: Primary row 6, Secondary row 5, Attack Position row 4 next to the Secondary
+    rows = s.get("objective_rows") or {}
+    src = s.get("objectives_source", "Normandy M1 p.16, M2 p.20")
+    if kind in ("primary", "secondary"):
         row = rows.get(kind, top)
-        if c["reihe"] != row or c.get("staging"):
-            name = "Primary" if kind == "primaer" else "Secondary"
+        if c["row"] != row or c.get("staging"):
+            name = "Primary" if kind == "primary" else "Secondary"
             raise rules.Violation(
                 f"{name} only on tool row {row}" + (" (top mission row)" if row == top else "") + f" [{src}]"
             )
-        other = z.get("sekundaer" if kind == "primaer" else "primaer")
-        if other == kid:
+        other = objectives.get("secondary" if kind == "primary" else "primary")
+        if other == card_id:
             raise rules.Violation("Primary and Secondary on different cards")
     elif kind == "ap":
         row = rows.get("ap", top - 1)
-        if c["reihe"] != row:
+        if c["row"] != row:
             raise rules.Violation(f"Attack Position only on tool row {row} [{src}]")
-        neighbours = s.get("ap_neben") or ["primaer", "sekundaer"]
-        objs = [z.get(k) for k in neighbours]
-        if not any(o_ and geometry.adjacent(s, kid, o_) for o_ in objs):
-            names = " or ".join({"primaer": "Primary", "sekundaer": "Secondary"}[k] for k in neighbours)
+        neighbours = s.get("ap_neighbours") or ["primary", "secondary"]
+        objs = [objectives.get(k) for k in neighbours]
+        if not any(o_ and geometry.adjacent(s, card_id, o_) for o_ in objs):
+            names = " or ".join({"primary": "Primary", "secondary": "Secondary"}[k] for k in neighbours)
             raise rules.Violation(
                 f"Attack Position must be adjacent to the {names}; place the Objectives first [{src}]"
             )
     elif kind == "ccp":
-        s["ccp"] = kid
+        s["ccp"] = card_id
     elif kind == "cop":
-        if c["reihe"] != 2 or not s.get("patrouille_mission"):
+        if c["row"] != 2 or not s.get("patrol_mission"):
             raise rules.Violation("Combat Outpost on a card in row 2 (Combat Patrol mission) [Normandy M3 p.24, 2.6.1]")
         if c.get("pc"):
-            state.clear_pc(c, promote=False)  # L550
-            s.get("pc_start", {}).pop(kid, None)
-            prot.append(f"PC marker removed from {kid} (no PC on the COP) [Normandy M3 p.24, 2.6.1]")
-        n_fh = sum(1 for cv in c.get("cover", []) if cv["typ"] == "Foxholes")
+            state.clear_pc(c, promote=False)
+            s.get("pc_start", {}).pop(card_id, None)
+            prot.append(f"PC marker removed from {card_id} (no PC on the COP) [Normandy M3 p.24, 2.6.1]")
+        n_fh = sum(1 for cv in c.get("cover", []) if cv["type"] == "Foxholes")
         for _ in range(max(0, 2 - n_fh)):
-            prot.append(f"Foxholes marker {commands.new_cover_marker(s, kid, 'Foxholes', 1)} (+1) on {kid}")
+            prot.append(f"Foxholes marker {commands.new_cover_marker(s, card_id, 'Foxholes', 1)} (+1) on {card_id}")
     if kind != "ccp":
-        z[kind] = kid
-    prot.append(f"{OBJECTIVE_NAMES[kind]} on {kid}")
+        objectives[kind] = card_id
+    prot.append(f"{OBJECTIVE_NAMES[kind]} on {card_id}")
 
 
-VALUE_FIELDS = ("vof_rating", "reichweite", "ft_vof", "ft_reichweite", "erfahrung", "steps")
+VALUE_FIELDS = ("vof_rating", "range", "ft_vof", "ft_range", "experience", "steps")
 
 
 def cmd_values(s, args):
     """Enter unverified counter values from the components. Every entry is logged. During play only with --reason
-    (L175: a counter photo shows a value the setup data had wrong; the board is the master)."""
+    (a counter photo shows a value the setup data had wrong; the board is the master)."""
     o = options.parse_opts([a for a in args if a.startswith("--")])
     args = [a for a in args if not a.startswith("--")]
-    if not state.in_setup(s) and not o.get("--grund"):
+    if not state.in_setup(s) and not o.get("--reason"):
         raise rules.Violation(
             "During play counter values change only with a reason: set <unit> field=value --reason=<counter photo ...>"
         )
-    rules.need(args, 2, _usage("set"))  # L332
+    rules.need(args, 2, _usage("set"))
     n = args[0]
     e = state.unit(s, n)
-    reason = options.text_opt(o, "--grund", _usage("set"))
+    reason = options.text_opt(o, "--reason", _usage("set"))
     prot = [f"counter correction during play ({reason})"] if reason else []
     for a in args[1:]:
         k, eq, v = a.partition("=")
-        if not eq:  # L331: 'set <unit> vof_rating A' (no '=') was a ValueError
+        k = migrate.WORDS.get(k, k)  # German field names (reichweite=, erfahrung=, ...) as aliases
+        if not eq:  # 'set <unit> vof_rating A' (no '=') was a ValueError
             raise rules.Violation(f"'{a}': field=value expected; usage: {_usage('set')}")
         if k not in VALUE_FIELDS:
             raise rules.Violation(f"Field {k} cannot be changed; allowed: {', '.join(VALUE_FIELDS)}")
-        if v in ("null", "-") and k == "steps":  # L529 (review K3): steps=None crashed every step sum later
+        if v in ("null", "-") and k == "steps":  # steps=None crashed every step sum later
             raise rules.Violation("steps cannot be cleared; give the number of steps (at least 1)")
         if v in ("null", "-"):
             v2 = None
         elif k == "steps":
-            v2 = rules.int_value(v, "set <unit> steps=<n>")  # L331
+            v2 = rules.int_value(v, "set <unit> steps=<n>")
             if v2 < 1:
                 raise rules.Violation(f"steps={v2}: at least 1 step")
         else:
@@ -778,9 +828,9 @@ def cmd_values(s, args):
     briefing.print_board(prot, s)
 
 
-def setup_v4(s, n, e, o, prot):
+def setup_campaign_options(s, n, e, o, prot):
     """Extra options of 'setup' for the campaign (CSR 1, CSR 2, 2.3.4, 4.4.1), applied in this order."""
-    for key, step in V4_SETUP_STEPS:
+    for key, step in CAMPAIGN_SETUP_STEPS:
         if key in o:
             step(s, n, e, o, prot)
 
@@ -789,128 +839,128 @@ def setup_net(s, n, e, o, prot):
     """--net=radio|phone: CO TAC Net with SCR536 radios or EE8 field phones and Phone Lines [CSR 1 p.13]."""
     if n != s.get("co_hq"):
         raise rules.Violation('give --net with the CO HQ: setup "CO HQ" --net=radio|phone')
-    if o["--netz"] not in ("funk", "telefon"):
+    if o["--net"] not in ("radio", "phone"):
         raise rules.Violation("--net=radio|phone")
-    old = s.get("co_tac_mittel")
-    s["co_tac_mittel"] = o["--netz"]
-    type_new, type_old = ("EE8", "SCR536") if o["--netz"] == "telefon" else ("SCR536", "EE8")
-    for g in [g for x in s["einheiten"].values() for g in x.get("funk", [])] + s.get("funk_frei", []):
-        if g["netz"] == "CO TAC" and g["typ"] == type_old:
-            g["typ"] = type_new  # L492: the free pool device follows the CSR 1 choice too
-    if o["--netz"] == "telefon":
-        s["leitungen_pool"] = s.get("telefon_leitungen", 4) - sum(
-            x.get("leitungen", 0) for x in s["einheiten"].values()
-        )
+    old = s.get("co_tac_medium")
+    s["co_tac_medium"] = o["--net"]
+    type_new, type_old = ("EE8", "SCR536") if o["--net"] == "phone" else ("SCR536", "EE8")
+    for g in [g for x in s["units"].values() for g in x.get("radio", [])] + s.get("radio_free", []):
+        if g["net"] == "CO TAC" and g["type"] == type_old:
+            g["type"] = type_new  # the free pool device follows the CSR 1 choice too
+    if o["--net"] == "phone":
+        s["lines_pool"] = s.get("phone_lines", 4) - sum(x.get("lines", 0) for x in s["units"].values())
     else:
-        for x in s["einheiten"].values():
-            x.pop("leitungen", None)
-        s.pop("leitungen_pool", None)
+        for x in s["units"].values():
+            x.pop("lines", None)
+        s.pop("lines_pool", None)
     prot.append(
-        f"CO TAC Net with {'EE8 Field Phones, ' + str(s.get('telefon_leitungen', 4)) + ' Phone Lines' if o['--netz'] == 'telefon' else 'SCR536 radio'}"
-        + (f" (previously {old})" if old and old != o["--netz"] else "")
+        f"CO TAC Net with {'EE8 Field Phones, ' + str(s.get('phone_lines', 4)) + ' Phone Lines' if o['--net'] == 'phone' else 'SCR536 radio'}"
+        + (f" (previously {old})" if old and old != o["--net"] else "")
         + "; BN TAC and FD nets stay radio [CSR 1 p.13, 4.3.3 p.27]"
     )
 
 
 def setup_mortar(s, n, e, o, prot):
     """--mortar=section|teams: the 60mm Mortar Section or three 1-step Mortar Teams [CSR 2 p.13]."""
-    if o["--moerser"] not in ("sektion", "teams"):
+    if o["--mortar"] not in ("section", "teams"):
         raise rules.Violation("--mortar=section|teams")
-    if s.get("moerser_wahl") == o["--moerser"]:
+    if s.get("mortar_choice") == o["--mortar"]:
         pass
-    elif o["--moerser"] == "teams":
-        section = s["einheiten"].pop("Mtr Sec", None)  # CSR 2 setup choice, not a removal from play
+    elif o["--mortar"] == "teams":
+        section = s["units"].pop("Mtr Sec", None)  # CSR 2 setup choice, not a removal from play
         if section is None:
             raise rules.Violation("Mtr Sec no longer in play")
-        for tn, td in s.get("reserve_einheiten", {}).items():
-            te = copy.deepcopy(td)
-            te.update(
-                karte=section["karte"],
+        for team_name, td in s.get("reserve_units", {}).items():
+            team = copy.deepcopy(td)
+            team.update(
+                card=section["card"],
                 platoon=section.get("platoon"),
-                attached_an=list(section.get("attached_an", [])),
-                bereich="offen",
+                attached_to=list(section.get("attached_to", [])),
+                area="open",
                 status=[],
             )
-            te["funk"] = []
-            s["einheiten"][tn] = te
-        s["mtr_sec_funk_frei"] = section.get("funk", [])
+            team["radio"] = []
+            s["units"][team_name] = team
+        s["mtr_sec_radio_free"] = section.get("radio", [])
         prot.append(
             "CSR 2: three 1-step Mortar Teams 1/Mtr, 2/Mtr, 3/Mtr (G!, 4 Mtr ammo each, each carries 2) instead of the Section; the Section radio "
             "can be assigned freely: setup <unit> --device=SCR536 [CSR 2 p.13]"
         )
     else:
-        if "Mtr Sec" not in s["einheiten"]:
-            teams = [tn for tn in s.get("reserve_einheiten", {}) if tn in s["einheiten"]]
-            ref = s["einheiten"][teams[0]] if teams else {}
-            for tn in teams:
-                del s["einheiten"][tn]  # setup choice (CSR 2): the Section replaces the teams, not a removal from play
-            section = copy.deepcopy(s["aufbau_einheiten"]["Mtr Sec"])
+        if "Mtr Sec" not in s["units"]:
+            teams = [team_name for team_name in s.get("reserve_units", {}) if team_name in s["units"]]
+            ref = s["units"][teams[0]] if teams else {}
+            for team_name in teams:
+                del s["units"][
+                    team_name
+                ]  # setup choice (CSR 2): the Section replaces the teams, not a removal from play
+            section = copy.deepcopy(s["setup_units"]["Mtr Sec"])
             section.update(
-                karte=ref.get("karte"), platoon=ref.get("platoon"), attached_an=list(ref.get("attached_an", []))
+                card=ref.get("card"), platoon=ref.get("platoon"), attached_to=list(ref.get("attached_to", []))
             )
-            section["funk"] = s.pop("mtr_sec_funk_frei", section.get("funk", []))
-            s["einheiten"]["Mtr Sec"] = section
+            section["radio"] = s.pop("mtr_sec_radio_free", section.get("radio", []))
+            s["units"]["Mtr Sec"] = section
         prot.append("CSR 2: 60mm Mortar Section (H, 3 steps, 4 Mtr ammo, abstracted carriers) [CSR 2 p.13]")
-    s["moerser_wahl"] = o["--moerser"]
+    s["mortar_choice"] = o["--mortar"]
 
 
 def setup_jeep(s, n, e, o, prot):
     """--jeep=yes|no: mount the Arty FD Net SCR610 in the Arty Jeep (Normandy CSR 1 p.13, only in missions that offer it,
-    field arty_jeep_moeglich). The jeep carries only the Arty FO; the radio cannot be a manpack until the next mission (L454)."""
+    field arty_jeep_possible). The jeep carries only the Arty FO; the radio cannot be a manpack until the next mission."""
     from . import vehicles
 
-    if not s.get("arty_jeep_moeglich"):
+    if not s.get("arty_jeep_possible"):
         raise rules.Violation(
             "This mission offers no Arty Jeep (CSR 1: 'In some missions, the option ... may be available')"
         )
-    if not any(g["netz"] == "Arty FD" for g in e.get("funk", [])):
+    if not any(g["net"] == "Arty FD" for g in e.get("radio", [])):
         raise rules.Violation('Give --jeep with the Arty FO: setup "Arty FO" --jeep=yes|no [Normandy CSR 1 p.13]')
     choice = o["--jeep"]
-    if choice not in ("ja", "nein"):
+    if choice not in ("yes", "no"):
         raise rules.Violation("--jeep=yes|no")
-    s["arty_jeep_wahl"] = choice
-    radios = [g for g in e.get("funk", []) if g["netz"] == "Arty FD"]
-    if choice == "ja":
-        if vehicles.ARTY_JEEP not in s["einheiten"]:
-            s["einheiten"][vehicles.ARTY_JEEP] = vehicles.arty_jeep_unit(e)
-        s["einheiten"][vehicles.ARTY_JEEP]["karte"] = e.get("karte")
-        e["an_bord"], e["bereich"] = vehicles.ARTY_JEEP, "offen"
+    s["arty_jeep_choice"] = choice
+    radios = [g for g in e.get("radio", []) if g["net"] == "Arty FD"]
+    if choice == "yes":
+        if vehicles.ARTY_JEEP not in s["units"]:
+            s["units"][vehicles.ARTY_JEEP] = vehicles.arty_jeep_unit(e)
+        s["units"][vehicles.ARTY_JEEP]["card"] = e.get("card")
+        e["on_board"], e["area"] = vehicles.ARTY_JEEP, "open"
         for g in radios:
-            g["eingebaut"] = vehicles.ARTY_JEEP
+            g["mounted"] = vehicles.ARTY_JEEP
         prot.append(
             f"CSR 1: {n} with the SCR610 in the {vehicles.ARTY_JEEP} (carries only {n}; automatically Activated for Vehicle "
             "Movement while he is on board; the SCR610 works only on board, no manpack until the next mission) [Normandy CSR 1 p.13]"
         )
     else:
-        s["einheiten"].pop(vehicles.ARTY_JEEP, None)  # setup choice (CSR 1), not a removal from play
-        e.pop("an_bord", None)
+        s["units"].pop(vehicles.ARTY_JEEP, None)  # setup choice (CSR 1), not a removal from play
+        e.pop("on_board", None)
         for g in radios:
-            g.pop("eingebaut", None)
+            g.pop("mounted", None)
         prot.append(f"CSR 1: no Arty Jeep, {n} carries the SCR610 as a manpack [Normandy CSR 1 p.13]")
 
 
 def setup_device(s, n, e, o, prot):
     """--device=<type>: a freely assignable radio to any unit: the Mortar Section's radio once teams were chosen
-    [CSR 2 p.13], or a device from the mission's free pool 'funk_frei' (Naktong p.12: 'SCR536 radios x6: one for
-    each HQ, the rest to any other units as desired', L492)."""
-    for key, label in (("mtr_sec_funk_frei", "Section device, CSR 2"), ("funk_frei", "free device from the TO&E")):
+    [CSR 2 p.13], or a device from the mission's free pool 'radio_free' (Naktong p.12: 'SCR536 radios x6: one for
+    each HQ, the rest to any other units as desired')."""
+    for key, label in (("mtr_sec_radio_free", "Section device, CSR 2"), ("radio_free", "free device from the TO&E")):
         free = s.get(key, [])
-        g = [x for x in free if x["typ"] == o["--geraet"]]
+        g = [x for x in free if x["type"] == o["--device"]]
         if g:
-            if any(x["netz"] == g[0]["netz"] for x in e.get("funk", [])):
-                raise rules.Violation(f"{n} already has a {g[0]['netz']} device")
+            if any(x["net"] == g[0]["net"] for x in e.get("radio", [])):
+                raise rules.Violation(f"{n} already has a {g[0]['net']} device")
             free.remove(g[0])
-            e.setdefault("funk", []).append(g[0])
-            # L507: the reattempt reset restores radios from aufbau_einheiten; a device handed out here stays with the unit
-            orig = s.get("aufbau_einheiten", {}).get(n)
+            e.setdefault("radio", []).append(g[0])
+            # the reattempt reset restores radios from setup_units; a device handed out here stays with the unit
+            orig = s.get("setup_units", {}).get(n)
             if orig is not None:
-                orig["funk"] = copy.deepcopy(e["funk"])
-            prot.append(f"{n} receives {g[0]['typ']} {g[0]['netz']} ({label}) [2.3.4 p.10]")
+                orig["radio"] = copy.deepcopy(e["radio"])
+            prot.append(f"{n} receives {g[0]['type']} {g[0]['net']} ({label}) [2.3.4 p.10]")
             return
-    pool = [x["typ"] for k in ("mtr_sec_funk_frei", "funk_frei") for x in s.get(k, [])]
+    pool = [x["type"] for k in ("mtr_sec_radio_free", "radio_free") for x in s.get(k, [])]
     raise rules.Violation(
-        f"No free {o['--geraet']}: free devices {', '.join(pool) or 'none'} (Mortar Section radio only after teams were "
-        "chosen, CSR 2 p.13; mission pool 'funk_frei')"
+        f"No free {o['--device']}: free devices {', '.join(pool) or 'none'} (Mortar Section radio only after teams were "
+        "chosen, CSR 2 p.13; mission pool 'radio_free')"
     )
 
 
@@ -923,15 +973,15 @@ def setup_assets(s, n, e, o, prot):
                 f"Asset {type_} not (or no longer) in the pool: {', '.join(f'{k} {v}' for k, v in pool.items() if v)} [Normandy p.13]"
             )
         if type_ == "Rifle Grenade":
-            if e["typ"] != "Squad" and not state.is_lat(e):
-                s.setdefault("_hinweise", []).append("Rifle Grenade: intended for Rifle Squads (Unit Guide p.11)")
+            if e["type"] != "Squad" and not state.is_lat(e):
+                s.setdefault("_hints", []).append("Rifle Grenade: intended for Rifle Squads (Unit Guide p.11)")
             pl = e.get("platoon")
-            # L491: Normandy p.13 one 1-shot counter per platoon; Naktong p.12 one 2-shot counter per platoon
-            # (setup key rifle_grenade_je_platoon = 2, one entry per shot, both on the unit holding the counter)
-            limit = s.get("rifle_grenade_je_platoon", 1)
+            # Normandy p.13 one 1-shot counter per platoon; Naktong p.12 one 2-shot counter per platoon
+            # (setup key rifle_grenades_per_platoon = 2, one entry per shot, both on the unit holding the counter)
+            limit = s.get("rifle_grenades_per_platoon", 1)
             already = [
                 m
-                for m, x in s["einheiten"].items()
+                for m, x in s["units"].items()
                 for a in x.get("assets", [])
                 if a == "Rifle Grenade" and x.get("platoon") == pl
             ]
@@ -951,52 +1001,52 @@ def setup_assets(s, n, e, o, prot):
 
 def setup_lines(s, n, e, o, prot):
     """--lines=<n>: Phone Lines a unit carries, from the pool [CSR 1 p.13, 4.3.4 p.28]."""
-    if s.get("co_tac_mittel") != "telefon":
+    if s.get("co_tac_medium") != "phone":
         raise rules.Violation(
-            'Phone Lines only if the CO TAC Net uses telephones: setup "CO HQ" --net=telefon [CSR 1 p.13]'
+            'Phone Lines only if the CO TAC Net uses telephones: setup "CO HQ" --net=phone [CSR 1 p.13]'
         )
-    k = options.int_opt(o, "--leitungen", "--lines")  # L333
+    k = options.int_opt(o, "--lines", "--lines")
     if k < 0:
         raise rules.Violation(f"--lines={k}: a number of Phone Lines (0 or more) is expected")
-    free = s.get("leitungen_pool", 0) + e.get("leitungen", 0)
+    free = s.get("lines_pool", 0) + e.get("lines", 0)
     if k > free:
         raise rules.Violation(f"Only {free} Phone Lines available [CSR 1 p.13]")
-    s["leitungen_pool"] = free - k
-    e["leitungen"] = k
+    s["lines_pool"] = free - k
+    e["lines"] = k
     prot.append(f"{n} carries {k} Phone Line(s); lays one each time it leaves a card [4.3.4 p.28]")
 
 
 def setup_pyro(s, n, e, o, prot):
     """--pyro=<type>:<code>: signal assignment in the Mission Log [RULE 4.4.1 p.30]."""
     type_, sep, code = options.text_opt(o, "--pyro", "--pyro=<type>:<code>").partition(":")
-    if not sep or not code:  # L331: '--pyro=RSP' without ':<code>' was a ValueError
+    if not sep or not code:  # '--pyro=RSP' without ':<code>' was a ValueError
         raise rules.Violation("--pyro=<type>:<code>, e.g. --pyro=RSP:CF [4.4.1 p.30]")
     if type_ not in rules.PYRO_AERIAL + rules.PYRO_COLOR:
         raise rules.Violation(f"Signal devices: {', '.join(rules.PYRO_AERIAL[:4] + rules.PYRO_COLOR)} [4.4.1 p.30]")
-    if s.get("patrouille_mission"):
+    if s.get("patrol_mission"):
         # [RULE 4.4.1 p.30] Patrol Mission Pyrotechnic Signal Options
         if code not in rules.PYRO_CODES_PAT and not re.fullmatch(r"M2RP[1-4]", code):
             raise rules.Violation("code from the patrol list: CF, M2RP<1-4>, M2PO, M2S [4.4.1 p.30]")
     elif code not in rules.PYRO_CODES_OFF and not re.fullmatch(r"XPL\d+", code):
         raise rules.Violation(f"Code from the offensive list: {', '.join(rules.PYRO_CODES_OFF)}, XPL<n> [4.4.1 p.30]")
-    s.setdefault("pyro_belegung", {})[type_] = code
+    s.setdefault("pyro_codes", {})[type_] = code
     prot.append(f"Mission Log: {type_} = {code} [4.4.1 p.30]")
 
 
 # order of the original if-chain: net before mortar before device before assets before lines before pyro
-V4_SETUP_STEPS = (
-    ("--netz", setup_net),
-    ("--moerser", setup_mortar),
-    ("--geraet", setup_device),
+CAMPAIGN_SETUP_STEPS = (
+    ("--net", setup_net),
+    ("--mortar", setup_mortar),
+    ("--device", setup_device),
     ("--jeep", setup_jeep),
     ("--asset", setup_assets),
-    ("--leitungen", setup_lines),
+    ("--lines", setup_lines),
     ("--pyro", setup_pyro),
 )
 
 
-def setup_notes_v4(s):
-    """L77 [RULE 2.3.4 p.10]: assets not handed out, signal assets without an order, CCP missing (not blocking)."""
+def campaign_setup_notes(s):
+    """[RULE 2.3.4 p.10]: assets not handed out, signal assets without an order, CCP missing (not blocking)."""
     h = []
     remainder = {k: v for k, v in (s.get("assets_pool") or {}).items() if v}
     if remainder:
@@ -1006,66 +1056,75 @@ def setup_notes_v4(s):
             + " (setup <unit> --asset=<type>)"
         )
     sig = {"RSP", "RSC", "GSP", "GSC", "Red Smoke", "Green Smoke", "Yellow Smoke", "Purple Smoke"}
-    distributed = {a for e in s["einheiten"].values() for a in e.get("assets", []) if a in sig}
-    without = sorted(distributed - set(s.get("pyro_belegung") or {}))
+    distributed = {a for e in s["units"].values() for a in e.get("assets", []) if a in sig}
+    without = sorted(distributed - set(s.get("pyro_codes") or {}))
     if without:
         h.append("signals without an order: " + ", ".join(without) + " (setup <unit> --pyro=<type>:<code>, 4.4.1)")
-    if s.get("funk_frei"):  # L492
+    if s.get("radio_free"):
         h.append(
             "free radios: "
-            + ", ".join(f"{g['typ']} {g['netz']}" for g in s["funk_frei"])
+            + ", ".join(f"{g['type']} {g['net']}" for g in s["radio_free"])
             + " (setup <unit> --device=<type>, 2.3.4)"
         )
-    if "ccp" in s.get("ziele", {}) and not (s.get("ccp") or s["ziele"].get("ccp")):  # objective ccp writes s["ccp"]
+    if "ccp" in s.get("objectives", {}) and not (
+        s.get("ccp") or s["objectives"].get("ccp")
+    ):  # objective ccp writes s["ccp"]
         h.append("CCP: objective ccp <card> (5.1.7)")
     return h
 
 
-def check_setup_v4(s):
+def _patrol_setup_errors(s):
+    """The mandatory choices of a Combat Patrol [Normandy M3 p.24, MSR 1, MSR 2]."""
+    f = []
+    if s.get("light") is None:
+        f.append("Patrol visibility: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light> [Normandy M3 p.24, M3-2]")
+    objectives = s.get("objectives", {})
+    if not objectives.get("cop"):
+        f.append("Combat Outpost: objective cop <card in row 2> [p.24]")
+    if not objectives.get("primary"):
+        f.append("Primary Objective: objective primary <card in row 4> [p.24]")
+    if len(objectives.get("route", {})) < 4:
+        f.append("Route Points: objective route <1-4> <card in rows 2-4> [MSR 2]")
+    if not (s.get("patrol") or {}).get("platoon"):
+        f.append("Patrol: patrol start <1|2|3> [--with=..] [MSR 1]")
+    return f
+
+
+def check_campaign_setup(s):
     """Before the first 'phase next': mandatory mission choices done?"""
     f = []
     without = [
         n
-        for n, e in s["einheiten"].items()
-        if e["seite"] == "US"
-        and not e.get("karte")
-        and (not s.get("patrouille_mission") or n in (s.get("patrouille") or {}).get("mitglieder", []))
+        for n, e in s["units"].items()
+        if e["side"] == "US"
+        and not e.get("card")
+        and (not s.get("patrol_mission") or n in (s.get("patrol") or {}).get("members", []))
     ]
     if without:
         f.append("no starting card: " + ", ".join(without) + " (setup <unit> <11-14>)")
-    if s.get("co_tac_mittel") is None and "telefon_leitungen" in s:
+    if s.get("co_tac_medium") is None and "phone_lines" in s:
         f.append('CSR 1: setup "CO HQ" --net=radio|phone')
-    if s.get("arty_jeep_moeglich") and s.get("arty_jeep_wahl") is None:
+    if s.get("arty_jeep_possible") and s.get("arty_jeep_choice") is None:
         f.append('CSR 1: setup "Arty FO" --jeep=yes|no (SCR610 in the Arty Jeep)')
-    if s.get("moerser_wahl") is None and s.get("reserve_einheiten"):
+    if s.get("mortar_choice") is None and s.get("reserve_units"):
         f.append('CSR 2: setup "Mtr Sec" --mortar=section|teams')
-    z = s.get("ziele", {})
-    for k, t in (("primaer", "Primary Objective"), ("sekundaer", "Secondary Objective"), ("ap", "Attack Position")):
-        if k in z and not z.get(k):
-            f.append(f"{t}: objective {({'primaer': 'primary', 'sekundaer': 'secondary'}).get(k, k)} <card>")
-    if s.get("patrouille_mission"):
-        if s.get("licht") is None:
-            f.append("Patrol visibility: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light> [Normandy M3 p.24, M3-2]")
-        z = s.get("ziele", {})
-        if not z.get("cop"):
-            f.append("Combat Outpost: objective cop <card in row 2> [p.24]")
-        if not z.get("primaer"):
-            f.append("Primary Objective: objective primary <card in row 4> [p.24]")
-        if len(z.get("route", {})) < 4:
-            f.append("Route Points: objective route <1-4> <card in rows 2-4> [MSR 2]")
-        if not (s.get("patrouille") or {}).get("platoon"):
-            f.append("Patrol: patrol start <1|2|3> [--with=..] [MSR 1]")
-    oh = [k for k, c in s["karten"].items() if not c.get("staging") and not c.get("terrain")]
+    objectives = s.get("objectives", {})
+    for k, t in (("primary", "Primary Objective"), ("secondary", "Secondary Objective"), ("ap", "Attack Position")):
+        if k in objectives and not objectives.get(k):
+            f.append(f"{t}: objective {({'primary': 'primary', 'secondary': 'secondary'}).get(k, k)} <card>")
+    if s.get("patrol_mission"):
+        f += _patrol_setup_errors(s)
+    oh = [k for k, c in s["cards"].items() if not c.get("staging") and not c.get("terrain")]
     if oh:
         f.append("Terrain missing: " + ", ".join(sorted(oh)) + " (terrain <card> <type>)")
     nv = [
         n
-        for n, e in s["einheiten"].items()
-        if e["seite"] == "US"
-        and e["typ"] in ("Squad", "Weapons Team")
+        for n, e in s["units"].items()
+        if e["side"] == "US"
+        and e["type"] in ("Squad", "Weapons Team")
         and e.get("vof_rating") is None
-        and (e.get("karte") or not s.get("patrouille_mission"))
+        and (e.get("card") or not s.get("patrol_mission"))
     ]
     if nv:
-        f.append("VOF missing (from the counter): " + ", ".join(nv) + " (set <unit> vof_rating=.. reichweite=..)")
+        f.append("VOF missing (from the counter): " + ", ".join(nv) + " (set <unit> vof_rating=.. range=..)")
     return f

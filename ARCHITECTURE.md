@@ -1,8 +1,8 @@
 # Architecture of the rules engine
 
-A guide for a developer who opens the code for the first time. The package is `fof/` (in the project
-`werkzeuge/fof/`, in the public kit `tool/fof/`); the command line is `fof.py`, the booking wrapper `zug.py`.
-Setup files, mission data and the German JSON keys are explained in GLOSSARY.md; this page explains the code.
+A guide for a developer who opens the code for the first time. The package is `tool/fof/`; the command line is
+`tool/fof.py`, the booking wrapper `tool/step.py`.
+Setup files and mission data are described in README.md and the templates; this page explains the code.
 
 ## What the engine does
 
@@ -21,9 +21,9 @@ cards, ... then --success=yes|no"); nothing is saved and the command is repeated
 
 | group | module | responsibility |
 |---|---|---|
-| entry | `fof.py`, `cli.py` | command table (English names, German aliases, usage, minimum arguments), argv translation, dispatch, exit codes |
+| entry | `fof.py`, `cli.py` | command table (names, usage, minimum arguments), German aliases on input, dispatch, exit codes |
 | | `options.py`, `messages.py` | `--key=value` parsing and option aliases; output vocabulary (`VIOLATION`, `ALLOWED`, `Board:`, rule format) |
-| state | `state.py` | load, save, snapshots, accessors (`unit`, `card`, `units_on`, `pinned`, ...); type names `GameState`, `Unit`, `Card` |
+| state | `state.py`, `migrate.py` | load, save, snapshots, accessors (`unit`, `card`, `units_on`, `pinned`, ...); type names `GameState`, `Unit`, `Card`; German words of older files and command lines |
 | | `keys.py` | register of every state key with lifetime and meaning; key check on save |
 | | `history.py`, `briefing.py` | undo; consistency check, board briefing (`BRIEFING.md`), CHECKSTAMP |
 | rule data | `rules.py`, `geometry.py` | sequence of play, action menu, tables, default readings of open questions; cards, LOS, range, visibility |
@@ -44,15 +44,18 @@ use attributes at call time. Tables built at import time never reference a funct
 
 ## The game state
 
-`spielstand.json` in the game folder is one nested dict, called `s` everywhere:
+`game_state.json` in the game folder is one nested dict, called `s` everywhere:
 
-- `s["einheiten"][name]`: a unit (side `seite` US or Feind, card `karte`, area `bereich` = `offen` or a cover marker id,
-  `status` markers, `steps`, `ziel` = the card it fires at, ...)
-- `s["karten"][id]`: a terrain card (id = row and column, `"34"`; `cover` markers, `extern` VOF markers, `pc`, ...)
-- `s["kommandos"][hq]`, `s["protokoll"]`, `s["phase"]`, `s["zug"]`, and the mission tables from the setup file
+- `s["units"][name]`: a unit (`side` US or Enemy, `card`, `area` = `open` or a cover marker id, `status` markers,
+  `steps`, `target` = the card it fires at, ...)
+- `s["cards"][id]`: a terrain card (id = row and column, `"34"`; `cover` markers, `external` VOF markers, `pc`, ...)
+- `s["commands"][hq]`, `s["protocol"]`, `s["phase"]`, `s["turn"]`, and the mission tables from the setup file
 
-The keys are German because every saved game uses them; the code is English. **Every key is listed in
-`keys.py`** with a lifetime (setup, mission, attempt, turn, phase, action, command, legacy) and one line of meaning.
+Keys, values and file names are English. Until L560 they were German; `migrate.py` holds the German words
+(`WORDS`, `OPTION_WORDS`, `COMMANDS_DE`, the old file names) and translates a game, setup file or snapshot written
+before that when it is loaded, so old games keep working. It is the only module with German words in it; a test
+refuses a German key anywhere else. **Every key is listed in `keys.py`** with a lifetime (setup, mission, attempt,
+turn, phase, action, command, legacy) and one line of meaning.
 Tests and the regression run with `FOF_KEY_CHECK=1`: `save_state` then refuses a state with an unregistered key,
 a source scan finds every literal key the code writes, and a generic test checks that every `turn` key is gone after
 the end of the turn. A working flag that nobody clears was the most common bug class of the 2026-11-07 review, so
@@ -63,20 +66,20 @@ Derived values (who fires, VOF on a card, Activity Level) are recomputed from th
 ## The way of a command
 
 1. `fof.py order "1st PLT HQ" 1/1 4.2.2c --target=32 --success=yes`
-2. `cli.main`: `argv_to_german` maps English command words, sub-words and option names to the internal German ones
-   (`--target` to `--ziel`, `yes` to `ja`); the command table gives the handler and the minimum argument count.
-3. `state.load_state` reads the game folder (`FOF_PARTIE` or `.aktuelle_partie`).
+2. `cli.main`: `normalize_argv` maps German input (command names, sub-words, option names, option values such as
+   `ja`) to the English words; the command table gives the handler and the minimum argument count.
+3. `state.load_state` reads the game folder (`FOF_GAME` or `.current_game`).
 4. The handler checks and changes `s`. Any rule problem is `raise rules.Violation("... [RULE x p.y]")`; because nothing
    has been written yet, a refused command leaves no trace.
 5. `state.save_state(s, text, rule)`: consistency check (and key check), protocol entry, atomic write of
-   `spielstand.json`, snapshot `verlauf/<n>.json` for undo, `BRIEFING.md`, board lines and CHECKSTAMP.
+   `game_state.json`, snapshot `history/<n>.json` for undo, `BRIEFING.md`, board lines and CHECKSTAMP.
 
 `cmd_order` (commands.py) runs the action menu of chapter 4 as a fixed pipeline: `order_context` (parse),
 `resolve_originator`, `check_recipient` (chain of command, communication), `check_repeat_and_budget` (one action per
 unit and impulse, Commands), `apply_skill`, `pre_draw_checks` (everything that can refuse comes before the draw
 prompt; `PRE_DRAW_CHECKS` per action), the handler from `ORDER_HANDLERS`, `book_order` (pay, note, save).
 
-`zug.py` books one game step: it runs the commands in a scratch copy, books for real only if every one exits with
+`step.py` books one game step: it runs the commands in a scratch copy, books for real only if every one exits with
 code 0, and commits the game folder to git.
 
 ## The phase machine
@@ -95,7 +98,7 @@ starts the next turn. Locks such as `contact.mine_lock` or `vehicles.lock` refus
   part of the kit; the kit CHANGELOG lists the L ranges per release). Where a comment changes rule behaviour it
   also carries the rule citation; technical ones (argument checks, refactorings) do not need one.
 - **Open readings.** Where the rules leave a question open, the engine uses a named default (`rules.DEFAULT_OPTIONS`,
-  `U12_...`), says so in the output (`[open U12]`) and lets a mission change it in `optionen`.
+  `U12_...`), says so in the output (`[open U12]`) and lets a mission change it in `options`.
 - **One move path per side.** A unit changes its card only in `commands.move_unit` (US, vehicles) or
   `enemy.move_enemy` (enemy), so Grenade expiry, mines, ammo surplus, phone lines and fire after the move always run.
   Placements (setup, entering units) are the only other writers; a test guards the list.

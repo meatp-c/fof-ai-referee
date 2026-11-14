@@ -1,60 +1,62 @@
-"""L470: werkzeuge/zug.py, the one-call probe/book/commit helper (parsing and output filter only; no game folder)."""
+"""L470: tool/step.py, the one-call probe/book/commit helper (parsing and output filter only; no game folder)."""
 
 import importlib.util
 import pathlib
 
-SPEC = importlib.util.spec_from_file_location("zug", pathlib.Path(__file__).resolve().parent.parent / "tool" / "zug.py")
-zug = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(zug)
+SPEC = importlib.util.spec_from_file_location(
+    "step", pathlib.Path(__file__).resolve().parent.parent / "tool" / "step.py"
+)
+step = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(step)
 
 
 def test_read_commands_skips_comments_and_keeps_quotes():
-    cmds = zug.read_commands('# note\nhq "1st PLT HQ"\n\ncard ? 5\n')
+    cmds = step.read_commands('# note\nhq "1st PLT HQ"\n\ncard ? 5\n')
     assert cmds == [["hq", "1st PLT HQ"], ["card", "?", "5"]]
 
 
 def test_shorten_drops_only_allowed_headers():
     out = "ALLOWED [RULE 4.2.2a p.23]\nGI orders 1/3: Move; cost 1\nBoard: 1/3 to 43, Exposed\nCHECKSTAMP OK"
-    assert zug.shorten(out, False).splitlines() == [
+    assert step.shorten(out, False).splitlines() == [
         "GI orders 1/3: Move; cost 1",
         "Board: 1/3 to 43, Exposed",
         "CHECKSTAMP OK",
     ]
-    assert zug.shorten(out, True) == out
+    assert step.shorten(out, True) == out
 
 
 def test_parse_args():
-    o = zug.parse_args(["--probe", "--msg", "x y"])
+    o = step.parse_args(["--probe", "--msg", "x y"])
     assert o["probe"] and o["msg"] == "x y" and not o["all"]
 
 
 def test_verdict_uses_the_exit_code_not_the_text():
     """L529 (review K1/K8): exit 2 is a VIOLATION, any other non-zero exit or a traceback an error; the word in a
     help text, a note or an informational line is not a refusal."""
-    assert zug.verdict(0, "USAGE ... answers with VIOLATION and a rule citation") == "ok"
-    assert zug.verdict(0, "VIOLATION: radio check, informational") == "ok"
-    assert zug.verdict(2, "VIOLATION: 1/1 is Pinned") == "violation"
-    assert zug.verdict(1, "No game state. First: fof.py new <aufbau.json>") == "error"
-    assert zug.verdict(1, 'Traceback (most recent call last):\n  File "x"\nTypeError: ...') == "error"
-    assert zug.verdict(0, "Traceback (most recent call last):\nKeyError: 'x'") == "error"
+    assert step.verdict(0, "USAGE ... answers with VIOLATION and a rule citation") == "ok"
+    assert step.verdict(0, "VIOLATION: radio check, informational") == "ok"
+    assert step.verdict(2, "VIOLATION: 1/1 is Pinned") == "violation"
+    assert step.verdict(1, "No game state. First: fof.py new <setup.json>") == "error"
+    assert step.verdict(1, 'Traceback (most recent call last):\n  File "x"\nTypeError: ...') == "error"
+    assert step.verdict(0, "Traceback (most recent call last):\nKeyError: 'x'") == "error"
 
 
 def _main(monkeypatch, tmp_path, results, argv):
     game = tmp_path / "game"
     game.mkdir()
-    (game / "spielstand.json").write_text("{}", encoding="utf-8")
+    (game / "game_state.json").write_text("{}", encoding="utf-8")
     calls = []
 
     def fake_run(cmd, game_dir):
         calls.append((cmd, game_dir))
         return results[len(calls) - 1]
 
-    monkeypatch.setattr(zug, "run", fake_run)
-    monkeypatch.setattr(zug, "commit", lambda partie, msg: "git: fake")
-    monkeypatch.setattr(zug.sys, "argv", ["zug.py", "--partie", str(game), *argv])
-    monkeypatch.setattr(zug.sys, "stdin", __import__("io").StringIO("note a\nnote b\n"))
+    monkeypatch.setattr(step, "run", fake_run)
+    monkeypatch.setattr(step, "commit", lambda partie, msg: "git: fake")
+    monkeypatch.setattr(step.sys, "argv", ["step.py", "--game", str(game), *argv])
+    monkeypatch.setattr(step.sys, "stdin", __import__("io").StringIO("note a\nnote b\n"))
     try:
-        zug.main()
+        step.main()
         code = 0
     except SystemExit as e:
         code = e.code
@@ -85,3 +87,24 @@ def test_error_in_the_real_run_names_what_is_booked(monkeypatch, tmp_path, capsy
     )
     out = capsys.readouterr().out
     assert code == 1 and "command 2" in out and "commands 1-1 are booked but not committed" in out
+
+
+def test_run_points_fof_at_the_given_folder(monkeypatch, tmp_path):
+    """L565: run() hands fof.py the probe folder in FOF_GAME and drops only the variable name of earlier releases.
+    L561 popped FOF_GAME itself, so the probe ran against the real game and every step was booked twice. subprocess.run
+    is replaced, so this test never reaches a real game folder."""
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, "ok", ""
+
+    def fake(argv, **kw):
+        seen.update(kw["env"])
+        return Done()
+
+    monkeypatch.setattr(step.subprocess, "run", fake)
+    monkeypatch.setenv("FOF_GAME", "/somewhere/else")
+    monkeypatch.setenv(step.migrate.ENV["FOF_GAME"], "/older/name")
+    assert step.run(["status"], tmp_path / "probe") == (0, "ok")
+    assert seen["FOF_GAME"] == str(tmp_path / "probe")
+    assert step.migrate.ENV["FOF_GAME"] not in seen

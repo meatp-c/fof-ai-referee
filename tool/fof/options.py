@@ -2,194 +2,148 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
-from . import rules
+from . import migrate, rules
 
 
-OPT_ALIASES = {
-    "--plain": "--normal",
-    "--target": "--ziel",
-    "--success": "--erfolg",
-    "--unit": "--einheit",
-    "--net": "--netz",
-    "--area": "--bereich",
-    "--value": "--wert",
-    "--critical": "--kritisch",
-    "--mortar": "--moerser",
-    "--place": "--platz",
-    "--free": "--gratis",
-    "--agency": "--agentur",
-    "--edges": "--raender",
-    "--vehicles": "--fahrzeuge",
-    "--new-type": "--typ-neu",
-    "--elevation": "--hoehe_plus",
-    "--building": "--gebaeude",
-    "--building-value": "--gebaeude_wert",
-    "--experience": "--erfahrung",
-    "--who": "--wer",
-    "--type": "--typ",
-    "--move-target-marker": "--target_marker",
-    "--skill-from": "--skill-von",
-    "--no": "--nr",
-    "--to": "--nach",
-    "--with": "--mit",
-    "--lines": "--leitungen",
-    "--device": "--geraet",
-    "--from": "--aus",
-    "--result": "--ergebnis",
-    "--cost": "--kosten",
-    "--extra": "--zusatz",
-    "--what": "--was",
-    "--weapon": "--waffe",
-    "--choice": "--wahl",
-    "--source": "--von",
-    "--variant": "--variante",
-    "--raw": "--roh",
-    "--direction": "--richtung",
-    "--range": "--reichweite",
-    "--origin": "--quelle",
-    "--this-turn-only": "--nur_zug",
-    "--line": "--leitung",
-    "--grenade": "--granate",
-    "--at": "--bei",
-    "--battalion": "--bataillon",
-    "--reason": "--grund",
-    "--side": "--seite",
-}
+# German option names and values (the engine's words until) are accepted as aliases
+OPT_ALIASES = migrate.OPTION_WORDS
 
-
+# German values of enumerated options (yes/no, open, Left/Right, none, radio/phone, section)
 VALUE_ALIASES = {
-    "yes": "ja",
-    "no": "nein",
-    "open": "offen",
-    "Left": "Links",
-    "Right": "Rechts",
-    "none": "keiner",
-    "radio": "funk",
-    "phone": "telefon",
-    "section": "sektion",
+    g: e
+    for g, e in migrate.WORDS.items()
+    if e in ("yes", "no", "open", "Left", "Right", "none", "radio", "phone", "section")
+}
+
+# German words in --edges values (top/bottom/left/right, white/green); 'dark' and 'corner' are English aliases
+EDGE_ALIASES = {
+    **{g: e for g, e in migrate.WORDS.items() if e in ("top", "bottom", "left", "right", "white", "green")},
+    "dark": "green",
+    "corner": "diagonal",
 }
 
 
-# German option keys the handlers read (review 23.10.2026, L222: an explicit registry replaces the source scan that
-# accepted every quoted word). English-only keys (--hq, --originator, --skill, --team, --squad, ...) are listed as well.
+# Option keys the handlers read (an explicit registry: a scan of the source would
+# accept every quoted word). English-only keys (--hq, --originator, --skill, --team, --squad, ...) are listed as well.
 KNOWN_OPTIONS = frozenset(
     {
-        "--normal",
-        "--agentur",
+        "--plain",
+        "--agency",
         "--asset",
-        "--aus",
-        "--bataillon",
-        "--bei",
-        "--bereich",
+        "--from",
+        "--game",  # step.py only; cli.main refuses it with a hint
+        "--battalion",
+        "--at",
+        "--area",
         "--burst",
         "--cc",
         "--cc2",
         "--cover_draw",
         "--cover_max",
-        "--einheit",
-        "--erfahrung",
-        "--erfolg",
-        "--ergebnis",
+        "--unit",
+        "--experience",
+        "--success",
+        "--result",
         "--force",
-        "--gebaeude",
-        "--gebaeude_wert",
-        "--geraet",
-        "--granate",
-        "--gratis",
-        "--grund",
+        "--building",
+        "--building-value",
+        "--device",
+        "--grenade",
+        "--free",
+        "--reason",
         "--hill",
-        "--fahrzeuge",
-        "--hoehe_plus",
+        "--vehicles",
+        "--elevation",
         "--hq",
         "--illum",
         "--jeep",
         "--jam",
-        "--kosten",
-        "--kritisch",
-        "--leitung",
-        "--leitungen",
-        "--mit",
-        "--moerser",
-        "--nach",
-        "--netz",
-        "--nr",
-        "--nur_zug",
+        "--cost",
+        "--critical",
+        "--line",
+        "--lines",
+        "--with",
+        "--mortar",
+        "--to",
+        "--net",
+        "--no",
+        "--this-turn-only",
         "--originator",
         "--platoon",
-        "--platz",
+        "--place",
         "--pyro",
-        "--quelle",
+        "--origin",
         "--r",
-        "--raender",
-        "--reichweite",
-        "--richtung",
-        "--roh",
-        "--seite",
+        "--edges",
+        "--range",
+        "--direction",
+        "--raw",
+        "--side",
         "--short",
         "--skill",
-        "--skill-von",
+        "--skill-from",
         "--squad",
         "--steps",
-        "--target_marker",
+        "--move-target-marker",
         "--team",
-        "--typ",
-        "--typ-neu",
-        "--variante",
+        "--type",
+        "--new-type",
+        "--variant",
         "--leader-squad",
         "--ooa-flip",
         "--vof",
-        "--von",
-        "--waffe",
-        "--wahl",
-        "--was",
-        "--wer",
-        "--wert",
-        "--ziel",
-        "--zusatz",
+        "--source",
+        "--weapon",
+        "--choice",
+        "--what",
+        "--who",
+        "--value",
+        "--target",
+        "--extra",
     }
 )
 assert not (set(OPT_ALIASES.values()) & set(OPT_ALIASES)), "an alias must not map onto another alias key"
 assert set(OPT_ALIASES.values()) <= KNOWN_OPTIONS, "every alias target must be a known option"
 
-# options whose values are enumerations and get the English value aliases (yes/no/open/...) in cli.argv_to_german;
-# free text (--grund, --was, --skill, --typ, ...) is passed through untouched (L222)
+# options whose values are enumerations and get the value aliases (yes/no/open/...) in parse_opts;
+# free text (--reason, --what, --skill, --type, ...) is passed through untouched
 ENUM_VALUE_OPTIONS = frozenset(
     {
-        "--normal",
-        "--erfolg",
+        "--plain",
+        "--success",
         "--jam",
         "--short",
-        "--kritisch",
-        "--gratis",
-        "--nur_zug",
-        "--leitung",
-        "--bereich",
-        "--richtung",
-        "--netz",
-        "--moerser",
+        "--critical",
+        "--free",
+        "--this-turn-only",
+        "--line",
+        "--area",
+        "--direction",
+        "--net",
+        "--mortar",
         "--platoon",
-        "--roh",
-        "--granate",
-        "--target_marker",
-        "--typ-neu",
+        "--raw",
+        "--grenade",
+        "--move-target-marker",
+        "--new-type",
         "--jeep",
-        "--fahrzeuge",
-        "--ooa-flip",  # L524
-        "--zusatz",  # L467: --extra=yes|no (L452) needs the value alias too
+        "--vehicles",
+        "--ooa-flip",
+        "--cc2",  # --cc2=none, also with the German value aliases
+        "--extra",  # --extra=yes|no needs the value alias too
     }
 )
 
 
 def parse_opts(args: list[str]) -> dict[str, Any]:
-    """--key=value pairs. Unknown keys, empty values and repeated keys are refused (L72, L222); a bare --flag is stored as
-    True. English key aliases are accepted here too (idempotent: no alias target is itself an alias key).
-
-    Kept on purpose (review Struktur 8): the command line is translated once in cli.argv_to_german, but in-process
-    callers skip it (the test suite calls cmd_order, cmd_grenade, ... with --target=, --success=, --unit= around a
-    hundred times). Only keys are mapped here; value aliases (yes/no, open, ...) exist only in cli.argv_to_german, so
-    in-process callers pass German values ("ja"/"nein")."""
+    """--key=value pairs. Unknown keys, empty values and repeated keys are refused; a bare --flag is stored as
+    True. German option names are mapped to the English ones here, and the values of enumerated options (yes/no, open,
+    ...) and of --edges as well, so the command line and in-process callers (the test suite calls cmd_order,
+    cmd_grenade, ... directly) get the same English words."""
     o = {}
     for a in args:
         if not a.startswith("--"):
@@ -202,13 +156,30 @@ def parse_opts(args: list[str]) -> dict[str, Any]:
             raise rules.Violation(f"Option {k} has an empty value; nothing booked")
         if k in o:
             raise rules.Violation(f"Option {k} given twice; nothing booked")
-        o[k] = v if eq else True
+        o[k] = english_value(k, v) if eq else True
     return o
 
 
+def _alias_item(x: str) -> str:
+    head, sep, tail = x.rpartition(":")
+    return head + sep + VALUE_ALIASES.get(tail, tail) if sep else VALUE_ALIASES.get(x, x)
+
+
+def english_value(k: str, v: str) -> str:
+    """English value of option k: enumerated values item by item ("1/1:yes,2/1:no"), --edges word by word; free text
+    (--reason, --what, --skill, --type, ...) unchanged."""
+    if k == "--edges":
+        for de, en in EDGE_ALIASES.items():
+            v = re.sub(rf"\b{de}\b", en, v)
+        return v
+    if k in ENUM_VALUE_OPTIONS:
+        return ",".join(_alias_item(x) for x in v.split(","))
+    return v
+
+
 def int_opt(o: dict[str, Any], key: str, what: str, default: int | None = None) -> int | None:
-    """Integer option with a Violation instead of a ValueError (L221); a bare --flag without a number is a Violation as
-    well (L333), it used to fall back to the default silently."""
+    """Integer option with a Violation instead of a ValueError; a bare --flag without a number is a Violation as
+    well."""
     v = o.get(key)
     if v is None:
         return default
@@ -218,8 +189,7 @@ def int_opt(o: dict[str, Any], key: str, what: str, default: int | None = None) 
 
 
 def text_opt(o: dict[str, Any], key: str, usage: str | None = None, default: str | None = None) -> str | None:
-    """Option that needs a text value (canonical version of the local text_opt helpers in commands.py and vehicles.py,
-    review H12): a bare --flag (stored as True by parse_opts) is a Violation naming the usage; missing: default."""
+    """Option that needs a text value (canonical version of the local text_opt helpers in commands.py and vehicles.py): a bare --flag (stored as True by parse_opts) is a Violation naming the usage; missing: default."""
     v = o.get(key)
     if v is True:
         raise rules.Violation(f"Option {key} needs a value: " + (usage or f"{key}=.."))
@@ -228,6 +198,6 @@ def text_opt(o: dict[str, Any], key: str, usage: str | None = None, default: str
 
 def list_option(o: dict[str, Any], key: str) -> list[str]:
     v = o.get(key)
-    if v is True:  # L323: a bare flag where a list is expected
+    if v is True:  # a bare flag where a list is expected
         raise rules.Violation(f"Option {key} needs a value: {key}=<a>[,<b>..]")
     return [x.strip() for x in v.split(",")] if v else []

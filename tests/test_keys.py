@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def package_dir():
-    for folder in ("werkzeuge", "tool"):
+    for folder in ("tool",):
         cand = ROOT / folder / "fof"
         if cand.is_dir():
             return cand
@@ -37,7 +37,7 @@ def written_keys():
                 elif n.func.attr == "update":
                     keys += [kw.arg for kw in n.keywords if kw.arg]
             if isinstance(n, ast.Assign) and isinstance(n.value, ast.Dict):
-                # dict literal stored on the state: s["gegenangriff"] = {"taktik_vorher": .., "bis_zug": ..}
+                # dict literal stored on the state: s["counterattack"] = {"tactic_before": .., "until_turn": ..}
                 if any(
                     isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == "s"
                     for t in n.targets
@@ -54,13 +54,13 @@ def literal_keys(d):
 
 
 def unit_literal_keys():
-    """{key: [file:line]} of dict literals that build a unit (keys seite plus karte, steps or status)."""
+    """{key: [file:line]} of dict literals that build a unit (keys side plus card, steps or status)."""
     found = {}
     for f in sorted(package_dir().glob("*.py")):
         for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
             if isinstance(n, ast.Dict):
                 ks = literal_keys(n)
-                if "seite" in ks and {"karte", "steps", "status"} & set(ks):
+                if "side" in ks and {"card", "steps", "status"} & set(ks):
                     for k in ks:
                         found.setdefault(k, []).append(f"{f.name}:{n.lineno}")
     return found
@@ -104,9 +104,9 @@ def test_register_entries_are_well_formed():
 
 def saved_states():
     """Games, setups and fixtures; of the history snapshots every 25th and the newest of each game (they differ little)."""
-    for p in ("*/spielstand.json", "normandy/aufbau_*.json", "korea/aufbau_*.json", "tests/fixtures/*.json"):
+    for p in ("*/game_state.json", "normandy/setup_*.json", "korea/setup_*.json", "tests/fixtures/*.json"):
         yield from (f for f in sorted(ROOT.glob(p)) if ".stale." not in str(f))
-    for d in sorted(ROOT.glob("*/verlauf")):
+    for d in sorted(ROOT.glob("*/history")):
         if ".stale." in str(d):
             continue
         snaps = sorted(d.glob("*.json"), key=lambda f: int(f.stem) if f.stem.isdigit() else 0)
@@ -114,7 +114,7 @@ def saved_states():
 
 
 def test_every_saved_state_uses_registered_keys():
-    from fof import keys
+    from fof import keys, migrate
 
     files = list(saved_states())
     if not files:
@@ -122,10 +122,10 @@ def test_every_saved_state_uses_registered_keys():
     bad = {}
     for f in files:
         try:
-            s = json.loads(f.read_text(encoding="utf-8"))
+            s = migrate.state(json.loads(f.read_text(encoding="utf-8")))  # L560: games saved before L560 are German
         except ValueError:
             continue
-        if isinstance(s, dict) and ("karten" in s or "einheiten" in s):
+        if isinstance(s, dict) and ("cards" in s or "units" in s):
             u = keys.unknown_keys(s)
             if u:
                 bad[str(f.relative_to(ROOT))] = u[:5]
@@ -138,17 +138,17 @@ def test_save_state_refuses_an_unregistered_key(cli_game, fof_cli):
 
     cli_game()
     s = state.load_state()
-    s["einheiten"]["X"] = {
-        "seite": "US",
-        "typ": "Squad",
-        "karte": "11",
-        "bereich": "offen",
+    s["units"]["X"] = {
+        "side": "US",
+        "type": "Squad",
+        "card": "11",
+        "area": "open",
         "status": [],
         "kein_point_blnak": True,
     }
     with pytest.raises(rules.Violation, match="unregistered key.*kein_point_blnak"):
         state.save_state(s, "typo", None)
-    assert "X" not in saved_state()["einheiten"]
+    assert "X" not in saved_state()["units"]
 
 
 def test_check_is_off_in_normal_play(monkeypatch):
@@ -163,7 +163,7 @@ def test_check_is_off_in_normal_play(monkeypatch):
 # ---- L554 (review E2): the lifetime contract of the register, checked generically
 
 
-DUMMY = {"fm_gesperrt": {"zug": 1, "gruppe": "x"}, "illum": [{"wert": 1}], "pyro": ["Red Smoke"]}
+DUMMY = {"fm_blocked": {"turn": 1, "group": "x"}, "illum": [{"value": 1}], "pyro": ["Red Smoke"]}
 
 
 def test_every_turn_key_is_gone_after_the_end_of_the_turn(board, monkeypatch):
@@ -172,27 +172,27 @@ def test_every_turn_key_is_gone_after_the_end_of_the_turn(board, monkeypatch):
     from conftest import unit
     from fof import briefing, keys, phase, state
 
-    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protokoll"].append({"text": text}))
+    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protocol"].append({"text": text}))
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
     s = board
-    s.update(phase="3.8", mission="x", max_zuege=6, kampagne={})
-    s["einheiten"]["1/1"] = unit("22")
-    s["kommandos"]["1st PLT HQ"] = {"verfuegbar": 0, "gespart": 0, "aktiviert": False, "fertig": False}
+    s.update(phase="3.8", mission="x", max_turns=6, campaign={})
+    s["units"]["1/1"] = unit("22")
+    s["commands"]["1st PLT HQ"] = {"available": 0, "saved": 0, "activated": False, "done": False}
     turn = {name: [k for k, (lt, _m) in st.items() if lt == "turn"] for name, st in keys.STRUCTURES.items()}
     for k in turn["GAME"]:
         s[k] = DUMMY.get(k, 1)
     for k in turn["UNIT"]:
-        s["einheiten"]["1/1"][k] = DUMMY.get(k, True)
+        s["units"]["1/1"][k] = DUMMY.get(k, True)
     for k in turn["CARD"]:
-        s["karten"]["22"][k] = DUMMY.get(k, True)
+        s["cards"]["22"][k] = DUMMY.get(k, True)
     for k in turn["COMMANDS"]:
-        s["kommandos"]["1st PLT HQ"][k] = True
+        s["commands"]["1st PLT HQ"][k] = True
     phase.cmd_end_turn(s, [])
     left = (
         [f"state: {k}" for k in turn["GAME"] if s.get(k)]
-        + [f"unit: {k}" for k in turn["UNIT"] if s["einheiten"]["1/1"].get(k)]
-        + [f"card: {k}" for k in turn["CARD"] if s["karten"]["22"].get(k)]
-        + [f"kommandos: {k}" for k in turn["COMMANDS"] if s["kommandos"]["1st PLT HQ"].get(k)]
+        + [f"unit: {k}" for k in turn["UNIT"] if s["units"]["1/1"].get(k)]
+        + [f"card: {k}" for k in turn["CARD"] if s["cards"]["22"].get(k)]
+        + [f"commands: {k}" for k in turn["COMMANDS"] if s["commands"]["1st PLT HQ"].get(k)]
     )
     assert not left, (
         "'turn' keys survive the end of the turn (clean them up in 3.8 or change the lifetime): " + ", ".join(left)
@@ -209,7 +209,7 @@ def test_no_command_key_is_ever_saved(cli_game, fof_cli):
     command = [k for k, (lt, _m) in keys.GAME.items() if lt == "command"]
     assert not [k for k in command if k in s]
     unit_cmd = [k for k, (lt, _m) in keys.UNIT.items() if lt == "command"]
-    assert not [k for e in s["einheiten"].values() for k in unit_cmd if k in e]
+    assert not [k for e in s["units"].values() for k in unit_cmd if k in e]
 
 
 # ---- L554 (review E3/S4): one move path per side
@@ -234,7 +234,7 @@ PLACEMENT_WRITERS = {
 
 
 def test_a_units_card_changes_only_in_the_move_paths_or_placements():
-    """A new direct write of unit['karte'] outside the two move paths skips Grenade expiry, mines, ammo surplus,
+    """A new direct write of unit['card'] outside the two move paths skips Grenade expiry, mines, ammo surplus,
     phone lines, patrol and fire after the move (review V9). Moves go through commands.move_unit or enemy.move_enemy."""
     found = set()
     for f in sorted(package_dir().glob("*.py")):
@@ -244,13 +244,13 @@ def test_a_units_card_changes_only_in_the_move_paths_or_placements():
                     isinstance(n, ast.Subscript)
                     and isinstance(n.ctx, ast.Store)
                     and isinstance(n.slice, ast.Constant)
-                    and n.slice.value == "karte"
+                    and n.slice.value == "card"
                 )
                 upd = (
                     isinstance(n, ast.Call)
                     and isinstance(n.func, ast.Attribute)
                     and n.func.attr == "update"
-                    and any(k.arg == "karte" for k in n.keywords)
+                    and any(k.arg == "card" for k in n.keywords)
                 )
                 if store or upd:
                     found.add((f.name, fn.name))

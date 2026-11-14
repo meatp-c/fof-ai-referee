@@ -9,4 +9,4 @@ def test_second_grenade_miss_says_already_there(board):
     first = grenades.place_grenade_miss(s, "22")
     second = grenades.place_grenade_miss(s, "22")
     assert "(-1) on 22" in first and "already on 22" in second
-    assert s["karten"]["22"]["grenade_miss"] is True
+    assert s["cards"]["22"]["grenade_miss"] is True

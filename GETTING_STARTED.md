@@ -58,7 +58,7 @@ Setup, in this order, one step at a time, and wait for my answer after each step
    "python3 tool/fof.py rule 4.2.2" works.
 2. Create the mission setup for <campaign>, Mission <number> from templates/mission_template.json. Ask me
    for every value you cannot read from the PDFs (counter values, terrain card values, package tables,
-   fire support). Keep the German JSON keys as they are, see GLOSSARY.md.
+   fire support). The keys are explained in GLOSSARY.md.
 3. Create the game with "python3 tool/fof.py new <setup file> game1" and tell me what the tool says is
    still missing before turn 1.
 Then we play: I describe my move, you check it, answer ALLOWED or VIOLATION with the rule, and tell me
@@ -80,7 +80,7 @@ cards and the Mission Book), builds the mission file, and starts turn 1.
 
 ## Step 5: a new session or a new day
 
-The game state lives in `game1/spielstand.json` in your folder, so you can stop at any time. In a new session paste:
+The game state lives in `game1/game_state.json` in your folder, so you can stop at any time. In a new session paste:
 
 ```
 Read AI_BRIEFING.md, then run "python3 tool/fof.py status" in this folder and continue the game from there.
@@ -92,6 +92,6 @@ Tool first, one rule step per message, CHECKSTAMP at the end of every answer.
 - **Do I need to understand the tool?** No. If you are curious: `python3 tool/fof.py help` lists the commands.
 - **Can I play in another language?** Yes. The tool's output is English, the AI can talk to you in any language.
 - **The AI books something wrong.** Tell it. The briefing instructs it to fix the tool or its data, not to argue with
-  the board. Every booked step is in `game1/spielstand.json` under `protokoll`, so nothing is lost.
+  the board. Every booked step is in `game1/game_state.json` under `protocol`, so nothing is lost.
 - **Something does not work.** Open an issue on GitHub with the AI's last answers and, if possible, your
-  `spielstand.json`. Do not attach your PDFs or rule texts.
+  `game_state.json`. Do not attach your PDFs or rule texts.

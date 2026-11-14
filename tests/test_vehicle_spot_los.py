@@ -9,10 +9,10 @@ def test_vehicle_spot_refused_out_of_incoming(board, monkeypatch):
 
     s = board
     tank = unit("22", vof="H", rng="V", steps=2)
-    tank.update(fahrzeug="M10 TD 76mm", typ="Vehicle", status=["Activated"])
-    s["einheiten"]["TD"] = tank
-    s["einheiten"]["Spotter"] = unit("33", side="Feind", spotted=False)
-    s["karten"]["22"].setdefault("extern", []).append({"typ": "Incoming", "wert": -3, "seite": "Feind"})
-    monkeypatch.setattr(vehicles, "start_action", lambda s_, n, kind: ({"aktion": {"plan": []}}, s_["einheiten"][n]))
+    tank.update(vehicle="M10 TD 76mm", type="Vehicle", status=["Activated"])
+    s["units"]["TD"] = tank
+    s["units"]["Spotter"] = unit("33", side="Enemy", spotted=False)
+    s["cards"]["22"].setdefault("external", []).append({"type": "Incoming", "value": -3, "side": "Enemy"})
+    monkeypatch.setattr(vehicles, "start_action", lambda s_, n: ({"action": {"plan": []}}, s_["units"][n]))
     with pytest.raises(rules.Violation, match="No LOS from 22 to 33"):
-        vehicles.vehicle_spot(s, ["TD"], {"--ziel": "33"})
+        vehicles.vehicle_spot(s, ["TD"], {"--target": "33"})

@@ -1,85 +1,84 @@
-# Glossary: German names inside the game state
+# Glossary: the game state
 
-The engine was written in German. Code (function and variable names), output and the command line are English
-(German command names still work), but **JSON keys and stored values are German** so that existing game states
-and setup files keep working. An AI reading the game state JSON or writing a setup file needs this table.
-Do not translate these keys in your setup files, the engine looks them up literally.
+The game state JSON (`<game>/game_state.json`) and the setup files use English keys and values. Up to the eighth
+release (2026-11-07) they were German; games, setup files and snapshots written before are converted automatically
+when the engine loads them (`tool/fof/migrate.py` holds the German words), and German command names, option names and
+option values still work on the command line. Every key with its lifetime and meaning is listed in `tool/fof/keys.py`; this page
+lists the ones an AI needs most when it reads a game state or writes a setup file.
 
-## Game state / setup keys (`spielstand.json`, setup JSON)
+## Game state / setup keys
 | key | meaning |
 |---|---|
-| mission, typ (offensiv/defensiv), ziel | mission title, mission type, objective text |
-| zug, max_zuege, phase | turn, last turn, current phase id (e.g. "3.3.2b") |
-| sicht (tag/eingeschraenkt), licht, wetter | visibility (day/limited), light level modifier, weather modifier |
-| aktivitaet | Current Activity Level (No Contact, Contact, Engaged, Heavily Engaged) |
-| einheiten | units (dict by counter name) |
-| karten | terrain cards (dict by card id = row+column, e.g. "34") |
-| kommandos | Commands per HQ: verfuegbar (available), gespart (saved), aktiviert (activated), fertig (done) |
-| aktiver_hq | HQ of the current impulse |
-| protokoll | log of every booked step (nr, zug, phase, text, regel) |
-| pakete, paket_tabelle | enemy packages, package table per PC letter |
+| mission, type (offensive/defensive/patrol), target | mission title, mission type, objective text |
+| turn, max_turns, phase | turn, last turn, current phase id (e.g. "3.3.2b") |
+| sight (day/limited), light, weather | visibility (day or limited visibility turns), light level modifier, weather modifier |
+| activity | Current Activity Level (No Contact, Contact, Engaged, Heavily Engaged) |
+| units | units (dict by counter name) |
+| cards | terrain cards (dict by card id = row+column, e.g. "34") |
+| commands | Commands per HQ: available, saved, activated, done |
+| active_hq | HQ of the current impulse |
+| protocol | log of every booked step (number, turn, phase, text, rule) |
+| packages, package_table | enemy packages, package table per PC letter |
 | countermix | number of enemy counters in the box |
-| ereignistabellen (freund/feind) | Higher HQ event tables (friendly/enemy) |
-| feuermissionen, fm_werte, fm_gruppe, cff_tabelle | fire missions left, VOF per mission type, battery per type, cards per observer |
+| counter_names | optional: the names printed on the enemy counters per countermix type, in the order you keep them; a new counter gets the first free name |
+| enemy_prefix | optional: prefix of every enemy counter name (e.g. NKPA), so enemy and friendly names never clash |
+| event_tables (friendly/enemy) | Higher HQ event tables |
+| fire_missions, fm_values, fm_group, cff_table | fire missions left, VOF per mission type, battery per type, cards per observer |
 | target_marker | Target/Concentration marker per firing agency |
-| assets_pool, pyro_belegung | assets not yet issued, pyrotechnic signal codes |
-| ziele (primaer, sekundaer, ap, ccp, cop, route, phaselines) | Tactical Controls (primary, secondary, attack position, CCP, combat outpost, route points, phase lines) |
-| kampagne (versuch, versuche_max, xp_tabelle) | campaign data (attempt, max attempts, experience table) |
-| xp | experience log (zug, versuch, punkte = points, grund = reason) |
-| gefangene, removed_from_play | prisoners, removed counters |
-| patrouille, patrouille_mission | combat patrol state (platoon, mitglieder = members, route_index, erfolg = success) |
-| optionen | readings for open rules questions (see `fof.py options`) |
-| reserve_einheiten | units that are not on the board at the start |
-| terrain_katalog, gebaeude_tabelle, cover_werte | terrain card values, building table, cover marker values |
-| richtung_tabelle | direction table for package placement |
-| illum_werte | illumination marker values (oben = card itself, unten = adjacent cards) |
+| assets_pool, pyro_codes | assets not yet issued, pyrotechnic signal codes |
+| objectives (primary, secondary, ap, ccp, cop, route, phaselines) | Tactical Controls (primary, secondary, attack position, CCP, combat outpost, route points, phase lines) |
+| campaign (attempt, attempts_max, xp_table) | campaign data |
+| xp | experience log (turn, attempt, points, reason) |
+| prisoners, removed_from_play | prisoners, removed counters |
+| patrol, patrol_mission | combat patrol state (platoon, members, route_index, success) |
+| options | readings for open rules questions (see `fof.py options`) |
+| reserve_units | units that are not on the board at the start |
+| terrain_catalog, building_table, cover_values | terrain card values, building table, cover marker values |
+| direction_table | direction table for package placement |
+| illum_values | illumination marker values (top = card itself, bottom = adjacent cards) |
 
-## Unit fields (`einheiten[name]`)
+## Unit fields (`units[name]`)
 | key | meaning |
 |---|---|
-| seite (US/Feind) | side (US/enemy) |
-| typ | Squad, HQ, Staff, Weapons Team, FO, Fire Team, Assault Team, Paralyzed Team, Litter Team ... |
-| ebene (BN/CO/PLT), platoon | command level, platoon number |
-| erfahrung | experience (Green/Line/Veteran) |
-| karte, bereich | card id, area on the card ("offen" = open, or cover id "C1", "C2") |
+| side (US/Enemy) | side |
+| type | Squad, HQ, Staff, Weapons Team, FO, Fire Team, Assault Team, Paralyzed Team, Litter Team ... |
+| level (BN/CO/PLT), platoon | command level, platoon number |
+| experience | Green/Line/Veteran |
+| card, area | card id, area on the card ("open", or a cover id "C1", "C2") |
 | status | list: "Pinned", "Exposed", "Fire Team side", ... |
 | steps | number of steps |
-| ziel | card the unit is firing at (fire target) |
-| vof_rating, reichweite | VOF (S, A, A/S, H, G, ...), range (P, C, L, V) |
-| fire_team_seite, ft_vof, ft_reichweite | has a Fire Team side, its VOF and range |
-| funk | radios: list of {typ, netz} (e.g. SCR536 on CO TAC) |
-| munition | ammo {typ (MG/MTR/RKT), punkte = points, start} |
+| target | card the unit is firing at |
+| vof_rating, range | VOF (S, A, A/S, H, G, ...), range (P, C, L, V) |
+| fire_team_side, ft_vof, ft_range | has a Fire Team side, its VOF and range |
+| radio | radios: list of {type, net} (e.g. SCR536 on CO TAC) |
+| ammo | ammo {type (MG/MTR/RKT), points, start} |
 | assets, skills | carried assets, skill markers |
 | spotted | enemy unit is spotted |
-| stationaer | unit may not move (e.g. not part of the current combat patrol) |
-| attachment, attached_an | attachment flag, HQ it is attached to |
+| stationary | unit may not move (e.g. not part of the current combat patrol) |
+| attachment, attached_to | attachment flag, HQ it is attached to |
 
-## Card fields (`karten[id]`)
+## Card fields (`cards[id]`)
 | key | meaning |
 |---|---|
 | terrain, cc, cc2 | terrain type, Cover & Concealment value (cc2 = lower second value) |
-| raender | card edges: "weiss" (white) / "gruen" (dark), or per side {oben, unten, links, rechts, diagonal} = top, bottom, left, right, corners |
-| reihe, spalte | row, column |
-| cover | cover markers [{id, typ, wert}] |
-| extern | markers like Incoming, Mines, Smoke, Pending [{typ, wert, quelle}] |
+| edges | card edges: "white" / "green" (dark), or per side {top, bottom, left, right, diagonal} |
+| row, column | row, column |
+| cover | cover markers [{id, type, value}] |
+| external | markers like Incoming, Mines, Smoke, Pending [{type, value, source}] |
 | pc | PC marker: "A", "B", "C", "?" or null |
 | illum | illumination markers on the card |
-| casualties, casualties_feind | friendly / enemy casualty markers |
-| assets_boden | assets lying on the card |
-| ausserhalb | outside the map boundaries |
+| casualties, casualties_enemy | friendly / enemy casualty markers |
+| assets_ground | assets lying on the card |
+| outside | outside the map boundaries |
 
-## Values used in commands (English alias = German value)
-yes = ja, no = nein, open = offen, Left = Links, Right = Rechts, none = keiner, radio = funk, phone = telefon,
-section = sektion; edges: top/bottom/left/right/white/green(dark)/corner = oben/unten/links/rechts/weiss/gruen/diagonal.
+## Clarification ids in comments
+E = player decision, K = rule clarification, V = procedure, L = tool change (see CHANGELOG), U = open rules question
+(reading selectable in `options`).
 
-## Code terms
-Verstoss = violation (exception class), prot = list of board instructions for the current step, speichern = save,
-laden = load, befehl = order, aktion = action, karte = card, einheit = unit, feind = enemy, treffer = hit,
-rundenende = end of turn, aufstellen = setup, ziehen = draw, Erfolg = success, Lesart = reading of an unclear rule.
-Clarification ids in comments: E = player decision, K = rule clarification, V = procedure, L = tool gap fixed,
-U = open rules question (reading selectable in `optionen`).
-
-## Data file names (kept German)
-data/regelbuch.txt, data/regelbuch_kompakt.txt (rulebook), data/regelindex.json (rule index),
-data/clarifications_2025_05_kompakt.txt, data/karten.json (player's action card archive), `.aktuelle_partie`
-(name of the current game folder), `<game>/spielstand.json` (game state), `<game>/BRIEFING.md`.
+## File names
+`<game>/game_state.json` (game state), `<game>/history/` (snapshots for undo), `<game>/BRIEFING.md`, `.current_game`
+(name of the current game folder); data/rulebook.txt, data/rulebook_compact.txt (rulebook), data/rule_index.json
+(rule index), data/clarifications_2025_05_compact.txt, data/<name>_compact.txt (further texts for `search`),
+data/action_cards.json (the player's action card archive). Folders and rule texts written by an earlier release under
+their German names (spielstand.json, verlauf/, .aktuelle_partie, regelbuch*.txt, regelindex.json, karten.json) are still
+read; a game folder is renamed to the English names when it is loaded.

@@ -24,7 +24,7 @@ def test_cli_prints_open_and_exits_zero(monkeypatch, capsys):
 
 
 def test_cli_refuses_zug_options(monkeypatch, capsys):
-    """L501: 'fof.py done --probe' booked the step; zug.py options are a VIOLATION now, before the state loads."""
+    """L501: 'fof.py done --probe' booked the step; step.py options are a VIOLATION now, before the state loads."""
 
     def no_load():
         pytest.fail("state loaded")
@@ -34,4 +34,4 @@ def test_cli_refuses_zug_options(monkeypatch, capsys):
         cli.main(["done", "--probe"])
     assert e.value.code == 2
     out = capsys.readouterr().out
-    assert out.startswith(f"{messages.VIOLATION}: --probe is an option of zug.py") and "nothing booked" in out
+    assert out.startswith(f"{messages.VIOLATION}: --probe is an option of step.py") and "nothing booked" in out

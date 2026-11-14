@@ -8,16 +8,18 @@ def test_check_move_computes_each_vof_once(board, monkeypatch):
     from fof import commands, fire
 
     s = board
-    s["einheiten"]["1/1"] = unit("22", status=["Pinned"])
-    s["einheiten"]["2/1"] = unit("23")
+    s["units"]["1/1"] = unit("22", status=["Pinned"])
+    s["units"]["2/1"] = unit("23")
     calls = []
     real = fire.vof_against
     # L535: infiltration looks at the VOF of both sides (K34); each (card, side) pair is still computed only once
     monkeypatch.setattr(
-        fire, "vof_against", lambda s_, kid, side, **kw: calls.append((kid, side)) or real(s_, kid, side, **kw)
+        fire,
+        "vof_against",
+        lambda s_, card_id, side, **kw: calls.append((card_id, side)) or real(s_, card_id, side, **kw),
     )
     try:
-        commands.check_move(s, s["einheiten"]["1/1"], "1/1", "23", "4.2.2c")
+        commands.check_move(s, s["units"]["1/1"], "1/1", "23", "4.2.2c")
     except Exception:  # legality is not the point here
         pass
     assert sorted(calls) == sorted(set(calls)), calls
@@ -29,7 +31,7 @@ def test_platoon_move_runs_the_board_wide_fire_check_once(board, monkeypatch):
 
     s = board
     for n in ("1/1", "2/1", "3/1"):
-        s["einheiten"][n] = unit("21")
+        s["units"][n] = unit("21")
     full = []
     real = fire.open_fire
     monkeypatch.setattr(fire, "open_fire", lambda s_, prot, only=None: full.append(only) or real(s_, prot, only=only))
@@ -38,4 +40,4 @@ def test_platoon_move_runs_the_board_wide_fire_check_once(board, monkeypatch):
     assert None not in full  # only the per-unit calls (only=[n])
     commands.move_unit(s, "1/1", "23", None, True, [])
     assert None in full  # a single move still checks the whole board
-    assert all(s["einheiten"][n]["karte"] in ("22", "23") for n in ("1/1", "2/1", "3/1"))
+    assert all(s["units"][n]["card"] in ("22", "23") for n in ("1/1", "2/1", "3/1"))

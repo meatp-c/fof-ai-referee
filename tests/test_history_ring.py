@@ -10,9 +10,9 @@ def test_snapshot_reuses_oldest_file(tmp_path, monkeypatch):
     monkeypatch.setattr(
         type(tmp_path), "unlink", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("no delete"))
     )
-    for nr in range(1, 11):
-        state.save_snapshot(nr, f'{{"nr": {nr}}}')
+    for num in range(1, 11):
+        state.save_snapshot(num, f'{{"nr": {num}}}')
     monkeypatch.setattr(type(tmp_path), "unlink", real_unlink)
-    names = sorted(int(f.stem) for f in (tmp_path / "verlauf").glob("*.json"))
+    names = sorted(int(f.stem) for f in (tmp_path / "history").glob("*.json"))
     assert names == [7, 8, 9, 10]  # same window as with deleting: nr - HISTORY_KEEP .. nr
-    assert (tmp_path / "verlauf" / "10.json").read_text(encoding="utf-8") == '{"nr": 10}'
+    assert (tmp_path / "history" / "10.json").read_text(encoding="utf-8") == '{"nr": 10}'

@@ -54,14 +54,14 @@ ACTIONS = {
     "4.2.1b": ("Exhort", 1, "auto", "HQ", "4.2.1b p.22"),
     "4.2.1c": ("Deploy Pyrotechnic", 1, "auto", "HQ", "4.2.1c p.22"),
     "4.2.1d": ("Reconstitute a Platoon HQ", 1, "auto", "HQ", "4.2.1d p.22, 6.5.2 p.49"),
-    "4.2.1e": ("Reconstitute the CO HQ", 1, "auto", "BN", "4.2.1e p.22, 6.5.2 p.49/50"),
+    "4.2.1e": ("Reconstitute the CO HQ", 1, "auto", "BN_STAFF", "4.2.1e p.22, 6.5.2 p.49/50"),
     "4.2.1f": ("Create a Runner", 1, "auto", "CO_ONLY", "4.2.1f p.22, 4.3.2 p.27"),
     "4.2.1g": ("Dispatch a Runner", 1, "auto", "CO_ONLY", "4.2.1g p.22, 4.3.2 p.27"),
     "4.2.1h": ("Dismiss a Runner", 1, "auto", "CO_ONLY", "4.2.1h p.22, 4.3.2 p.27"),
     "4.2.1j": ("Switch Radio/Phone to a Different Network", 1, "auto", "HQ", "4.2.1j p.22, 4.3.3 p.27"),
     "4.2.1k": ("Repair a Cut Phone Line", 1, "auto", "HQ", "4.2.1k p.22, 4.3.4 p.29"),
     "4.2.1l": ("Designate a New Tactical Control", 1, "auto", "CO", "4.2.1l p.22, 5.1.7 p.33"),
-    "4.2.1i": ("Activate for AT Combat & Vehicle Movement", 1, "auto", "HQ", "4.2.1i p.22, 10.4 p.72"),  # L187
+    "4.2.1i": ("Activate for AT Combat & Vehicle Movement", 1, "auto", "HQ", "4.2.1i p.22, 10.4 p.72"),
     "4.2.2a": ("Move to an Adjacent Card", 1, "auto", "HQ", "4.2.2a p.23"),
     "4.2.2b": ("Move a Platoon to an Adjacent Card", 2, "auto", "PLT", "4.2.2b p.23"),
     "4.2.2c": ("Attempt to Infiltrate an Adjacent Card", 1, "attempt", "HQ", "4.2.2c p.23"),
@@ -101,19 +101,19 @@ assert HQ_REQUIRED_UNDER_GI <= set(ACTIONS), "every GI exception must be an acti
 assert not HQ_REQUIRED_UNDER_GI_NOT_IMPLEMENTED & set(ACTIONS), "implemented: move it into HQ_REQUIRED_UNDER_GI"
 
 # Actions of the menu that 'order' does not carry out (no order handler): they stay in ACTIONS for cost, originator and
-# the GI rules, but are given with their own command. cmd_order used to end in "Action 4.2.1a not implemented yet".
+# the GI rules, but are given with their own command.
 ORDER_NOT_IMPLEMENTED = {"4.2.1a": "activate <hq>"}  # [RULE 4.2.1a p.22] commands.cmd_activate
 assert set(ORDER_NOT_IMPLEMENTED) <= set(ACTIONS), "an action given by its own command is still an action of the menu"
 
 
-def order_not_implemented(akt: str) -> Violation:
+def order_not_implemented(action_id: str) -> Violation:
     """The Violation for an action that cmd_order cannot carry out (registry ORDER_NOT_IMPLEMENTED)."""
-    if akt in ORDER_NOT_IMPLEMENTED:
+    if action_id in ORDER_NOT_IMPLEMENTED:
         return Violation(
-            f"Action {akt} ({ACTIONS[akt][0]}) is not given with order; use: {ORDER_NOT_IMPLEMENTED[akt]}",
-            rule=ACTIONS[akt][4],
+            f"Action {action_id} ({ACTIONS[action_id][0]}) is not given with order; use: {ORDER_NOT_IMPLEMENTED[action_id]}",
+            rule=ACTIONS[action_id][4],
         )
-    return Violation(f"Action {akt} not implemented yet")
+    return Violation(f"Action {action_id} not implemented yet")
 
 
 # 4.2.5 p.26 LAT restrictions (allow lists)
@@ -168,7 +168,7 @@ LAT_EXPERIENCE = {"Assault Team": "Line", "Fire Team": "Green", "Litter Team": "
 SAVE_LIMIT = {"Green": (3, 2), "Line": (6, 4), "Veteran": (9, 6)}  # 4.1.3 p.20
 
 
-MAX_PER_IMPULSE = {"tag": 6, "eingeschraenkt": 4}  # 4.1.3 p.20
+MAX_PER_IMPULSE = {"day": 6, "limited": 4}  # 4.1.3 p.20
 
 
 VOF_VALUE = {"Pinned": 2, "S": 0, "A": -1, "H": -3}  # 6.2.2 p.42 (A/S: A at Point Blank, otherwise S)
@@ -212,13 +212,14 @@ FIXED_COVER = (
     "Bunker",
     "Pillbox",
     "Deep Bunker",
-)  # [RULE 5.1.1 p.31, 5.1.2 p.32] movement without Exposed; Deep Bunker like a Bunker (CSR 5)
+)  # [RULE 5.1.1 p.31, 5.1.2 p.32] movement without Exposed; Deep Bunker like a Bunker
+DEEP_BUNKER_REF = "CSR Deep Bunkers: Normandy CSR 5, Vietnam CSR 6, Naktong CSR 7"
 
 
 STRUCTURES = ("Bunker", "Pillbox")  # [RULE 5.3.2 p.37] fire arc, no Point Blank
 
 # [RULE 7.3.1 p.52, 7.4 p.54, 7.6 p.54, 5.2.2B p.36] high-angle and rocket weapons do not fire from these cover markers
-# (Light/Strong Building are the CSR 8 names, L203; Upper Story/Church Tower per E55)
+# (Light/Strong Building are the CSR 8 names; Upper Story/Church Tower per E55)
 NO_FIRE_FROM_COVER = STRUCTURES + (
     "Building",
     "Light Building",
@@ -242,68 +243,71 @@ PINNED, EXPOSED, ACTIVATED, MOVED_FIRED, FIRE_TEAM_SIDE = (
 )
 
 
-SIDE_NAME = {(1, 0): "oben", (-1, 0): "unten", (0, -1): "links", (0, 1): "rechts"}
+SIDE_NAME = {(1, 0): "top", (-1, 0): "bottom", (0, -1): "left", (0, 1): "right"}
 
 
 # Open rules questions from cac/regeln_cac_run3.md (appendix). Default = the reading marked as more likely in the research;
-# where none is marked, the reasoning is in cac/aenderungen_fof_v3.md. Effective only if the setup contains "optionen".
+# where none is marked, the reasoning is in cac/aenderungen_fof_v3.md. Effective only if the setup contains "options".
 DEFAULT_OPTIONS = {
     "U1_remove_pc_no_action": (
         True,
         "Special rule 'Remove unit, place PC' = No Action also applies in Run 2/3 (reading a)",
     ),
-    "U2_fo_fd_funk": (True, "FOs implicitly have their FD radio (reading a)"),
-    "U3_incoming_blockiert_funk": (True, "Incoming! also blocks SCR536 LOS (reading a, only smoke excepted)"),
-    "U4_as_zaehlt_als_a": (
+    "U2_fo_fd_radio": (True, "FOs implicitly have their FD radio (reading a)"),
+    "U3_incoming_blocks_radio": (True, "Incoming! also blocks SCR536 LOS (reading a, only smoke excepted)"),
+    "U4_as_counts_as_a": (
         False,
         "A/S does not count as A in the hierarchy row 'A or H VOF unit that has opened fire' (reading a)",
     ),
-    "U6_aktivieren_im_initiative_impuls": (
+    "U6_activate_in_initiative_impulse": (
         False,
         "CO HQ does not activate PLT HQs in the CO HQ Initiative Impulse (reading b)",
     ),
-    "U7_lat_behaelt_funk": (True, "HQ becomes Paralyzed/Litter Team: the team keeps the radio (reading a)"),
-    "U9_ziel_lesart": ("a", "a: no enemy non-Casualty unit left on the board; b: prisoners/withdrawn units also count"),
+    "U7_lat_keeps_radio": (True, "HQ becomes Paralyzed/Litter Team: the team keeps the radio (reading a)"),
+    "U9_objective_reading": (
+        "a",
+        "a: no enemy non-Casualty unit left on the board; b: prisoners/withdrawn units also count",
+    ),
     "U9_reattempt": (False, "no Reattempt after the last turn (FM1 names none)"),
-    "U10_staging_funk_ueber_hill": (False, "Staging Area radios only to the adjacent cards of row 1 (wording of 2.5)"),
-    "U11_plt_mtr_ueber_hub": (
+    "U10_staging_radio_over_hill": (False, "Staging Area radios only to the adjacent cards of row 1 (wording of 2.5)"),
+    "U11_plt_mtr_via_hub": (
         True,
         "two SCR536 other than the CO HQ talk to each other if both have a connection to the CO HQ (reading a)",
     ),
-    "U12_moerser_reichweite": ("C-L", "Range 'C-L' = Close to Long"),
-    "U12_indirekt_unter_gi": (False, "Indirect Lay not allowed under General Initiative (reading a)"),
-    "U13_target_marker_bei_short": (False, "no automatic Target marker after Short (7.16.5 does not cover the case)"),
-    # v4: open rules questions Normandy Mission 1 (normandy/regeln_normandy_m1.md, section U)
-    "U14_telefon_diagonal": (
+    "U12_mortar_range": ("C-L", "Range 'C-L' = Close to Long"),
+    "U12_indirect_under_gi": (False, "Indirect Lay not allowed under General Initiative (reading a)"),
+    "U13_target_marker_on_short": (False, "no automatic Target marker after Short (7.16.5 does not cover the case)"),
+    # campaign: open rules questions Normandy Mission 1 (normandy/regeln_normandy_m1.md, section U)
+    "U14_phone_diagonal": (
         True,
         "Phone lines also connect diagonally adjacent cards (cards count as adjacent diagonally, 5.1.2)",
     ),
-    "U15_leitung_automatisch": (
+    "U15_line_automatic": (
         True,
         "A unit with lines automatically lays one when leaving a card without a line (4.3.4 'occurs automatically'); --line=no suppresses it",
     ),
-    "U16_erste_commands_mit_gespart": (
+    "U16_first_commands_with_saved": (
         True,
         "'first N Commands' (Situation Report, Comm Trouble) include saved Commands",
     ),
-    "U17_gegenangriff_staging": (False, "Counterattack: no PC markers on staging cards (map area only)"),
-    "U18_fall_back_rand_offmap": (
+    "U17_counterattack_staging": (False, "Counterattack: no PC markers on staging cards (map area only)"),
+    "U18_fall_back_edge_offmap": (
         True,
         "Enemy Event Fall Back at the top map edge: unit leaves the board (8.6.3, no map extension)",
     ),
-    "U19_erweitern_bis_reichweite": (
+    "U19_extend_to_range": (
         True,
         "Max LOS/Range: extend the map up to maximum range, because Hills could give visibility (wording of 8.4.5)",
     ),
-    "U20_mine_bei_seek_cover": (
+    "U20_mine_on_seek_cover": (
         True,
         "successful Seek Cover on a mine card triggers a mine check (movement within the card)",
     ),
-    "U21_pyro_alle_einheiten": (
+    "U21_pyro_all_units": (
         True,
         "Signal applies to all units with LOS, including higher-ranking HQs (wording of 4.4.1; Stead says otherwise)",
     ),
-    "U22_munition_leer_im_clean_up": (
+    "U22_ammo_empty_in_clean_up": (
         True,
         "Out of Ammo consequences (flip/marker) only in Clean Up, after simultaneous combat",
     ),
@@ -311,15 +315,15 @@ DEFAULT_OPTIONS = {
         True,
         "Advance Straight Ahead (Assault) from the first card row also into the Staging Area toward US units",
     ),
-    "U27_mtr_sec_nicht_fa": (
+    "U27_mtr_sec_not_fa": (
         True,
         "Mtr Sec: C/L/P results as normal (Casualty/LAT), last remaining step becomes a 1-step Mortar Team (CSR 2)",
     ),
-    "U28_gegenangriff_alle_pc_a": (
+    "U28_counterattack_all_pc_a": (
         True,
         "during the counterattack all PC A markers use the Counter-Attack list (MSR 1 'any PC A Markers')",
     ),
-    "U29_ein_target_marker_he_wp": (
+    "U29_one_target_marker_he_wp": (
         True,
         "HE and WP of the same firing agency (15th FA) share one Target marker (7.16.5)",
     ),
@@ -333,7 +337,7 @@ PYRO_AERIAL = ("RSP", "RSC", "GSP", "GSC", "Handheld Illumination")  # [RULE 4.4
 
 
 PYRO_COLOR = ("Red Smoke", "Green Smoke", "Yellow Smoke", "Purple Smoke")
-# [RULE 12.7 p.82, Charts & Tables 2 Skills] Experience Point cost per skill marker (L146)
+# [RULE 12.7 p.82, Charts & Tables 2 Skills] Experience Point cost per skill marker
 SKILL_COST = {
     "General Initiative": 2,
     "Paralyzed to Assault Team": 2,
@@ -389,18 +393,18 @@ class Violation(Exception):
 
 
 class Pending(Violation):
-    """L475: the step saved a partial result (an open draw) and stops there; printed as OPEN, exit code 0, so a batch
+    """the step saved a partial result (an open draw) and stops there; printed as OPEN, exit code 0, so a batch
     can resolve the draw next. Callers that catch Violation still stop on it."""
 
 
 def need(args: list[str], n: int, usage: str) -> None:
-    """Positional arguments: a Violation with the usage line instead of an IndexError (review 23.10.2026, L221)."""
+    """Positional arguments: a Violation with the usage line instead of an IndexError."""
     if len(args) < n:
         raise Violation(f"Usage: {usage}")
 
 
 def int_value(text: Any, what: str) -> int:
-    """int() for user input: a Violation instead of a ValueError/TypeError (L221)."""
+    """int() for user input: a Violation instead of a ValueError/TypeError."""
     try:
         return int(text)
     except (TypeError, ValueError):
@@ -411,9 +415,9 @@ EXPERIENCE_LEVELS = ("Green", "Line", "Veteran")
 
 
 def experience_value(text: Any, what: str) -> str:
-    """L529 (review C7): an experience level given on the command line, any case; a Violation instead of storing a
+    """an experience level given on the command line, any case; a Violation instead of storing a
     value that card counts and save limits silently treat as Line."""
-    for lv in EXPERIENCE_LEVELS:
-        if isinstance(text, str) and text.strip().lower() == lv.lower():
-            return lv
+    for level in EXPERIENCE_LEVELS:
+        if isinstance(text, str) and text.strip().lower() == level.lower():
+            return level
     raise Violation(f"{what}: one of {', '.join(EXPERIENCE_LEVELS)} expected, got '{text}'")

@@ -1,7 +1,7 @@
-"""Durchgerechnete Beispiele des Regelbuchs (Series Rules 3rd Ed.), Teil C: 7.2.2 bis 7.2.4, 8.3/8.4, 12.4, 12.6.
-Jeder Test baut die Lage des Beispiels auf dem synthetischen Brett nach und prueft das Ergebnis des Werkzeugs
-gegen das Beispiel. Zeilenangaben beziehen sich auf regelbuch.txt. Reihe 1 ist die dem Spieler naechste Reihe,
-"vorne" ist Reihe +1; Spalte +1 ist rechts."""
+"""Worked examples of the rulebook (Series Rules 3rd Ed.), part C: 7.2.2 to 7.2.4, 8.3/8.4, 12.4, 12.6.
+Each test rebuilds the situation of the example on the synthetic board and checks the result of the tool
+against the example. Line numbers refer to rulebook.txt. Row 1 is the row nearest to the player,
+"forward" is row +1; column +1 is to the right."""
 
 import copy
 
@@ -13,53 +13,53 @@ from fof import briefing, campaign, combat, commands, comms, contact, fire, rule
 
 @pytest.fixture
 def quiet(monkeypatch):
-    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protokoll"].append({"text": text}))
+    monkeypatch.setattr(state, "save_state", lambda s, text, rule=None: s["protocol"].append({"text": text}))
     monkeypatch.setattr(briefing, "print_board", lambda prot, s: None)
 
 
-def tripod_mg(kid, **extra):
-    return unit(kid, vof="A", rng="V", typ="Weapons Team", steps=1, tripod=True, **extra)
+def tripod_mg(card_id, **extra):
+    return unit(card_id, vof="A", rng="V", type="Weapons Team", steps=1, tripod=True, **extra)
 
 
 # ---------------------------------------------------------------- 7.2.3 Overhead Fire
 
 
 def test_overhead_fire_example_1_mg_on_level_2_fires_over_level_1_at_level_3(board):
-    """[RULE 7.2.3 p.52, 7.2.1 p.51] Zeile 5517, Overhead Fire Example 1: Ein Tripod-MG auf Hoehe 2, eine eigene
-    Einheit benachbart auf Hoehe 1, ein Feind auf Long Range auf Hoehe 3. Das MG eroeffnet das Feuer auf den Feind,
-    auf der eigenen Karte dazwischen liegt kein VOF-Marker.
-    Werkzeug seit L147 (15.10.2026)."""
+    """[RULE 7.2.3 p.52, 7.2.1 p.51] Line 5517, Overhead Fire Example 1: a tripod MG at elevation 2, a friendly
+    unit adjacent at elevation 1, an enemy at Long Range at elevation 3. The MG opens fire on the enemy,
+    no VOF marker lies on the friendly card in between.
+    Tool since L147 (15.10.2026)."""
     s = board
-    s["karten"]["11"]["elevation"] = 2
-    s["karten"]["12"]["elevation"] = 1
-    s["karten"]["13"]["elevation"] = 3
-    s["einheiten"]["MG"] = tripod_mg("11")
-    s["einheiten"]["1/1"] = unit("12")
-    s["einheiten"]["Feind 1"] = unit("13", side="Feind")
+    s["cards"]["11"]["elevation"] = 2
+    s["cards"]["12"]["elevation"] = 1
+    s["cards"]["13"]["elevation"] = 3
+    s["units"]["MG"] = tripod_mg("11")
+    s["units"]["1/1"] = unit("12")
+    s["units"]["Enemy 1"] = unit("13", side="Enemy")
     assert fire.overhead_possible(s, "11", "12", "13") is True
     fire.open_fire(s, [])
-    assert s["einheiten"]["MG"]["ziel"] == "13"
+    assert s["units"]["MG"]["target"] == "13"
     assert fire.effective_fire_target(s, "MG") == "13"
-    assert fire.vof_against(s, "13", "Feind")[:2] == ("A", -1)
+    assert fire.vof_against(s, "13", "Enemy")[:2] == ("A", -1)
     v12 = fire.vof_against(s, "12", "US")  # L552 (review T4): the enemy itself fires at 12, so there is a VOF
-    assert v12 is not None and "MG" not in v12[2]  # kein VOF des MG auf der ueberschossenen Karte
+    assert v12 is not None and "MG" not in v12[2]  # no VOF of the MG on the card it fires over
 
 
 def test_overhead_fire_example_2_mg_on_level_1_fires_over_level_1_at_hill_level_2(board):
-    """[RULE 7.2.3 p.52, 7.2.1 p.51] Zeile 5533, Overhead Fire Example 2: Tripod-MG auf Hoehe 1, eigene Einheit
-    benachbart ebenfalls auf Hoehe 1, Feind auf Long Range auf einem Huegel Hoehe 2. Das MG kann auf den Feind feuern,
-    auf der eigenen Karte liegt kein VOF.
-    Werkzeug seit L147 (15.10.2026)."""
+    """[RULE 7.2.3 p.52, 7.2.1 p.51] Line 5533, Overhead Fire Example 2: tripod MG at elevation 1, friendly unit
+    adjacent also at elevation 1, enemy at Long Range on a hill at elevation 2. The MG can fire at the enemy,
+    no VOF lies on the friendly card.
+    Tool since L147 (15.10.2026)."""
     s = board
-    s["karten"]["13"]["elevation"] = 2
-    s["einheiten"]["MG"] = tripod_mg("11")
-    s["einheiten"]["1/1"] = unit("12")
-    s["einheiten"]["Feind 1"] = unit("13", side="Feind")
+    s["cards"]["13"]["elevation"] = 2
+    s["units"]["MG"] = tripod_mg("11")
+    s["units"]["1/1"] = unit("12")
+    s["units"]["Enemy 1"] = unit("13", side="Enemy")
     assert fire.overhead_possible(s, "11", "12", "13") is True
     fire.open_fire(s, [])
-    assert s["einheiten"]["MG"]["ziel"] == "13"
+    assert s["units"]["MG"]["target"] == "13"
     assert fire.effective_fire_target(s, "MG") == "13"
-    assert fire.vof_against(s, "13", "Feind")[:2] == ("A", -1)
+    assert fire.vof_against(s, "13", "Enemy")[:2] == ("A", -1)
     v12 = fire.vof_against(s, "12", "US")
     assert (
         v12 is None or "MG" not in v12[2]
@@ -67,164 +67,167 @@ def test_overhead_fire_example_2_mg_on_level_1_fires_over_level_1_at_hill_level_
     assert fire.effective_fire_target(s, "MG") != "12"
 
 
-# ---------------------------------------------------------------- 7.2.2 / 7.2.4 Grazing Fire und FPL (Diagramm 7.2.5)
+# ---------------------------------------------------------------- 7.2.2 / 7.2.4 Grazing Fire and FPL (diagram 7.2.5)
 
 
 def test_grazing_fire_lays_vof_along_all_cards_same_level_or_one_slope(board):
-    """[RULE 7.2.2 p.51, 7.2.4 p.53, Diagramm 7.2.5] Zeile 5627: Grazing Fire (und FPL) legen VOF auf alle Karten in
-    Reichweite auf gleicher Hoehe in gerader Linie; bergauf oder bergab, aber nicht beides. Bei einer Wahl (bergab oder
-    geradeaus ueber ein Tal) zielt das MG auf den naechsten Feind entlang des PDF. FPL ist im Werkzeug nicht gebaut,
-    geprueft wird nur Grazing Fire mit einem Tripod-MG."""
+    """[RULE 7.2.2 p.51, 7.2.4 p.53, diagram 7.2.5] Line 5627: Grazing Fire (and FPL) place VOF on all cards in
+    range at the same elevation in a straight line; uphill or downhill, but not both. Given a choice (downhill or
+    straight across a valley) the MG aims at the nearest enemy along the PDF. FPL is not built in the tool;
+    only Grazing Fire with a tripod MG is checked."""
     s = board
-    s["einheiten"]["MG"] = tripod_mg("11", ziel="12")
-    s["einheiten"]["Feind 1"] = unit("12", side="Feind")
-    s["einheiten"]["Feind 2"] = unit("13", side="Feind")
-    # a) gerade Linie, alles gleiche Hoehe: VOF auf 12 und 13
+    s["units"]["MG"] = tripod_mg("11", target="12")
+    s["units"]["Enemy 1"] = unit("12", side="Enemy")
+    s["units"]["Enemy 2"] = unit("13", side="Enemy")
+    # a) straight line, all at the same elevation: VOF on 12 and 13
     assert fire.grazing_cards(s, "MG") == ["12", "13"]
-    assert fire.vof_against(s, "13", "Feind")[:2] == ("A", -1)
-    # b) alles bergauf 1-2-3: VOF auf 12 und 13
-    s["karten"]["12"]["elevation"], s["karten"]["13"]["elevation"] = 2, 3
+    assert fire.vof_against(s, "13", "Enemy")[:2] == ("A", -1)
+    # b) all uphill 1-2-3: VOF on 12 and 13
+    s["cards"]["12"]["elevation"], s["cards"]["13"]["elevation"] = 2, 3
     assert fire.grazing_cards(s, "MG") == ["12", "13"]
-    # c) alles bergab 3-2-1: VOF auf 12 und 13
-    s["karten"]["11"]["elevation"], s["karten"]["12"]["elevation"], s["karten"]["13"]["elevation"] = 3, 2, 1
+    # c) all downhill 3-2-1: VOF on 12 and 13
+    s["cards"]["11"]["elevation"], s["cards"]["12"]["elevation"], s["cards"]["13"]["elevation"] = 3, 2, 1
     assert fire.grazing_cards(s, "MG") == ["12", "13"]
-    # d) eben, dann bergauf 1-1-2: VOF nur auf 12, nicht beides
-    s["karten"]["11"]["elevation"], s["karten"]["12"]["elevation"], s["karten"]["13"]["elevation"] = 1, 1, 2
+    # d) level, then uphill 1-1-2: VOF only on 12, not both
+    s["cards"]["11"]["elevation"], s["cards"]["12"]["elevation"], s["cards"]["13"]["elevation"] = 1, 1, 2
     assert fire.grazing_cards(s, "MG") == ["12"]
-    assert fire.vof_against(s, "13", "Feind") is None
-    # e) Tal 2-1-2: bergab und wieder bergauf geht nicht, das MG zielt auf den naechsten Feind (12), 13 bleibt frei
-    s["karten"]["11"]["elevation"], s["karten"]["12"]["elevation"], s["karten"]["13"]["elevation"] = 2, 1, 2
-    s["einheiten"]["MG"]["ziel"] = None
+    assert fire.vof_against(s, "13", "Enemy") is None
+    # e) valley 2-1-2: downhill and uphill again is not possible, the MG aims at the nearest enemy (12), 13 stays free
+    s["cards"]["11"]["elevation"], s["cards"]["12"]["elevation"], s["cards"]["13"]["elevation"] = 2, 1, 2
+    s["units"]["MG"]["target"] = None
     fire.open_fire(s, [])
-    assert s["einheiten"]["MG"]["ziel"] == "12"
+    assert s["units"]["MG"]["target"] == "12"
     assert fire.effective_fire_target(s, "MG") == "12"
-    assert fire.vof_against(s, "12", "Feind")[:2] == ("A", -1)
-    assert fire.vof_against(s, "13", "Feind") is None
+    assert fire.vof_against(s, "12", "Enemy")[:2] == ("A", -1)
+    assert fire.vof_against(s, "13", "Enemy") is None
 
 
 # ---------------------------------------------------------------- 8.3 / 8.4 Paketplatzierung
 
 
 def _package_example_1_board(board):
-    """Ausloeser auf 11 (Hoehe 1), feindlicher CCF Rifle Squad auf 22 (Hoehe 1) im Feuerkampf mit dem Ausloeser,
-    Rocky Hill 33 (Hoehe 3) rechts vorne auf Long Range, Hilfskarte 44 dahinter (LOS vom Huegel verdeckt)."""
+    """Trigger on 11 (elevation 1), enemy CCF Rifle Squad on 22 (elevation 1) in a firefight with the trigger,
+    Rocky Hill 33 (elevation 3) front right at Long Range, helper card 44 behind it (LOS hidden by the hill)."""
     s = board
-    s["karten"]["44"] = card(4, 4)
-    s["karten"]["33"].update(terrain="Rocky Hill", elevation=3)
-    s["karten"]["11"]["pc"] = "A"
-    # Ausloeser: im Beispiel 1/75mm RCL (H, Overhead-faehig); hier als Infanterie-Weapons-Team mit VOF H nachgebaut
-    s["einheiten"]["RCL"] = unit("11", vof="H", rng="V", typ="Weapons Team", steps=1, ziel="22")
-    s["einheiten"]["CCF Rifle Squad"] = unit("22", side="Feind", ziel="11")
+    s["cards"]["44"] = card(4, 4)
+    s["cards"]["33"].update(terrain="Rocky Hill", elevation=3)
+    s["cards"]["11"]["pc"] = "A"
+    # trigger: in the example the 1/75mm RCL (H, capable of overhead fire); rebuilt here as an infantry Weapons Team with VOF H
+    s["units"]["RCL"] = unit("11", vof="H", rng="V", type="Weapons Team", steps=1, target="22")
+    s["units"]["CCF Rifle Squad"] = unit("22", side="Enemy", target="11")
     return s
 
 
 def _package(name, **unit_fields):
-    return {"name": name, "spotted": False, "einheiten": [dict(unit_fields, einheit=name, platz="max", steps=1)]}
+    return {"name": name, "spotted": False, "units": [dict(unit_fields, unit=name, place="max", steps=1)]}
 
 
 def test_package_example_1_overhead_capable_hmg_placed_behind_its_own_blocking_squad(board, quiet):
-    """[RULE 8.4.3 p.63/64, 7.2.1 p.51, 7.2.3 p.52, 8.2.4 p.62] Zeile 6813, Example 1: 1/75mm RCL loest einen
-    A-Kontakt aus. Paket: HMG, Unspotted, rechts auf Max LOS (Rocky Hill, Hoehe 3). Normalerweise ginge rechts nichts,
-    weil der (feindliche) CCF Rifle Squad die Linie blockiert; das HMG kann aber Overhead Fire, wird auf dem Huegel
-    platziert und feuert ueber den Squad auf das RCL. PC-Marker weg, Unspotted-Marker beim HMG. Das RCL (ebenfalls
-    Overhead-faehig) koennte spaeter per Shift Fire auf das gespottete HMG feuern. Nachbau: RCL als Infanterie-Team
-    mit VOF H, Richtung "Rechts" = Right Front (Diagonale).
-    Werkzeug seit L147/L151 (15.10.2026)."""
+    """[RULE 8.4.3 p.63/64, 7.2.1 p.51, 7.2.3 p.52, 8.2.4 p.62] Line 6813, Example 1: the 1/75mm RCL triggers an
+    A contact. Package: HMG, Unspotted, to the right at Max LOS (Rocky Hill, elevation 3). Ordinarily nothing could go
+    to the right, because the (enemy) CCF Rifle Squad blocks the line; but the HMG can use Overhead Fire, is placed on
+    the hill and fires over the squad at the RCL. PC marker removed, Unspotted marker with the HMG. The RCL (also
+    capable of overhead fire) could later fire at the spotted HMG with Shift Fire. Rebuild: RCL as an infantry team
+    with VOF H, direction "Right" = Right Front (diagonal).
+    Tool since L147/L151 (15.10.2026)."""
     s = _package_example_1_board(board)
     control = copy.deepcopy(s)
     assert fire.overhead_possible(s, "33", "22", "11") is True
-    pk = _package("HMG", typ="Weapons Team", reichweite="V", vof_rating="A", tripod=True)
-    contact.pc_contact_v4(s, "11", "A1", pk, {"--richtung": "Rechts"})
-    hmg = s["einheiten"]["HMG 1"]
-    assert hmg["karte"] == "33" and hmg["spotted"] is False
-    assert hmg["ziel"] == "11" and fire.effective_fire_target(s, "HMG 1") == "11"
-    assert fire.vof_against(s, "22", "Feind") == ("H", -3, ["RCL"])  # nur das RCL-Feuer, kein VOF vom HMG
+    pk = _package("HMG", type="Weapons Team", range="V", vof_rating="A", tripod=True)
+    contact.pc_contact_campaign(s, "11", "A1", pk, {"--direction": "Right"})
+    hmg = s["units"]["HMG 1"]
+    assert hmg["card"] == "33" and hmg["spotted"] is False
+    assert hmg["target"] == "11" and fire.effective_fire_target(s, "HMG 1") == "11"
+    assert fire.vof_against(s, "22", "Enemy") == ("H", -3, ["RCL"])  # only the RCL fire, no VOF of the HMG
     assert "HMG 1" in fire.vof_against(s, "11", "US")[2]
-    assert s["karten"]["11"]["pc"] is None
-    assert s["einheiten"]["RCL"]["ziel"] == "22"  # HMG Unspotted: kein Gegenfeuer, das RCL bleibt am Squad
-    # spaeter: HMG gespottet, Shift Fire des RCL (H, Overhead ueber die gleich hohe Karte 22 auf Hoehe 3)
+    assert s["cards"]["11"]["pc"] is None
+    assert s["units"]["RCL"]["target"] == "22"  # HMG Unspotted: no return fire, the RCL stays on the squad
+    # later: HMG spotted, Shift Fire of the RCL (H, overhead across card 22 of the same height at elevation 3)
     hmg["spotted"] = True
     assert fire.overhead_possible(s, "11", "22", "33") is True
-    s["einheiten"]["RCL"]["ziel"] = "33"
+    s["units"]["RCL"]["target"] = "33"
     assert fire.effective_fire_target(s, "RCL") == "33"
-    assert fire.vof_against(s, "33", "Feind")[:2] == ("H", -3)
-    # Gegenprobe "Ordinarily": ein LMG ohne Overhead Fire kann rechts nicht platziert werden
-    pk2 = _package("LMG", typ="Weapons Team", reichweite="L", vof_rating="A")
+    assert fire.vof_against(s, "33", "Enemy")[:2] == ("H", -3)
+    # counter check "Ordinarily": an LMG without Overhead Fire cannot be placed to the right
+    pk2 = _package("LMG", type="Weapons Team", range="L", vof_rating="A")
     with pytest.raises(rules.Violation):
-        contact.pc_contact_v4(control, "11", "A1", pk2, {"--richtung": "Rechts"})
+        contact.pc_contact_campaign(control, "11", "A1", pk2, {"--direction": "Right"})
 
 
 def test_package_example_2_spotter_at_very_long_range_on_the_hill_with_us_units(board, quiet):
-    """[RULE 8.4.3 p.63/64, 8.4.1 p.63] Zeile 6847, Example 2: 1/LMG betritt einen Woods und loest einen B-Kontakt
-    aus: Incoming Artillery mit Spotter in Foxholes, links auf Max LOS. Der Huegel ganz links sieht den Woods auf
-    Very Long Range (3 Karten); der Spotter sitzt dort Unspotted im Foxhole und ruft Artillerie auf den Woods,
-    waehrend die US-Einheiten "in the same area" weiter den Huegel hinab in den Marsh auf ein deutsches Litter Team
-    feuern. Lesart: dieselbe Karte wie der Spotter; ein Spotter setzt keinen PDF, das Verbot eigener Einheiten auf der
-    Platzierungskarte gilt nur fuer Einheiten mit PDF. Richtung "Links" = Left Front (Diagonale), Huegel als Karte 40.
-    Werkzeug seit L151 (15.10.2026)."""
+    """[RULE 8.4.3 p.63/64, 8.4.1 p.63] Line 6847, Example 2: 1/LMG enters a Woods and triggers a B contact:
+    Incoming Artillery with a Spotter in Foxholes, to the left at Max LOS. The hill far left sees the Woods at
+    Very Long Range (3 cards); the Spotter sits there Unspotted in the Foxhole and calls artillery onto the Woods,
+    while the US units "in the same area" keep firing down the hill into the Marsh at a German Litter Team.
+    Reading: the same card as the Spotter; a Spotter sets no PDF, the ban on friendly units on the placement card
+    applies only to units with a PDF. Direction "Left" = Left Front (diagonal), the hill as card 40.
+    Tool since L151 (15.10.2026)."""
     s = board
-    s["karten"]["13"]["terrain"] = "Woods"
-    s["karten"]["13"]["pc"] = "B"
-    s["karten"]["40"] = card(4, 0, elevation=3, terrain="Hill")
-    s["karten"]["41"] = card(4, 1, terrain="Marsh")
-    s["einheiten"]["1/LMG"] = unit("13", vof="A", typ="Weapons Team", steps=1)
-    s["einheiten"]["1/2"] = unit("40", ziel="41")
-    s["einheiten"]["2/2"] = unit("40", ziel="41")
-    s["einheiten"]["German Litter Team"] = unit("41", side="Feind", vof=None, typ="Litter Team", steps=1)
+    s["cards"]["13"]["terrain"] = "Woods"
+    s["cards"]["13"]["pc"] = "B"
+    s["cards"]["40"] = card(4, 0, elevation=3, terrain="Hill")
+    s["cards"]["41"] = card(4, 1, terrain="Marsh")
+    s["units"]["1/LMG"] = unit("13", vof="A", type="Weapons Team", steps=1)
+    s["units"]["1/2"] = unit("40", target="41")
+    s["units"]["2/2"] = unit("40", target="41")
+    s["units"]["German Litter Team"] = unit("41", side="Enemy", vof=None, type="Litter Team", steps=1)
     pk = {
         "name": "Incoming Artillery with Spotter",
         "spotted": False,
-        "marker": [{"typ": "Incoming", "wert": -3}],
-        "einheiten": [
+        "marker": [{"type": "Incoming", "value": -3}],
+        "units": [
             {
-                "einheit": "Spotter",
-                "typ": "Spotter",
+                "unit": "Spotter",
+                "type": "Spotter",
                 "spotter": True,
-                "platz": "max_los",
+                "place": "max_los",
                 "cover": "Foxhole",
-                "cover_wert": 1,
+                "cover_value": 1,
                 "steps": 1,
             }
         ],
     }
-    contact.pc_contact_v4(s, "13", "B1", pk, {"--richtung": "Links"})
-    sp = s["einheiten"]["Spotter 1"]
-    assert sp["karte"] == "40" and sp["spotted"] is False
-    foxhole = [c for c in s["karten"]["40"]["cover"] if c["id"] == sp["bereich"]]
-    assert foxhole and foxhole[0]["typ"] == "Foxhole"
-    assert any(x["typ"] == "Incoming" and x["wert"] == -3 for x in s["karten"]["13"]["extern"])
-    assert s["karten"]["13"]["pc"] is None
-    for n in ("1/2", "2/2"):  # die US-Einheiten feuern weiter in den Marsh
-        assert s["einheiten"][n]["ziel"] == "41"
+    contact.pc_contact_campaign(s, "13", "B1", pk, {"--direction": "Left"})
+    sp = s["units"]["Spotter 1"]
+    assert sp["card"] == "40" and sp["spotted"] is False
+    foxhole = [c for c in s["cards"]["40"]["cover"] if c["id"] == sp["area"]]
+    assert foxhole and foxhole[0]["type"] == "Foxhole"
+    assert any(x["type"] == "Incoming" and x["value"] == -3 for x in s["cards"]["13"]["external"])
+    assert s["cards"]["13"]["pc"] is None
+    # L568: the enemy Target marker of the spotter is announced as a board change, not only booked
+    assert s["enemy_target"]["Spotter"] == "13"
+    assert "Place the enemy Target marker (Spotter) on 13" in s["protocol"][-1]["text"]
+    for n in ("1/2", "2/2"):  # the US units keep firing into the Marsh
+        assert s["units"][n]["target"] == "41"
 
 
 # ---------------------------------------------------------------- 12.4 Replacements (Normandy)
 
 
 def test_normandy_replacements_six_green_plus_two_veteran_for_ten_casualties(board, quiet):
-    """[RULE 12.4 p.81/82] Zeile 8566: Normandy, sechs Replacement-Steps je Mission; zehn Casualty-Steps in der Mission
-    ergeben sechs Green und zwei Veteran Replacements (1 je 4 Casualties, abgerundet), die Kompanie startet zwei Steps
-    unter Soll."""
+    """[RULE 12.4 p.81/82] Line 8566: Normandy, six replacement steps per mission; ten casualty steps in the mission
+    give six Green and two Veteran replacements (1 per 4 casualties, rounded down), the company starts two steps
+    below strength."""
     s = board
     s.update(
-        kampagne={"versuch": 1, "versuche_max": 2, "xp_tabelle": {}, "ersatz_green": 6, "veteran_je_casualties": 4},
-        ziel_regeln={"sichern": [], "reihen_klaeren": []},
-        us_casualties_gesamt=10,
+        campaign={"attempt": 1, "attempts_max": 2, "xp_table": {}, "replacement_green": 6, "veteran_per_casualties": 4},
+        objective_rules={"secure": [], "clear_rows": []},
+        us_casualties_total=10,
         co_hq="CO HQ",
     )
-    s["einheiten"]["CO HQ"] = unit("11", vof=None, typ="HQ", ebene="CO", steps=1)
+    s["units"]["CO HQ"] = unit("11", vof=None, type="HQ", level="CO", steps=1)
     prot = []
-    campaign.mission_end_v4(s, prot)
+    campaign.campaign_mission_end(s, prot)
     text = "\n".join(prot)
-    assert s["missionsende"] is True
+    assert s["mission_end"] is True
     assert "replacements 6 Green plus 2 Veteran" in text
     assert "10 casualty steps" in text
-    assert 10 - (6 + 2) == 2  # zwei Steps unter Soll (Rechnung des Beispiels, das Werkzeug nennt sie nicht)
+    assert 10 - (6 + 2) == 2  # two steps below strength (the example's arithmetic; the tool does not name them)
 
 
 # ---------------------------------------------------------------- 12.6 Multi-Step Unit Experience Levels
 
-# Zeilen der Tabelle 12.6, soweit die Beispiele sie belegen (Steps als Liste, Ergebnis).
+# rows of table 12.6 as far as the examples show them (steps as a list, result).
 EXPERIENCE_TABLE_12_6 = [
     (["Line", "Line", "Green", "Green"], "Green"),
     (["Line", "Line", "Line", "Green"], "Line"),
@@ -235,7 +238,7 @@ EXPERIENCE_TABLE_12_6 = [
 
 
 def _unit_experience_function():
-    """Sucht im Werkzeug eine Funktion, die aus Step-Stufen die Einheitenstufe nach 12.6 ableitet."""
+    """Looks for a function in the tool that derives the unit level from the step levels per 12.6."""
     names = (
         "unit_experience",
         "multi_step_experience",
@@ -253,32 +256,32 @@ def _unit_experience_function():
 
 
 def test_multi_step_experience_line_squad_with_two_green_lats(board, quiet):
-    """[RULE 12.6 p.82, 12.2 p.81, 12.3 p.81] Zeile 8665: Line-Squad 2/3 (4 Steps) verlor zwei Steps; zwei LATs (Green)
-    fuellen ihn auf. Ohne Beforderung ist die Einheit Green (L+L+G+G); ein Experience Point hebt einen Green-Step auf
-    Line, die ganze Einheit ist dann Line (L+L+L+G). Dazu die weiteren Zeilen des Beispiels (3-Step: V+V+G = Line,
+    """[RULE 12.6 p.82, 12.2 p.81, 12.3 p.81] Line 8665: Line squad 2/3 (4 steps) lost two steps; two LATs (Green)
+    fill it up. Without a promotion the unit is Green (L+L+G+G); one Experience Point raises a Green step to
+    Line, the whole unit is then Line (L+L+L+G). Plus the other rows of the example (3 steps: V+V+G = Line,
     V+V+L = Veteran, L+L+G = Line).
-    Werkzeug seit L152 (15.10.2026): campaign.experience_from_steps, in cmd_reconstitute angewandt."""
+    Tool since L152 (15.10.2026): campaign.experience_from_steps, applied in cmd_reconstitute."""
     s = board
     s.update(
         reattempt_setup=True,
-        kampagne={"versuch": 2, "versuche_max": 2},
-        aufbau_einheiten={"2/3": dict(unit("11", platoon="3"), steps=4)},
-        xp=[{"zug": 1, "versuch": 1, "punkte": 1, "grund": "test"}],
+        campaign={"attempt": 2, "attempts_max": 2},
+        setup_units={"2/3": dict(unit("11", platoon="3"), steps=4)},
+        xp=[{"turn": 1, "attempt": 1, "points": 1, "reason": "test"}],
     )
-    s["einheiten"]["2/3"] = unit("11", platoon="3", steps=2)
-    s["einheiten"]["Fire Team 1"] = unit("11", vof="S", rng="C", typ="Fire Team", steps=1, erfahrung="Green")
-    s["einheiten"]["Fire Team 2"] = unit("11", vof="S", rng="C", typ="Fire Team", steps=1, erfahrung="Green")
+    s["units"]["2/3"] = unit("11", platoon="3", steps=2)
+    s["units"]["Fire Team 1"] = unit("11", vof="S", rng="C", type="Fire Team", steps=1, experience="Green")
+    s["units"]["Fire Team 2"] = unit("11", vof="S", rng="C", type="Fire Team", steps=1, experience="Green")
     campaign.cmd_reconstitute(s, ["2/3", "--from=Fire Team 1,Fire Team 2"])
-    squad = s["einheiten"]["2/3"]
+    squad = s["units"]["2/3"]
     assert squad["steps"] == 4
     f = _unit_experience_function()
     if f is None:
         pytest.fail(
-            "FEHLT: keine Funktion fuer die Tabelle 12.6 (Einheitenstufe aus Step-Stufen); "
-            f"cmd_reconstitute laesst 2/3 auf {squad['erfahrung']} statt Green (L+L+G+G)"
+            "MISSING: no function for table 12.6 (unit level from step levels); "
+            f"cmd_reconstitute leaves 2/3 at {squad['experience']} instead of Green (L+L+G+G)"
         )
     for steps, expected in EXPERIENCE_TABLE_12_6:
         assert f(steps) == expected, f"{'+'.join(x[0] for x in steps)} muss {expected} ergeben"
-    assert squad["erfahrung"] == "Green"
+    assert squad["experience"] == "Green"
     campaign.cmd_xp_promote(s, ["2/3", "--from=Green", "--steps=1"])
-    assert squad["erfahrung"] == "Line"
+    assert squad["experience"] == "Line"

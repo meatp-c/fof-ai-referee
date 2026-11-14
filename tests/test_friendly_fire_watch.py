@@ -7,8 +7,8 @@ def test_friendly_fire_on_lists_own_shooters(board):
     from fof import commands
 
     s = board
-    s["einheiten"]["A"] = unit("21", ziel="23")
-    s["einheiten"]["B"] = unit("22")
-    s["einheiten"]["B"]["karte"] = "23"
-    s["einheiten"]["G"] = unit("23", side="Feind")
+    s["units"]["A"] = unit("21", target="23")
+    s["units"]["B"] = unit("22")
+    s["units"]["B"]["card"] = "23"
+    s["units"]["G"] = unit("23", side="Enemy")
     assert commands.friendly_fire_on(s, "B", "23") == ["A"]
