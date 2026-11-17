@@ -383,8 +383,7 @@ def _cff_pending(s, ctx, target_card, place):
         )
     else:
         ctx.prot.append(
-            "Short: Target marker not moved automatically (7.16.5 does not cover this case)"
-            + state.open_reading(s, "U13_target_marker_on_short")
+            "Short: no successful Call for Fire, no Target marker placed or moved (K54, BGG 3457123, 3484755)"
         )
 
 

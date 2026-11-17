@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-11-17 (tenth release)
+Updates from Naktong River Mission 2, Holding the Naktong Line, a Combat Patrols mission played with all three
+patrols. Combat Patrols no longer depend on the Normandy layout, and the rulings found on the rules forum after the
+mission are built in.
+- Combat Patrols are no longer tied to the layout of Normandy Mission 3. A setup may carry a `patrol_plan` (start
+  row of the patrol, rows for the other units, the row the MLR lies behind, rows of the Route Points and the
+  Primary Objective, whether there is a Combat Outpost, a fixed light value, rows whose cleared cards score). The
+  points per Route Point come from the campaign's experience table (`cp_route`), and `cp_card` scores cleared
+  cards at the end of a patrol. L619
+- A package may tie an optional unit (`optional_pc`) or an Incoming variant (`pc`) to the letter of the PC marker
+  that triggered it. L620
+- The edges printed on a terrain card are kept by card number (`terrain <card> <type> --no=<n> --edges=..`) and
+  reused whenever that card number is entered again, because cards of one type differ. L622
+- Lost in the Dark offers every patrol unit on the board, teams created by hit effects included (Fire, Litter and
+  Paralyzed Teams). L623
+- A unit rebuilt in the reattempt sequence between two patrols stays with the rear rows when its platoon is not
+  the one going out next. L624
+- Casualties carried onto the Casualty Collection Point are dropped there at once (no Command, 5.1.6B), so they
+  are evacuated in the next Clean Up. L625
+- A Short on a Call for Fire places or moves no Target marker: it is not a successful call (developer ruling on
+  BGG). The open-question tag is gone. L626
+- An enemy Concentrate Fire or Grenade Attack accepts a Cover marker id (`--unit=C1`) for the stack beneath it,
+  like the friendly side. L627
+- Message texts: "smoke/Incoming lifted" when an Incoming ends; a unit that ceases fire only asks to remove the VOF
+  marker when no other unit of its side still fires at that card; the patrol start names `objective concentration`;
+  a CO Staff given `--platoon` is told to join a patrol with `--with`. L628
+- The board totals list the cards per observer for each firing agency of the mission. L629
+
 ## 2026-11-14 (ninth release)
 The engine is now English inside as well. Until this release the game state, the setup files and the words the engine
 used internally for commands, options and values were German, and GLOSSARY.md translated them. Now the keys and values

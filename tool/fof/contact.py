@@ -1159,6 +1159,24 @@ def _package_r_placement(package, pk, units, o, prot):
     prot.append(f"R# {r}: placement {mode} [Normandy M1 p.19]")
 
 
+def package_for_pc(pk, letter):
+    """The package as it applies to a PC marker of this letter: an optional unit with 'optional_pc' and a variant
+    with 'pc' exist only for the letters listed (Naktong M2 p.23: 'PC A marker: Add one Leader', 'PC B marker:
+    Replace with Artillery')."""
+
+    def keep(x):
+        return letter in (x.get("optional_pc") or x.get("pc") or [letter])
+
+    pk = copy.deepcopy(pk)
+    if pk.get("units"):
+        pk["units"] = [u for u in pk["units"] if keep(u)]
+    for name, opt in (pk.get("choice") or {}).items():
+        pk["choice"][name] = [u for u in opt if keep(u)]
+    if pk.get("variants"):
+        pk["variants"] = {n: v for n, v in pk["variants"].items() if keep(v)}
+    return pk
+
+
 def resolve_package_units(s, package, pk, o, prot):
     """Units of a package: random choice (--choice), optional extra on an R# band (--extra), only-if-available units,
     R#-dependent placement (--r) [8.3, Normandy M1 p.19]. Returns (units, pk); pk loses an optional marker on --extra=no."""
@@ -1323,6 +1341,7 @@ def pc_contact_campaign(s, card_id, package, pk, o):
         raise rules.Violation(
             f"Mines! package on {card_id}, mines already lie there: redraw the package [Normandy M4 MSR 1 p.30]"
         )
+    pk = package_for_pc(pk, c.get("pc"))
     units, pk = resolve_package_units(s, package, pk, o, prot)  # one function per step
     var, units = package_variant(s, package, pk, o, units, prot)
     package_counter_types(s, package, o, units, prot)

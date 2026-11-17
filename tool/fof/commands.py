@@ -727,6 +727,13 @@ def move_unit(s, n, target_card, area, exposed, prot, open_all=True):
             )
     campaign.patrol_move(s, n, from_, target_card, prot)
     fire.fire_after_move(s, n, prot, origin=from_, open_all=open_all)
+    if e.get("carries_casualties") and e["side"] == "US" and s.get("ccp") == target_card:
+        # V42: casualties brought to the CCP are dropped at once (5.1.6B, no Command), evacuated in Clean Up (5.1.7)
+        k = e.pop("carries_casualties")
+        destination["casualties"] = destination.get("casualties", 0) + k
+        prot.append(
+            f"{n} drops {k} casualty(ies) at the CCP {target_card}: evacuation in Clean Up [V42, 5.1.6B p.33, 5.1.7 p.34]"
+        )
     if state.units_on(s, target_card, state.opponent_of_side(e["side"])):
         prot.append(f"Point Blank on {target_card}: each side's VOF only hits the opposing side [6.2.1b]")
     own_fire = friendly_fire_on(s, n, target_card)

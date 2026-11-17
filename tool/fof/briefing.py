@@ -362,6 +362,16 @@ def card_line(s, card_id, k):
     return f"- {card_id} {k['terrain'] or 'TERRAIN NOT SET'} ({cc_txt}){' [' + '; '.join(extra) + ']' if extra else ''}: {', '.join(one) if one else '-'}"
 
 
+def observer_cards(s):
+    """Cards per observer, per firing agency when the mission has a table (fire-support table of the mission)."""
+    table = s.get("cff_table")
+    if table:
+        return "; observer cards " + "; ".join(
+            f"{a} " + "/".join(f"{b} {n}" for b, n in row.items()) for a, row in table.items()
+        )
+    return "; observers " + ", ".join(f"{b} {n} card(s)" for b, n in s.get("cff_observers", {}).items())
+
+
 def board_totals(s):
     """Lines after the board: units without a card, Fire Missions, evacuated, packages, Removed from Play, prisoners."""
     lines = []
@@ -372,8 +382,7 @@ def board_totals(s):
         lines.append(
             f"- Fire Missions: {s.get('fire_missions')}; "
             + ", ".join(f"{a} {w:+d}" for a, w in s["fm_values"].items())
-            + "; observers "
-            + ", ".join(f"{b} {n} card(s)" for b, n in s.get("cff_observers", {}).items())
+            + observer_cards(s)
         )
     elif s.get("fire_missions") is not None:
         lines.append(f"- Fire Missions Mtr FO: {s['fire_missions']}")

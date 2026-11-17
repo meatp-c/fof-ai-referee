@@ -276,7 +276,10 @@ DEFAULT_OPTIONS = {
     ),
     "U12_mortar_range": ("C-L", "Range 'C-L' = Close to Long"),
     "U12_indirect_under_gi": (False, "Indirect Lay not allowed under General Initiative (reading a)"),
-    "U13_target_marker_on_short": (False, "no automatic Target marker after Short (7.16.5 does not cover the case)"),
+    "U13_target_marker_on_short": (
+        False,
+        "no Target marker after Short: not a successful Call for Fire (K54, BGG 3457123)",
+    ),
     # campaign: open rules questions Normandy Mission 1 (normandy/regeln_normandy_m1.md, section U)
     "U14_phone_diagonal": (
         True,

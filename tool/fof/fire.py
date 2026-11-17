@@ -754,11 +754,11 @@ def apply_los_loss(s, n, e, outcome, prot):
         e.pop("_smoke_target")
         if valid:
             e["target"] = old
-            prot.append(f"{n}: smoke on {e['card']} lifted, fires again at {old} along the PDF [6.1.2]")
+            prot.append(f"{n}: smoke/Incoming on {e['card']} lifted, fires again at {old} along the PDF [6.1.2]")
         else:
             cease_fire(e)
             prot.append(
-                f"{n}: smoke on {e['card']} lifted, former target {old} no longer valid: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
+                f"{n}: smoke/Incoming on {e['card']} lifted, former target {old} no longer valid: Cease Fire, opens fire anew per 6.1.1 [6.3.3]"
             )
         return
     if kind == "blocked_between":
@@ -798,7 +798,13 @@ def apply_los_loss(s, n, e, outcome, prot):
         )
     elif kind == "lost":
         cease_fire(e)
-        prot.append(f"{n} ceases fire on {target_card}, remove the VOF marker from {target_card}: {data.text} [6.1.2]")
+        others = [m for m, f in s["units"].items() if f["side"] == e["side"] and f.get("target") == target_card]
+        vof = (
+            f", its VOF stays ({', '.join(others)} still fire there)"
+            if others
+            else f", remove the VOF marker from {target_card}"
+        )
+        prot.append(f"{n} ceases fire on {target_card}{vof}: {data.text} [6.1.2]")
 
 
 def cease_fire_on_los_loss(s, prot):

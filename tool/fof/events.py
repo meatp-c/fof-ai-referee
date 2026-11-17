@@ -244,10 +244,10 @@ def _friendly_raining(s, ev, o, prot, i):
 
 def _friendly_lost_dark(s, ev, o, prot, i):
     who, to_ = o.get("--who"), o.get("--to")
-    with_ = campaign.patrol(s).get("members", [])
+    with_ = campaign.patrol_units(s)
     if not who or not to_:
         raise rules.Violation(
-            f"Lost in the Dark: choose a patrol unit by R# ({', '.join(m for m in with_ if m in s['units'])}), direction by R#8, --who=<unit> --to=<card> "
+            f"Lost in the Dark: choose a patrol unit by R# ({', '.join(with_)}), direction by R#8, --who=<unit> --to=<card> "
             "(if the card lies outside: first extend <row> <column> <type> and pc set <card> <letter of the row, row 5 = A>) [Normandy M3 p.26]"
         )
     if who not in with_:

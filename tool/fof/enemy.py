@@ -109,6 +109,15 @@ def move_enemy(s, n, target, prot, *, cover=True, exposed=True, how="moves", rul
     return chosen
 
 
+def stack_member(s, target_card, given, side):
+    """--unit=<Cover id> (e.g. C1): the first opposing unit beneath that Cover marker stands for the stack, as for
+    the friendly side (commands.named_target)."""
+    if not given or given in s["units"]:
+        return given
+    foes = state.units_on(s, target_card, state.opponent_of_side(side))
+    return next((m for m in foes if s["units"][m].get("area") == given), given)
+
+
 def grenade_target_check(s, target_card, target_unit_name, attacker):
     """[RULE 7.10.1 p.54] the target of an enemy Grenade Attack is an opposing unit on the attacked card: an
     unvalidated --unit could put a -4 Grenade VOF on the attacker's own side."""
@@ -1158,7 +1167,7 @@ def _enemy_grenade_concentrate(s, ctx):
         ctx.prot.append(f"{ctx.n} leaves {cv['type']} {cv['id']} for the Point Blank attack, Exposed [5.3 p.37]")
     grenade_hit = mode == "grenade" and (target_card == ctx.e["card"] or ctx.e.get("vof_rating") == "G" or rg)
     if ctx.o["--success"] == "yes":
-        target_unit_name = ctx.o.get("--unit")
+        target_unit_name = stack_member(s, target_card, ctx.o.get("--unit"), ctx.e["side"])
         if not target_unit_name:
             raise rules.Violation(
                 f"specify --unit=<target unit> (cover stack or random unit without cover on {target_card})"

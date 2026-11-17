@@ -96,6 +96,10 @@ def cmd_setup(s, args):
 
 def assign_platoon(s, n, e, p, prot):
     """--platoon=<no>|none: attachments and company units to a platoon for the whole mission [RULE 2.3.2/2.3.3 p.10]."""
+    if e["type"] == "Staff":
+        raise rules.Violation(
+            f"{n}: CO Staff is not assigned to a platoon; it joins a Combat Patrol with patrol start|next <plt> --with={n} [2.3.3 p.10]"
+        )
     if (state.is_hq(e) or e["type"] == "Squad") and not e.get("attachment"):  # Engineers are a squad attachment (2.3.2)
         raise rules.Violation(
             f"{n} belongs permanently to its platoon; attachments and company units can be assigned [RULE 2.3.2 p.10]"
@@ -144,11 +148,15 @@ def place_mortar_teams(s, n, k, prot):
 def check_patrol_setup(s, n, e, k, o):
     """Combat Patrol setup: the patrol on row 1, the others into the fortifications of row 1 or the COP [MSR 1, 2.6.1]."""
     card = state.card(s, k)
-    cop = s.get("objectives", {}).get("cop")
+    plan = campaign.patrol_plan(s)
+    cop = s.get("objectives", {}).get("cop") if plan["cop"] else None
+    rear = ", ".join(str(r) for r in plan["rear_rows"])
     if e.get("stationary"):
-        if card["row"] != 1 and k != cop:
+        if card["row"] not in plan["rear_rows"] and k != cop:
             raise rules.Violation(
-                f"{n} is not on patrol: only into the fortifications of row 1 or into the Combat Outpost [MSR 1]"
+                f"{n} is not on patrol: only on row {rear}"
+                + (" or into the Combat Outpost" if plan["cop"] else "")
+                + " [MSR 1]"
             )
         if k == cop:
             platoons = {
@@ -162,8 +170,8 @@ def check_patrol_setup(s, n, e, k, o):
                 + "|".join(c["id"] for c in card["cover"])
                 + " [Normandy M3 p.26 MSR 1: 'Place any others in the fortifications on Row 1']"
             )
-    elif card["row"] != 1:
-        raise rules.Violation("The patrol sets up on Row 1 [2.6.1, MSR 4]")
+    elif card["row"] != plan["start_row"]:
+        raise rules.Violation(f"The patrol sets up on row {plan['start_row']} [2.6.1, {plan['source']}]")
 
 
 def check_field_setup(s, n, e, k, o):
@@ -551,10 +559,17 @@ def set_terrain(s, card_id, type_, o):
             c["cc2"] = None  # a card printed without the second C&C value (e.g. a Hedgerow/Bocage with only +2)
         elif o.get("--" + k) is not None:
             c[k] = options.int_opt(o, "--" + k, "--" + k)
+    # the edges printed on a card are kept by card number (cards of one type differ), so they are read off once
+    number = options.text_opt(o, "--no", "--no=<card number>") if o.get("--no") else None
+    printed = s.setdefault("card_edges", {})
     if o.get("--edges"):
         c["edges"] = parse_edges(options.text_opt(o, "--edges", "--edges=top:white,.."))
-    if o.get("--no"):
-        c["card_number"] = options.text_opt(o, "--no", "--no=<card number>")
+        if number:
+            printed[number] = c["edges"]
+    elif number in printed:
+        c["edges"] = printed[number]
+    if number:
+        c["card_number"] = number
     _set_elevation(s, c, card_id, type_, o, w.get("elevation_plus") or 0)
     if o.get("--vehicles") is not None and o.get("--new-type") != "yes":
         c["vehicles"] = _vehicle_passage(o)
@@ -628,7 +643,7 @@ def cmd_extend(s, args):
     briefing.print_board(prot, s)
 
 
-OBJECTIVE_USAGE_ROUTE = "objective route <1-4> <card in rows 2-4> (Combat Patrol) [Normandy M3 MSR 2]"
+OBJECTIVE_USAGE_ROUTE = "objective route <1-4> <card in the rows of the mission's Route Points> (Combat Patrol) [MSR 2]"
 OBJECTIVE_USAGE_CONCENTRATION = "objective concentration <card> <fire asset, e.g. '105mm HE'> [RULE 7.16.5 p.59]"
 OBJECTIVE_USAGE_PHASELINE = "objective phaseline <n> <row>"
 OBJECTIVE_USAGE_FORTIFY = "objective fortify <secured card> foxholes|deepbunker (between attempts) [Naktong M1 p.15]"
@@ -678,7 +693,7 @@ def objective_route(s, objectives, args, prot):
     if (
         not s.get("patrol_mission")
         or num not in (1, 2, 3, 4)
-        or not 2 <= c["row"] <= state.top_row(s)
+        or not campaign.patrol_plan(s)["route_rows"][0] <= c["row"] <= campaign.patrol_plan(s)["route_rows"][1]
         or c.get("outside")
     ):
         raise rules.Violation(OBJECTIVE_USAGE_ROUTE)
@@ -1076,15 +1091,18 @@ def campaign_setup_notes(s):
 def _patrol_setup_errors(s):
     """The mandatory choices of a Combat Patrol [Normandy M3 p.24, MSR 1, MSR 2]."""
     f = []
+    plan = campaign.patrol_plan(s)
     if s.get("light") is None:
         f.append("Patrol visibility: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light> [Normandy M3 p.24, M3-2]")
     objectives = s.get("objectives", {})
-    if not objectives.get("cop"):
+    if plan["cop"] and not objectives.get("cop"):
         f.append("Combat Outpost: objective cop <card in row 2> [p.24]")
     if not objectives.get("primary"):
-        f.append("Primary Objective: objective primary <card in row 4> [p.24]")
+        f.append(f"Primary Objective: objective primary <card in row {plan['primary_row']}> [{plan['source']}]")
     if len(objectives.get("route", {})) < 4:
-        f.append("Route Points: objective route <1-4> <card in rows 2-4> [MSR 2]")
+        f.append(
+            f"Route Points: objective route <1-4> <card in rows {plan['route_rows'][0]}-{plan['route_rows'][1]}> [MSR 2]"
+        )
     if not (s.get("patrol") or {}).get("platoon"):
         f.append("Patrol: patrol start <1|2|3> [--with=..] [MSR 1]")
     return f
@@ -1110,7 +1128,7 @@ def check_campaign_setup(s):
         f.append('CSR 2: setup "Mtr Sec" --mortar=section|teams')
     objectives = s.get("objectives", {})
     for k, t in (("primary", "Primary Objective"), ("secondary", "Secondary Objective"), ("ap", "Attack Position")):
-        if k in objectives and not objectives.get(k):
+        if k in objectives and not objectives.get(k) and not (k == "primary" and s.get("patrol_mission")):
             f.append(f"{t}: objective {({'primary': 'primary', 'secondary': 'secondary'}).get(k, k)} <card>")
     if s.get("patrol_mission"):
         f += _patrol_setup_errors(s)

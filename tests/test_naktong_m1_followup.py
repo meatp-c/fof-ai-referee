@@ -4,7 +4,22 @@ import pytest
 
 from conftest import unit
 
-from fof import briefing, campaign, combat, commands, comms, enemy, events, fire, fire_support, phase, rules, state
+from fof import (
+    briefing,
+    campaign,
+    combat,
+    commands,
+    comms,
+    contact,
+    enemy,
+    events,
+    fire,
+    fire_support,
+    phase,
+    rules,
+    setup,
+    state,
+)
 
 
 @pytest.fixture
@@ -380,3 +395,96 @@ def test_church_tower_holds_one_step(board):
     with pytest.raises(rules.Violation, match="at most 1 steps"):
         commands.set_area(board, board["units"]["1/1"], cid)
     commands.set_area(board, board["units"]["FO"], cid)
+
+
+def test_patrol_plan_moves_the_mlr_and_the_scoring(board):
+    """Naktong M2 p.20: start on row 2, the patrol ends crossing the MLR from row 3 to row 2; p.12: no points per
+    Route Point, 5 for a completed patrol."""
+    board.update(
+        campaign={"attempt": 1, "xp_table": {"cp_route": 0, "cp_success": 5}},
+        patrol_mission=True,
+        patrol_plan={"start_row": 2, "mlr_row": 2, "route_rows": [3, 3], "primary_row": 3},
+        patrol={"platoon": "1", "members": ["1/1"], "route_index": 3, "primary_visited": True},
+        objectives={"primary": "32", "route": {"1": "31", "2": "32", "3": "33", "4": "32"}},
+    )
+    board["units"]["1/1"] = unit("33", platoon="1")
+    prot = []
+    campaign.patrol_move(board, "1/1", "33", "32", prot)  # last Route Point, no points for it
+    assert board["patrol"]["route_index"] == 4 and not board.get("xp")
+    campaign.patrol_move(board, "1/1", "22", "12", prot)  # row 2 to row 1 is not the MLR of this mission
+    assert not board["patrol"].get("success")
+    campaign.patrol_move(board, "1/1", "32", "22", prot)
+    assert board["patrol"]["success"] and sum(x["points"] for x in board["xp"]) == 5
+    assert campaign.patrol_plan({})["mlr_row"] == 1  # default: Normandy M3
+
+
+def test_package_parts_tied_to_a_pc_letter():
+    """Naktong M2 p.23: 'PC A marker: Add one Leader', 'PC B marker: Replace with Artillery'."""
+    pk = {
+        "units": [{"unit": "Squad"}, {"unit": "Leader", "optional_r": "1-2/6", "optional_pc": ["A"]}],
+        "variants": {"Artillery": {"value": -4, "pc": ["B"]}, "Mortar": {"value": -3}},
+    }
+    assert [u["unit"] for u in contact.package_for_pc(pk, "A")["units"]] == ["Squad", "Leader"]
+    assert [u["unit"] for u in contact.package_for_pc(pk, "C")["units"]] == ["Squad"]
+    assert list(contact.package_for_pc(pk, "B")["variants"]) == ["Artillery", "Mortar"]
+    assert list(contact.package_for_pc(pk, "A")["variants"]) == ["Mortar"]
+
+
+def test_printed_edges_are_kept_by_card_number(board):
+    """Cards of one terrain type differ in their edges; once read off, the edges of a card number are reused."""
+    board["terrain_catalog"] = {"Gully/Draw": {"cc": 3, "cover_max": 1, "cover_draw": 3, "edges": "green"}}
+    setup.set_terrain(
+        board, "21", "Gully/Draw", {"--no": "46", "--edges": "top:white,bottom:white,left:green,right:green"}
+    )
+    setup.set_terrain(board, "22", "Gully/Draw", {"--no": "46"})
+    assert board["cards"]["22"]["edges"] == board["cards"]["21"]["edges"] == board["card_edges"]["46"]
+    setup.set_terrain(board, "23", "Gully/Draw", {"--no": "99"})
+    assert board["cards"]["23"]["edges"] == "green"  # unknown number: the type's catalog value
+
+
+def test_patrol_units_include_teams_from_hits():
+    """L623: Lost in the Dark picks among the patrol units including teams created by hit effects [BGG 3278500]."""
+    from fof import campaign
+
+    s = {
+        "patrol": {"members": ["1/1", "3/1"]},
+        "units": {"1/1": {}, "FT 46": {"origin": "3/1"}, "P 46": {"origin": "3/1"}, "1/2": {}},
+    }
+    assert campaign.patrol_units(s) == ["1/1", "FT 46", "P 46"]
+
+
+def test_reconstituted_unit_outside_the_patrol_is_stationary(tmp_path, monkeypatch):
+    """L624: a squad rebuilt in the reattempt sequence between patrols belongs to the rear rows like its platoon."""
+    import contextlib
+
+    from fof import campaign, state
+
+    s = {
+        "patrol_mission": True,
+        "patrol": {"platoon": "2", "members": ["1/2"]},
+        "phase": "3.1",
+        "turn": 1,
+        "reattempt_open": True,
+        "units": {
+            "FT 46": {"side": "US", "card": "46", "type": "Fire Team", "steps": 1, "experience": "Green", "status": []},
+            "AT 35": {
+                "side": "US",
+                "card": "35",
+                "type": "Assault Team",
+                "steps": 1,
+                "experience": "Line",
+                "status": [],
+            },
+        },
+        "setup_units": {"3/1": {"side": "US", "type": "Squad", "steps": 3, "platoon": "1", "experience": "Line"}},
+        "removed_from_play": ["3/1"],
+        "commands": {},
+        "cards": {},
+    }
+    monkeypatch.setattr(campaign, "_between_missions", lambda s_: True)
+    monkeypatch.setattr(state, "save_state", lambda *a, **k: None)
+    with contextlib.suppress(
+        KeyError
+    ):  # the bare state lacks what the closing briefing needs; the unit is built before
+        campaign.cmd_reconstitute(s, ["3/1", "--from=FT 46,AT 35"])
+    assert s["units"]["3/1"].get("stationary") is True

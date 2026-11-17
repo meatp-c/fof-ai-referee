@@ -146,8 +146,38 @@ def patrol(s):
     return s.get("patrol") or {}
 
 
+# Combat Patrol layout; a mission overrides single values with its setup key 'patrol_plan'. Defaults: Normandy M3 p.24
+# (patrol starts on row 1 and returns across the MLR from row 2 to row 1, Combat Outpost on row 2, visibility drawn).
+PATROL_PLAN = {
+    "start_row": 1,  # the patrol sets up here
+    "rear_rows": [1],  # units not on patrol
+    "mlr_row": 1,  # the MLR lies between this row and the next; crossing back onto it ends the patrol
+    "route_rows": [2, 4],  # Route Points: lowest and highest row
+    "primary_row": 4,
+    "cop": True,  # the mission has a Combat Outpost
+    "light": None,  # fixed light value of every patrol; None = drawn per patrol (R#4: 1=+2 ... 4=+5)
+    "xp_card_rows": [],  # rows whose cleared cards score xp_table 'cp_card' at the end of a patrol
+    "source": "Normandy M3 p.24",
+}
+
+
+def _route_xp(s):
+    """Points per Route Point: 1 unless the campaign's table says otherwise (Naktong p.12 awards none)."""
+    return s.get("campaign", {}).get("xp_table", {}).get("cp_route", 1)
+
+
+def patrol_plan(s):
+    return {**PATROL_PLAN, **(s.get("patrol_plan") or {})}
+
+
+def patrol_units(s):
+    """Units of the patrol on the board, teams split off from them included (Litter and Paralyzed Teams too) [BGG 3735044, 3278500]."""
+    members = patrol(s).get("members", [])
+    return [n for n, u in s["units"].items() if n in members or u.get("origin") in members]
+
+
 def patrol_move(s, n, from_, target_card, prot):
-    """[MSR 2] Route Points in order, pass the Primary, return across the MLR from row 2 to row 1."""
+    """[MSR 2] Route Points in order, pass the Primary, return across the MLR (patrol_plan: mlr_row)."""
     p = patrol(s)
     if not p or p.get("success"):
         return
@@ -163,9 +193,7 @@ def patrol_move(s, n, from_, target_card, prot):
     if i < 4 and route[i] == target_card:
         p["route_index"] = i + 1
         prot.append(f"Route Point {i + 1} on {target_card} reached: remove marker [MSR 2]")
-        book_xp(
-            s, xp_table(s, "cp_route") or 1, f"Route Point {i + 1} ({target_card}), patrol Platoon {p['platoon']}", prot
-        )
+        book_xp(s, _route_xp(s), f"Route Point {i + 1} ({target_card}), patrol Platoon {p['platoon']}", prot)
         # [BGG Shonai_Dweller 3552585, 3520262] if a patrol unit already stands on the next Route Point, it is taken at once as well
         while p["route_index"] < 4:
             j = p["route_index"]
@@ -178,7 +206,7 @@ def patrol_move(s, n, from_, target_card, prot):
             )
             book_xp(
                 s,
-                xp_table(s, "cp_route") or 1,
+                _route_xp(s),
                 f"Route Point {j + 1} ({route[j]}), patrol Platoon {p['platoon']}",
                 prot,
             )
@@ -202,11 +230,14 @@ def patrol_move(s, n, from_, target_card, prot):
     if (
         p.get("route_index", 0) == 4
         and p.get("primary_visited")
-        and state.card(s, from_)["row"] == 2
-        and state.card(s, target_card)["row"] == 1
+        and state.card(s, from_)["row"] == patrol_plan(s)["mlr_row"] + 1
+        and state.card(s, target_card)["row"] == patrol_plan(s)["mlr_row"]
     ):
+        plan = patrol_plan(s)
         p["success"] = True
-        prot.append(f"Patrol successful: {n} crosses the MLR from row 2 to row 1 [Normandy M3 p.24]")
+        prot.append(
+            f"Patrol successful: {n} crosses the MLR from row {plan['mlr_row'] + 1} to row {plan['mlr_row']} [{plan['source']}]"
+        )
         book_xp(s, xp_table(s, "cp_success") or 5, f"Patrol Platoon {p['platoon']} successful", prot)
 
 
@@ -244,6 +275,13 @@ def patrol_end(s, prot):
             prot,
         )
         assigned.append(pk)
+    card_xp = s["campaign"].get("xp_table", {}).get("cp_card", 0)
+    for k in sorted(s["cards"]):  # e.g. Naktong p.12: 'Clear other cards on Rows 3 and 4: 1 per card'
+        c = s["cards"][k]
+        if card_xp and c["row"] in patrol_plan(s)["xp_card_rows"] and k not in assigned and not c.get("outside"):
+            if is_cleared(s, k):
+                book_xp(s, card_xp, f"Card {k} cleared (patrol Platoon {p.get('platoon')})", prot)
+                assigned.append(k)
     s["mission_end"] = True
     done_platoons = p.setdefault("completed", [])
     if p.get("platoon") and p["platoon"] not in done_platoons:
@@ -322,10 +360,15 @@ def _print_patrol(s, p):
 
 def _patrol_setup_notes(s, plt, members, prot):
     """What is to be set up before turn 1 of a patrol [MSR 1, MSR 4]."""
-    row1 = sorted(k for k, c in s["cards"].items() if c["row"] == 1 and not c.get("staging") and not c.get("outside"))
+    plan = patrol_plan(s)
+    start = sorted(
+        k
+        for k, c in s["cards"].items()
+        if c["row"] == plan["start_row"] and not c.get("staging") and not c.get("outside")
+    )
     prot.append(
-        f"Patrol Platoon {plt}: {', '.join(members)}; setup on row 1 (setup <unit> <{row1[0]}-{row1[-1]}>)"
-    )  # row 1 from the map (M5 has six columns)
+        f"Patrol Platoon {plt}: {', '.join(members)}; setup on row {plan['start_row']} (setup <unit> <{start[0]}-{start[-1]}>)"
+    )
     without = [
         m
         for m in members
@@ -339,10 +382,15 @@ def _patrol_setup_notes(s, plt, members, prot):
             f"setup <unit> --platoon={plt} [RULE 2.3.3 p.10, K25]"
         )
     prot.append(
-        "Other units: into the fortifications of row 1 or into the Combat Outpost (at most one platoon); they fire and accept orders but do not move; units not set up are missing from this patrol [MSR 1, MSR 4]"
+        f"Other units: on row {', '.join(str(r) for r in plan['rear_rows'])}"
+        + (" (into its fortifications) or into the Combat Outpost (at most one platoon)" if plan["cop"] else "")
+        + "; they fire and accept orders but do not move; units not set up are missing from this patrol [MSR 1]"
     )
+    lo, hi = plan["route_rows"]
     prot.append(
-        "Before turn 1: objective primary <row 4>, objective route 1-4 <rows 2-4>, Artillery Concentration (fof.py note), visibility <light> (R4: 1=+2 ... 4=+5); GI draw halved [3.3.2d]"
+        f"Before turn 1: objective primary <row {plan['primary_row']}>, objective route 1-4 <rows {lo}-{hi}>, objective concentration <card> <agency>"
+        + ("" if plan["light"] is not None else ", visibility <light> (R4: 1=+2 ... 4=+5)")
+        + "; GI draw halved [3.3.2d]"
     )
 
 
@@ -397,10 +445,18 @@ def next_patrol_reset(s, prot):
     s = state.load_state()
     s.pop("patrol_change", None)
     patrol_reserve_back(s, prot)
-    s["light"] = None
+    plan = patrol_plan(s)
+    s["light"] = plan["light"]
     s.pop("concentrations_placed", None)
     prot.append(
-        "New visibility for this patrol: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light>; place units with setup on row 1 or in the COP, then fof.py reattempt done [Normandy M3 p.24, MSR 1]"
+        (
+            ""
+            if plan["light"] is not None
+            else "New visibility for this patrol: draw R#4 (1=+2 ... 4=+5), fof.py visibility <light>; "
+        )
+        + f"place units with setup on row {plan['start_row']} (patrol) or row {', '.join(str(r) for r in plan['rear_rows'])}"
+        + (" or in the COP" if plan["cop"] else "")
+        + f", then fof.py reattempt done [{plan['source']}, MSR 1]"
     )
     return s
 
@@ -661,7 +717,10 @@ def reattempt_done(s):
         and not secured_for_reattempt(s, e["card"])
         and not (
             s.get("patrol_mission")
-            and (state.card(s, e["card"])["row"] == 1 or e["card"] == s.get("objectives", {}).get("cop"))
+            and (
+                state.card(s, e["card"])["row"] in (patrol_plan(s)["start_row"], *patrol_plan(s)["rear_rows"])
+                or e["card"] == s.get("objectives", {}).get("cop")
+            )
         )
     ]
     if wrong:
@@ -1000,6 +1059,10 @@ def cmd_reconstitute(s, args):
         if n in s.get("removed_from_play", []):
             s["removed_from_play"].remove(n)
         s["units"][n] = e
+        if s.get("patrol_mission") and n not in patrol(s).get("members", []):
+            e["stationary"] = True  # rebuilt outside the current patrol: rear rows only, no movement [MSR 1]
+        else:
+            e.pop("stationary", None)
         if state.is_hq(e):
             s["commands"].setdefault(n, {"available": 0, "saved": 0, "activated": False, "done": False})
         prot.append(
